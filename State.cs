@@ -139,26 +139,15 @@ namespace Emu86
             cpu.ip += (ushort)data.Count();
             return (true, () => data, cpu, String.Empty);
         };
-        static public State<(int type, byte db, ushort dw, uint dd)> GetMemoryDataIp_(int type)
-        {
-            switch (type)
-            {
-                case 0:
-                    return
-                    from data in GetMemoryDataIp8
-                    select (type, data, default(ushort), default(uint));
-                case 1:
-                    return
-                    from data in GetMemoryDataIp16
-                    select (type, default(byte), data, default(uint));
-                case 2:
-                    return
-                    from data in GetMemoryDataIp32
-                    select (type, default(byte), default(ushort), data);
-                default:
-                    throw new Exception();
-            }
-        }
+
+        static public State<(int type, byte db, ushort dw, uint dd)> GetMemoryDataIp_(int type) =>
+            from data in Choice(
+                type,
+                GetMemoryDataIp8.Select(db => (db: db, dw: default(ushort), dd: default(uint))),
+                GetMemoryDataIp16.Select(dw => (db: default(byte), dw: dw, dd: default(uint))),
+                GetMemoryDataIp32.Select(dd => (db: default(byte), dw: default(ushort), dd: dd))
+            )
+            select (type, data.db, data.dw, data.dd);
 
         static public State<Unit> SetCrReg(int reg, uint data) =>
             from _ in SetCpu(
@@ -312,6 +301,8 @@ namespace Emu86
             )
             select Unit.unit;
 
+        static public State<byte> GetRegData8(int reg) => (env, cpu) => (true, () => EmuEnvironment.GetRegData8(cpu, reg), cpu, "GetRegData8");
+        static public State<ushort> GetRegData16(int reg) => (env, cpu) => (true, () => EmuEnvironment.GetRegData16(cpu, reg), cpu, "GetRegData16");
         static public State<uint> GetRegData32(int reg) => (env, cpu) => (true, () => EmuEnvironment.GetRegData32(cpu, reg), cpu, "GetRegData32");
 
         static public State<Unit> SetRegData8(int reg, byte db) => (env, cpu) => (true, () => Unit.unit, EmuEnvironment.SetRegData8(cpu, reg, db), "SetRegData8");
@@ -346,24 +337,14 @@ namespace Emu86
             return (true, () => Unit.unit, cpu, "SetRegData");
         };
 
-
-        static public State<(int type, byte db, ushort dw, uint dd)> GetRegData(int reg, int type) => (env, cpu) =>
-        {
-            switch (type)
-            {
-                case 0:
-                    var db = EmuEnvironment.GetRegData8(cpu, reg);
-                    return (true, () => (type, db, default(ushort), default(uint)), cpu, "GetRegData");
-                case 1:
-                    var dw = EmuEnvironment.GetRegData16(cpu, reg);
-                    return (true, () => (type, default(byte), dw, default(uint)), cpu, "GetRegData");
-                case 2:
-                    var dd = EmuEnvironment.GetRegData32(cpu, reg);
-                    return (true, () => (type, default(byte), default(ushort), dd), cpu, "GetRegData");
-                default:
-                    throw new Exception();
-            }
-        };
+        static public State<(int type, byte db, ushort dw, uint dd)> GetRegData(int reg, int type) =>
+            from data in Choice(
+                type,
+                GetRegData8(reg).Select(db => (db: db, dw: default(ushort), dd: default(uint))),
+                GetRegData16(reg).Select(dw => (db: default(byte), dw: dw, dd: default(uint))),
+                GetRegData32(reg).Select(dd => (db: default(byte), dw: default(ushort), dd: dd))
+            )
+            select (type, data.db, data.dw, data.dd);
 
         static public State<IEnumerable<byte>> Opecode(params byte[] bs) =>
                         from datas in GetMemoryDataIp(bs.Length)
@@ -371,15 +352,15 @@ namespace Emu86
                         select datas;
 
         static public State<(Boolean cs, Boolean es, Boolean fs, Boolean gs, Boolean operand_size, Boolean address_size)> Prefixes =
-                            from data in Contains(0x2e, 0x26, 0x64, 0x64, 0x66, 0x67).Many0()
-                            select (
-                    data.Contains((byte)0x2e),
-                    data.Contains((byte)0x26),
-                    data.Contains((byte)0x64),
-                    data.Contains((byte)0x65),
-                    data.Contains((byte)0x66),
-                    data.Contains((byte)0x67)
-                    );
+            from data in Contains(0x2e, 0x26, 0x64, 0x64, 0x66, 0x67).Many0()
+            select (
+                data.Contains((byte)0x2e),
+                data.Contains((byte)0x26),
+                data.Contains((byte)0x64),
+                data.Contains((byte)0x65),
+                data.Contains((byte)0x66),
+                data.Contains((byte)0x67)
+            );
 
         static public
            State<(int type, byte db, ushort dw, uint dd)> Calc(
@@ -390,201 +371,121 @@ namespace Emu86
             (var type2, var db2, var dw2, var dd2) = data2;
             return Calc(data1, db2, dw2, dd2, kind);
         }
-        static public State<(int type, byte db, ushort dw, uint dd)> Calc((int type, byte db, ushort dw, uint dd) data1, byte db2, ushort dw2, uint dd2, int kind) => (env, cpu) =>
+
+
+        static public State<Unit> update_eflags8(byte v) => (env, cpu) =>
         {
-            (var type, var db1, var dw1, var dd1) = data1;
-            switch (kind)
-            {
-                case 0:// ADD
-                    {
-                        Write("ADD");
-                        switch (type)
-                        {
-                            case 0:
-                                cpu = cpu.update_eflags_add32((UInt32)db1, (UInt32)db2);
-                                db1 = (byte)((UInt32)db1 + (UInt32)db2);
-                                break;
-                            case 1:
-                                cpu = cpu.update_eflags_add32((UInt32)dw1, (UInt32)dw2);
-                                dw1 = (ushort)((UInt32)dw1 + (UInt32)dw2);
-                                break;
-                            case 2:
-                                cpu = cpu.update_eflags_add32(dd1, dd2);
-                                dd1 = dd1 - dd2;
-                                break;
-                            default:
-                                throw new Exception();
-                        }
-                    }
-                    break;
-                case 1:// OR
-                    {
-                        Write("OR");
-                        switch (type)
-                        {
-                            case 0:
-                                db1 = (byte)(db1 | db2);
-                                break;
-                            case 1:
-                                dw1 = (ushort)(dw1 | dw2);
-                                break;
-                            case 2:
-                                dd1 = dd1 | dd2;
-                                break;
-                            default:
-                                throw new Exception();
-                        }
-                    }
-                    break;
-                case 2:// ADC
-                    {
-                        Write("ADC");
-                        switch (type)
-                        {
-                            case 0:
-                                {
-                                    var data2 = db2 + (UInt32)(cpu.cf ? 1 : 0);
-                                    cpu = cpu.update_eflags_add32((UInt32)db1, data2);
-                                    db1 = (byte)((UInt32)db1 - data2);
-                                }
-                                break;
-                            case 1:
-                                {
-                                    var data2 = dw2 + (UInt32)(cpu.cf ? 1 : 0);
-                                    cpu = cpu.update_eflags_add32((UInt32)dw1, data2);
-                                    dw1 = (ushort)((UInt32)dw1 - data2);
-                                }
-                                break;
-                            case 2:
-                                {
-                                    var data2 = dd2 + (UInt32)(cpu.cf ? 1 : 0);
-                                    cpu = cpu.update_eflags_add32(dd1, data2);
-                                    dd1 = dd1 - data2;
-                                }
-                                break;
-                            default:
-                                throw new Exception();
-                        }
-                    }
-                    break;
-                case 3:// SBB
-                    {
-                        Write("SBB");
-                        switch (type)
-                        {
-                            case 0:
-                                {
-                                    var data2 = db2 + (UInt32)(cpu.cf ? 1 : 0);
-                                    cpu = cpu.update_eflags_sub32((UInt32)db1, data2);
-                                    db1 = (byte)((UInt32)db1 - data2);
-                                }
-                                break;
-                            case 1:
-                                {
-                                    var data2 = dw2 + (UInt32)(cpu.cf ? 1 : 0);
-                                    cpu = cpu.update_eflags_sub32((UInt32)dw1, data2);
-                                    dw1 = (ushort)((UInt32)dw1 - data2);
-                                }
-                                break;
-                            case 2:
-                                {
-                                    var data2 = dd2 + (UInt32)(cpu.cf ? 1 : 0);
-                                    cpu = cpu.update_eflags_sub32(dd1, data2);
-                                    dd1 = dd1 - data2;
-                                }
-                                break;
-                            default:
-                                throw new Exception();
-                        }
-                    }
-                    break;
-                case 4:// AND
-                    {
-                        Write("AND");
-                        switch (type)
-                        {
-                            case 0:
-                                db1 = (byte)(db1 & db2);
-                                cpu = cpu.update_eflags8(db1);
-                                break;
-                            case 1:
-                                dw1 = (ushort)(dw1 & dw2);
-                                cpu = cpu.update_eflags16(dw1);
-                                break;
-                            case 2:
-                                dd1 = dd1 & dd2;
-                                cpu = cpu.update_eflags32(dd1);
-                                break;
-                            default:
-                                throw new Exception();
-                        }
-                    }
-                    break;
-                case 5:// SUB
-                    {
-                        Write("SUB");
-                        switch (type)
-                        {
-                            case 0:
-                                cpu = cpu.update_eflags_sub32((UInt32)db1, (UInt32)db2);
-                                db1 = (byte)((UInt32)db1 - (UInt32)db2);
-                                break;
-                            case 1:
-                                cpu = cpu.update_eflags_sub32((UInt32)dw1, (UInt32)dw2);
-                                dw1 = (ushort)((UInt32)dw1 - (UInt32)dw2);
-                                break;
-                            case 2:
-                                cpu = cpu.update_eflags_sub32(dd1, dd2);
-                                dd1 = dd1 - dd2;
-                                break;
-                            default:
-                                throw new Exception();
-                        }
-                    }
-                    break;
-                case 6:// XOR
-                    {
-                        Write("XOR");
-                        switch (type)
-                        {
-                            case 0:
-                                db1 = (byte)(db1 ^ db2);
-                                break;
-                            case 1:
-                                dw1 = (ushort)(dw1 ^ dw2);
-                                break;
-                            case 2:
-                                dd1 = dd1 ^ dd2;
-                                break;
-                            default:
-                                throw new Exception();
-                        }
-                    }
-                    break;
-                case 7:// CMP
-                    {
-                        Write("CMP");
-                        switch (type)
-                        {
-                            case 0:
-                                cpu = cpu.update_eflags_sub32(db1, db2);
-                                break;
-                            case 1:
-                                cpu = cpu.update_eflags_sub32(dw1, dw2);
-                                break;
-                            case 2:
-                                cpu = cpu.update_eflags_sub32(dd1, dd2);
-                                break;
-                            default:
-                                throw new Exception();
-                        }
-                    }
-                    break;
-                default:
-                    throw new NotImplementedException();
-            }
-            return (true, () => (type, db1, dw1, dd1), cpu, String.Empty);
+            cpu = cpu.update_eflags8(v);
+            return (true, () => Unit.unit, cpu, "update_eflags8");
         };
+        static public State<Unit> update_eflags16(ushort v) => (env, cpu) =>
+        {
+            cpu = cpu.update_eflags16(v);
+            return (true, () => Unit.unit, cpu, "update_eflags8");
+        };
+        static public State<Unit> update_eflags32(uint v) => (env, cpu) =>
+        {
+            cpu = cpu.update_eflags32(v);
+            return (true, () => Unit.unit, cpu, "update_eflags8");
+        };
+        static public State<Unit> update_eflags_sub32(UInt32 v1, UInt32 v2) => (env, cpu) =>
+        {
+            cpu = cpu.update_eflags_sub32(v1, v2);
+            return (true, () => Unit.unit, cpu, "update_eflags_sub32");
+        };
+        static public State<Unit> update_eflags_add32(UInt32 v1, UInt32 v2) => (env, cpu) =>
+        {
+            cpu = cpu.update_eflags_add32(v1, v2);
+            return (true, () => Unit.unit, cpu, "update_eflags_add32");
+        };
+
+        static public State<(int type, byte db, ushort dw, uint dd)> Calc((int type, byte db, ushort dw, uint dd) data1, byte db2, ushort dw2, uint dd2, int kind) =>
+            from ret1 in Choice(
+                kind,
+                Choice( // ADD
+                    data1.type,
+                    from _ in update_eflags_add32((UInt32)data1.db, (UInt32)db2)
+                    select (db: (byte)((UInt32)data1.db + (UInt32)db2), dw: default(ushort), dd: default(uint)),
+                    from _ in update_eflags_add32((UInt32)data1.dw, (UInt32)dw2)
+                    select (db: default(byte), dw: (ushort)((UInt32)data1.dw + (UInt32)dw2), dd: default(uint)),
+                    from _ in update_eflags_add32(data1.dd, dd2)
+                    select (db: default(byte), dw: default(ushort), dd: data1.dd + dd2)
+                ),
+                Choice( // OR
+                    data1.type,
+                    (db: (byte)(data1.db | db2), dw: default(ushort), dd: default(uint)).ToState(),
+                    (db: default(byte), dw: (ushort)(data1.dw | dw2), dd: default(uint)).ToState(),
+                    (db: default(byte), dw: default(ushort), dd: (data1.dd | dd2)).ToState()
+                ),
+                Choice( // ADC
+                    data1.type,
+                    from cpu in GetCpu
+                    let _data2 = (db2 + (UInt32)(cpu.cf ? 1 : 0))
+                    from _ in update_eflags_add32((UInt32)data1.db, _data2)
+                    select (db: (byte)((UInt32)data1.db + _data2), dw: default(ushort), dd: default(uint)),
+                    from cpu in GetCpu
+                    let _data2 = (dw2 + (UInt32)(cpu.cf ? 1 : 0))
+                    from _ in update_eflags_add32((UInt32)data1.dw, _data2)
+                    select (db: default(byte), dw: (ushort)((UInt32)data1.dw + _data2), dd: default(uint)),
+                    from cpu in GetCpu
+                    let _data2 = (dd2 + (UInt32)(cpu.cf ? 1 : 0))
+                    from _ in update_eflags_add32((UInt32)data1.dd, _data2)
+                    select (db: (byte)((UInt32)data1.db + _data2), dw: default(ushort), dd: default(uint))
+                ),
+                Choice( // SBB
+                    data1.type,
+                    from cpu in GetCpu
+                    let _data2 = (db2 + (UInt32)(cpu.cf ? 1 : 0))
+                    from _ in update_eflags_sub32((UInt32)data1.db, _data2)
+                    select (db: (byte)((UInt32)data1.db - _data2), dw: default(ushort), dd: default(uint)),
+                    from cpu in GetCpu
+                    let _data2 = (dw2 + (UInt32)(cpu.cf ? 1 : 0))
+                    from _ in update_eflags_sub32((UInt32)data1.dw, _data2)
+                    select (db: default(byte), dw: (ushort)((UInt32)data1.dw - _data2), dd: default(uint)),
+                    from cpu in GetCpu
+                    let _data2 = (dd2 + (UInt32)(cpu.cf ? 1 : 0))
+                    from _ in update_eflags_sub32((UInt32)data1.dd, _data2)
+                    select (db: default(byte), dw: default(ushort), dd: (data1.db - _data2))
+                ),
+                Choice( // AND
+                    data1.type,
+                    from _db in ((byte)(data1.db & db2)).ToState()
+                    from _ in update_eflags8(_db)
+                    select (db: _db, dw: default(ushort), dd: default(uint)),
+                    from _dw in ((ushort)(data1.dw & dw2)).ToState()
+                    from _ in update_eflags16(_dw)
+                    select (db: default(byte), dw: _dw, dd: default(uint)),
+                    from _dd in (data1.dd & dd2).ToState()
+                    from _ in update_eflags32(_dd)
+                    select (db: default(byte), dw: default(ushort), dd: _dd)
+                ),
+                Choice( // SUB
+                    data1.type,
+                    from _ in update_eflags_sub32((UInt32)data1.db, db2)
+                    select (db: (byte)((UInt32)data1.db - (UInt32)db2), dw: default(ushort), dd: default(uint)),
+                    from _ in update_eflags_sub32((UInt32)data1.dw, dw2)
+                    select (db: default(byte), dw: (ushort)((UInt32)data1.dw - (UInt32)dw2), dd: default(uint)),
+                    from _ in update_eflags_sub32((UInt32)data1.dd, dd2)
+                    select (db: default(byte), dw: default(ushort), dd: (data1.dd - dd2))
+                ),
+                Choice( // XOR
+                    data1.type,
+                    (db: (byte)(data1.db ^ db2), dw: default(ushort), dd: default(uint)).ToState(),
+                    (db: default(byte), dw: (ushort)(data1.dw ^ dw2), dd: default(uint)).ToState(),
+                    (db: default(byte), dw: default(ushort), dd: (data1.dd ^ dd2)).ToState()
+                ),
+                Choice( // CMP
+                    data1.type,
+                    from _ in update_eflags_sub32((UInt32)data1.db, db2)
+                    select (db: data1.db , dw: default(ushort), dd: default(uint)),
+                    from _ in update_eflags_sub32((UInt32)data1.dw, dw2)
+                    select (db: default(byte), dw: data1.dw , dd: default(uint)),
+                    from _ in update_eflags_sub32((UInt32)data1.dd, dd2)
+                    select (db: default(byte), dw: default(ushort), dd: data1.dd )
+                )
+            )
+            select (data1.type, ret1.db, ret1.dw, ret1.dd);
+
         static public State<bool> Jcc(int type) => (env, cpu) =>
         {
             var array = new Func<bool>[]
