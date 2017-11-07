@@ -52,7 +52,7 @@ namespace Emu86
 
         public void SetMemoryData32(uint addr, uint data) => SetMemoryDatas(addr, data.ToByteArray());
 
-        private (bool isMem, uint addr, int inc) GetMemoryAddr16_(CPU cpu, int mod, int rm, ushort? segment, IEnumerable<byte> disp)
+        private (bool isMem, uint addr, int inc) GetMemOrRegAddr16_(CPU cpu, int mod, int rm, ushort? segment, IEnumerable<byte> disp)
         {
             var segment_base =
                 segment == default(ushort?) ?
@@ -116,7 +116,7 @@ namespace Emu86
                     throw new Exception();
             }
         }
-        private (bool isMem, uint addr, int inc) GetMemoryAddr32_(CPU cpu, int mod, int rm, ushort? segment, IEnumerable<byte> disp)
+        private (bool isMem, uint addr, int inc) GetMemOrRegAddr32_(CPU cpu, int mod, int rm, ushort? segment, IEnumerable<byte> disp)
         {
             var segment_base =
                 segment == default(ushort?) ?
@@ -275,15 +275,15 @@ namespace Emu86
             }
         }
 
-        public (bool isMem, uint addr, int inc) GetMemoryAddr(CPU cpu, int mod, int rm, ushort? segment, IEnumerable<byte> disp, bool address_size)
+        public (bool isMem, uint addr, int inc) GetMemOrRegAddr(CPU cpu, int mod, int rm, ushort? segment, IEnumerable<byte> disp, bool address_size)
             => address_size ?
-            GetMemoryAddr32_(cpu, mod, rm, segment, disp) :
-            GetMemoryAddr16_(cpu, mod, rm, segment, disp);
+            GetMemOrRegAddr32_(cpu, mod, rm, segment, disp) :
+            GetMemOrRegAddr16_(cpu, mod, rm, segment, disp);
 
         public byte GetMemOrRegData8_(bool isMem, uint addr, CPU cpu) => isMem ? GetMemoryData8(addr) : GetRegData8(cpu, (int)addr);
         public (byte, int) GetMemOrRegData8(CPU cpu, int mod, int rm, ushort? segment, IEnumerable<byte> disp, bool address_size)
         {
-            (var isMem, var addr, var inc) = GetMemoryAddr(cpu, mod, rm, segment, disp, address_size);
+            (var isMem, var addr, var inc) = GetMemOrRegAddr(cpu, mod, rm, segment, disp, address_size);
             return (GetMemOrRegData8_(isMem, addr, cpu), inc);
         }
         public CPU SetMemOrRegData8_(bool isMem, uint addr, CPU cpu, byte data)
@@ -300,7 +300,7 @@ namespace Emu86
         }
         public (CPU, int) SetMemOrRegData8(CPU cpu, int mod, int rm, ushort? segment, IEnumerable<byte> disp, byte data, bool address_size)
         {
-            (var isMem, var addr, var inc) = GetMemoryAddr(cpu, mod, rm, segment, disp, address_size);
+            (var isMem, var addr, var inc) = GetMemOrRegAddr(cpu, mod, rm, segment, disp, address_size);
             return (SetMemOrRegData8_(isMem, addr, cpu, data), inc);
         }
 
@@ -308,7 +308,7 @@ namespace Emu86
 
         public (ushort, int) GetMemOrRegData16(CPU cpu, int mod, int rm, ushort? segment, IEnumerable<byte> disp, bool address_size)
         {
-            (var isMem, var addr, var inc) = GetMemoryAddr(cpu, mod, rm, segment, disp, address_size);
+            (var isMem, var addr, var inc) = GetMemOrRegAddr(cpu, mod, rm, segment, disp, address_size);
             return (GetMemOrRegData16_(isMem, addr, cpu), inc);
         }
         public CPU SetMemOrRegData16_(bool isMem, uint addr, CPU cpu, ushort data)
@@ -325,13 +325,13 @@ namespace Emu86
         }
         public (CPU, int) SetMemOrRegData16(CPU cpu, int mod, int rm, ushort? segment, IEnumerable<byte> disp, ushort data, bool address_size)
         {
-            (var isMem, var addr, var inc) = GetMemoryAddr(cpu, mod, rm, segment, disp, address_size);
+            (var isMem, var addr, var inc) = GetMemOrRegAddr(cpu, mod, rm, segment, disp, address_size);
             return (SetMemOrRegData16_(isMem, addr, cpu, data), inc);
         }
         public uint GetMemOrRegData32_(bool isMem, uint addr, CPU cpu) => isMem ? GetMemoryData32(addr) : GetRegData32(cpu, (int)addr);
         public (uint, int) GetMemOrRegData32(CPU cpu, int mod, int rm, ushort? segment, IEnumerable<byte> disp, bool address_size)
         {
-            (var isMem, var addr, var inc) = GetMemoryAddr(cpu, mod, rm, segment, disp, address_size);
+            (var isMem, var addr, var inc) = GetMemOrRegAddr(cpu, mod, rm, segment, disp, address_size);
             return (GetMemOrRegData32_(isMem, addr, cpu), inc);
         }
         public CPU SetMemOrRegData32_(bool isMem, uint addr, CPU cpu, uint data)
@@ -348,7 +348,7 @@ namespace Emu86
         }
         public (CPU, int) SetMemoryData32(CPU cpu, int mod, int rm, ushort? segment, IEnumerable<byte> disp, uint data, bool address_size)
         {
-            (var isMem, var addr, var inc) = GetMemoryAddr(cpu, mod, rm, segment, disp, address_size);
+            (var isMem, var addr, var inc) = GetMemOrRegAddr(cpu, mod, rm, segment, disp, address_size);
             return (SetMemOrRegData32_(isMem, addr, cpu, data), inc);
         }
 

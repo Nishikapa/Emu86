@@ -25,11 +25,11 @@ namespace Emu86
                             from prefixes in Prefixes
                             from opecode in Opecode(0x83)
                             from _ in SetLog("Group1_83")
-                            from d1 in ModRegRm
+                            from d1 in ModRegRm()
                             from d2 in GetMemOrRegAddr(d1.mod, d1.rm, prefixes)
                             from d3 in GetMemoryDataIp8
                             from d4 in GetMemOrRegData(d2, prefixes, true)
-                            from d5 in Calc(d4, d3, (ushort)(sbyte)d3, (uint)(sbyte)d3, d1.reg)
+                            from d5 in Calc(d4.type, d4.db, d4.dw, d4.dd, d3, (ushort)(sbyte)d3, (uint)(sbyte)d3, d1.reg)
                             from d6 in SetMemOrRegData(d2, d5)
                             select d6;
 
@@ -37,7 +37,7 @@ namespace Emu86
                             from prefixes in Prefixes
                             from opecode in Opecode(0x8E)
                             from _1 in SetLog("Mov_8E")
-                            from m in ModRegRm
+                            from m in ModRegRm()
                             from data in GetMemOrRegData(m.mod, m.rm, prefixes, true)
                             from _2 in SetSReg3(m.reg, data.data)
                             select Unit.unit;
@@ -46,7 +46,7 @@ namespace Emu86
                             from prefixes in Prefixes
                             from opecode in Opecode(0x0F, 0x20)
                             from _1 in SetLog("Mov_0F20")
-                            from m in ModRegRm
+                            from m in ModRegRm()
                             from _2 in SetResult(3 == m.mod)
                             from data in GetCrReg(m.reg)
                             from _3 in SetRegData32(m.rm, data)
@@ -56,7 +56,7 @@ namespace Emu86
                             from prefixes in Prefixes
                             from opecode in Opecode(0x0F, 0x22)
                             from _1 in SetLog("Mov_0F22")
-                            from m in ModRegRm
+                            from m in ModRegRm()
                             from _2 in SetResult(3 == m.mod)
                             from data in GetRegData32(m.rm)
                             from _3 in SetCrReg(m.reg, data)
@@ -87,7 +87,7 @@ namespace Emu86
                             from opecode in Contains(0x88, 0x89)
                             from _1 in SetLog("Mov_88_89")
                             let w = 0 != (opecode & 0x01)
-                            from m in ModRegRm
+                            from m in ModRegRm()
                             from data in GetMemOrRegData(m.mod, m.rm, prefixes, w)
                             from _2 in SetRegData(m.reg, data.data)
                             select Unit.unit;
@@ -108,7 +108,7 @@ namespace Emu86
                             let w = 0 != (opecode & 1)
                             let d = 0 != (opecode & 2)
                             let kind = (opecode >> 3) & 0x7
-                            from m in ModRegRm
+                            from m in ModRegRm()
                             from rmData in GetMemOrRegData(m.mod, m.rm, prefixes, w)
                             from regData in GetRegData(m.reg, rmData.data.type)
                             let d1 = d ? regData : rmData.data
@@ -156,15 +156,15 @@ namespace Emu86
 
         static State<Unit> Lgdt(int mod, int rm, (Boolean cs, Boolean es, Boolean fs, Boolean gs, Boolean operand_size, Boolean address_size) prefixes) =>
                             from addr in GetMemOrRegAddr(mod, rm, prefixes)
-                            from dw in GetMemoryData16(addr)
-                            from dd in GetMemoryData16((addr.isMem, addr.addr + 2))
+                            from dw in GetMemOrRegData16(addr)
+                            from dd in GetMemOrRegData16((addr.isMem, addr.addr + 2))
                             from _ in SetCpu(cpu => { cpu.idt_base = dd; cpu.idt_limit = dw; return cpu; })
                             select Unit.unit;
 
         static State<Unit> Lidt(int mod, int rm, (Boolean cs, Boolean es, Boolean fs, Boolean gs, Boolean operand_size, Boolean address_size) prefixes) =>
                             from addr in GetMemOrRegAddr(mod, rm, prefixes)
-                            from dw in GetMemoryData16(addr)
-                            from dd in GetMemoryData16((addr.isMem, addr.addr + 2))
+                            from dw in GetMemOrRegData16(addr)
+                            from dd in GetMemOrRegData16((addr.isMem, addr.addr + 2))
                             from _ in SetCpu(cpu => { cpu.idt_base = dd; cpu.idt_limit = dw; return cpu; })
                             select Unit.unit;
 
@@ -172,7 +172,7 @@ namespace Emu86
                             from prefixes in Prefixes
                             from opecode in Opecode(0x0F, 0x01)
                             from _1 in SetLog("Group7_0F01")
-                            from m in ModRegRm
+                            from m in ModRegRm()
                             from _ in Choice(
                                 ((2 == m.reg), Lgdt(m.mod, m.rm, prefixes)),
                                 ((3 == m.reg), Lidt(m.mod, m.rm, prefixes))
@@ -184,7 +184,7 @@ namespace Emu86
                             from opecode in Contains(0x80, 0x81)
                             let w = 0 != (opecode & 0x01)
                             from _1 in SetLog("Group1_80_81")
-                            from m in ModRegRm
+                            from m in ModRegRm()
                             from data1 in GetMemOrRegData(m.mod, m.rm, prefixes, w)
                             from data2 in GetMemoryDataIp_(data1.data.type)
                             from ret in Calc(data1.data, data2, m.reg)
@@ -194,7 +194,7 @@ namespace Emu86
         static void Main(string[] args)
         {
             var all =
-                from _ in Choice
+                Choice
                 (
                     FarJump_EA,
                     Jump_E9,
@@ -214,8 +214,7 @@ namespace Emu86
                     Std_FD,
                     Out_E6_E7,
                     In_E4_E5
-                )
-                select Unit.unit;
+                );
 
             var machine = all.Many0();
 
