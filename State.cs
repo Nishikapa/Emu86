@@ -7,41 +7,36 @@ namespace Emu86
 {
     public delegate (Boolean IsSuccess, Func<V> value, CPU cpu, String log) State<V>(EmuEnvironment env, CPU param);
 
-    public class Unit
-    {
-        public static Unit unit = default(Unit);
-    }
-
     static public partial class Ext
     {
         static public State<V> ToState<V>(this V value) => (env, cpu) => (true, () => value, cpu, String.Empty);
 
-        static public State<B> Select<A, B>(this State<A> param, Func<A, B> selector)
+        static public State<B> Select<A, B>(this State<A> stateA, Func<A, B> selector)
         {
-            if (default(State<A>) == param)
+            if (default(State<A>) == stateA)
             {
                 throw new Exception();
             }
             return (env, cpu1) =>
             {
-                (var f, var value, var cpu2, var log) = param(env, cpu1);
+                var (f, value, cpu2, log) = stateA(env, cpu1);
                 return (f, f ? () => selector(value()) : default(Func<B>), f ? cpu2 : cpu1, log);
             };
         }
 
-        static public State<C> SelectMany<A, B, C>(this State<A> param, Func<A, State<B>> selector, Func<A, B, C> projector)
+        static public State<C> SelectMany<A, B, C>(this State<A> stateA, Func<A, State<B>> selector, Func<A, B, C> projector)
         {
-            if (default(State<A>) == param)
+            if (default(State<A>) == stateA)
             {
                 throw new Exception();
             }
             return (env, cpu1) =>
             {
-                (var f1, var reta, var cpu2, var log1) = param(env, cpu1);
-                if (f1)
+                var (isSuccess1, funcA, cpu2, log1) = stateA(env, cpu1);
+                if (isSuccess1)
                 {
-                    (var f2, var retb, var cpu3, var log2) = selector(reta())(env, cpu2);
-                    return (f2, f2 ? () => projector(reta(), retb()) : default(Func<C>), f2 ? cpu3 : cpu1, log1 + "\r\n" + log2);
+                    var (isSuccess2, funcB, cpu3, log2) = selector(funcA())(env, cpu2);
+                    return (isSuccess2, isSuccess2 ? () => projector(funcA(), funcB()) : default(Func<C>), isSuccess2 ? cpu3 : cpu1, log1 + "\r\n" + log2);
                 }
                 else
                 {
@@ -52,8 +47,6 @@ namespace Emu86
 
         static public State<T> Choice<T>(params (bool f, State<T> state)[] states) =>
             Choice(states.Where(s => s.f).Select(s => s.state).ToArray());
-
-        static public State<T> Choice<T>(int index, params State<T>[] states) => states.ElementAt(index);
 
         static public State<T> Choice<T>(params State<T>[] states) => (env, cpu) =>
         {
@@ -118,30 +111,10 @@ namespace Emu86
                 log_ = log_ + log;
 
                 if (!f)
-                    return (true, () => (IEnumerable<T>)ret, cpu, log_);
+                    ret.AsEnumerable().ToState();
 
                 ret.Add(t());
             }
         };
-
-        static public uint ToUint32(this IEnumerable<byte> data) =>
-            data.Take(4).Reverse().Aggregate(((uint)0), (i, d) => d + 0x100 * i);
-
-        static public byte[] ToByteArray(this byte db) =>
-            new[] {
-                db
-            };
-        static public byte[] ToByteArray(this ushort dw) =>
-            new[] {
-                (byte)(dw & 0xFF),
-                (byte) ((dw >> 8) & 0xFF)
-            };
-        static public byte[] ToByteArray(this uint dd) =>
-            new[] {
-                (byte)(dd & 0xFF),
-                (byte)((dd >> 8) & 0xFF),
-                (byte)((dd >> 16) & 0xFF),
-                (byte)((dd >> 24) & 0xFF)
-            };
     }
 }
