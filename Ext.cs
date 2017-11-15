@@ -1,6 +1,6 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using System.Linq;
-using System;
 
 namespace Emu86
 {
@@ -18,7 +18,7 @@ namespace Emu86
         };
 
         static public (int type, byte db, ushort dw, uint dd) ToTypeData(this IEnumerable<byte> data, int type)
-            => funcArray.ElementAt(type)(data.ToArray());
+            => funcArray[type](data.ToArray());
 
         static public (int type, byte db, ushort dw, uint dd) ToTypeData(this byte _db) => (0, db: _db, dw: default(ushort), dd: default(uint));
         static public (int type, byte db, ushort dw, uint dd) ToTypeData(this ushort _dw) => (1, db: default(byte), dw: _dw, dd: default(uint));
@@ -29,12 +29,13 @@ namespace Emu86
         static bool TopBit(byte data) => (0 != (data & 0x80));
 
         static public uint ToUint32(this IEnumerable<byte> data) => BitConverter.ToUInt32(data.Take(4).ToArray(), 0);
+        static public ushort ToUint16(this IEnumerable<byte> data) => BitConverter.ToUInt16(data.Take(4).ToArray(), 0);
 
         static public byte[] ToByteArray(this byte db) => new[] { db };
         static public byte[] ToByteArray(this ushort dw) => BitConverter.GetBytes(dw);
         static public byte[] ToByteArray(this uint dd) => BitConverter.GetBytes(dd);
 
         static public T Choice<T, K>(K key, params (K key, T state)[] states) => states.ToDictionary(s => s.key, s => s.state)[key];
-        static public T Choice_<T>(int index, params T[] states) => states.ElementAt(index);
+        static public T Choice_<T>(int index, params T[] states) => states[index];
     }
 }

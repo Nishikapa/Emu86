@@ -1,27 +1,34 @@
 ﻿using System;
 using static Emu86.Ext;
 using static System.Console;
+using System;
+using static System.Console;
+using static Emu86.CPU;
+using static Emu86.Ext;
+
+
 
 namespace Emu86
 {
     static class Program
     {
-        static State<Unit> FarJump_EA =
+        static State<Unit> FarJump_EA =>
                             from opecode in Opecode(0xEA)
                             from _1 in SetLog("FarJump_EA")
                             from offset in GetMemoryDataIp16
                             from segment in GetMemoryDataIp16
-                            from _2 in SetCpu(cpu => { cpu.cs = segment; cpu.ip = offset; return cpu; })
+                            from _2 in _ip.SetCpu(offset)
+                            from _3 in _cs.SetCpu(segment)
                             select Unit.unit;
 
-        static State<Unit> Jump_E9 =
+        static State<Unit> Jump_E9 =>
                             from opecode in Opecode(0xE9)
                             from _1 in SetLog("Jump_E9")
                             from offset in GetMemoryDataIp16
-                            from _2 in SetCpu(cpu => { cpu.ip = (ushort)(cpu.ip + (short)offset); return cpu; })
+                            from _2 in IpInc((short)offset)
                             select Unit.unit;
 
-        static State<Unit> Group1_83 =
+        static State<Unit> Group1_83 =>
                             from prefixes in Prefixes
                             from opecode in Opecode(0x83)
                             from _ in SetLog("Group1_83")
@@ -33,7 +40,7 @@ namespace Emu86
                             from d6 in SetMemOrRegData(d2, d5)
                             select d6;
 
-        static State<Unit> Mov_8E =
+        static State<Unit> Mov_8E =>
                             from prefixes in Prefixes
                             from opecode in Opecode(0x8E)
                             from _1 in SetLog("Mov_8E")
@@ -42,7 +49,7 @@ namespace Emu86
                             from _2 in SetSReg3(m.reg, data.data)
                             select Unit.unit;
 
-        static State<Unit> Mov_0F20 =
+        static State<Unit> Mov_0F20 =>
                             from prefixes in Prefixes
                             from opecode in Opecode(0x0F, 0x20)
                             from _1 in SetLog("Mov_0F20")
@@ -52,7 +59,7 @@ namespace Emu86
                             from _3 in SetRegData32(m.rm, data)
                             select Unit.unit;
 
-        static State<Unit> Mov_0F22 =
+        static State<Unit> Mov_0F22 =>
                             from prefixes in Prefixes
                             from opecode in Opecode(0x0F, 0x22)
                             from _1 in SetLog("Mov_0F22")
@@ -62,17 +69,18 @@ namespace Emu86
                             from _3 in SetCrReg(m.reg, data)
                             select Unit.unit;
 
-        static State<Unit> Jcc_0F80_0F8F =
+        static State<Unit> Jcc_0F80_0F8F =>
                             from opecode1 in Opecode(0x0f)
                             from opecode2 in Range(0x80, 0x8F)
                             from _1 in SetLog("Jcc_0F80_0F8F")
                             let type = opecode2 & 0xF
                             from f in Jcc(type)
                             from offset in GetMemoryDataIp16
-                            from _2 in SetCpu(cpu => { cpu.ip = (ushort)(cpu.ip + (f ? (short)offset : 0)); return cpu; })
+                            let inc = f ? (short)offset : 0
+                            from _2 in IpInc(inc)
                             select Unit.unit;
 
-        static State<Unit> Mov_B0_BF =
+        static State<Unit> Mov_B0_BF =>
                             from prefixes in Prefixes
                             from opecode in Range(0xB0, 0xBF)
                             from _1 in SetLog("Mov_B0_BF")
@@ -82,7 +90,7 @@ namespace Emu86
                             from _2 in SetRegData(reg, data.data)
                             select Unit.unit;
 
-        static State<Unit> Mov_88_89 =
+        static State<Unit> Mov_88_89 =>
                             from prefixes in Prefixes
                             from opecode in Contains(0x88, 0x89)
                             from _1 in SetLog("Mov_88_89")
@@ -92,7 +100,7 @@ namespace Emu86
                             from _2 in SetRegData(m.reg, data.data)
                             select Unit.unit;
 
-        static State<Unit> Arithmetic =
+        static State<Unit> Arithmetic =>
                             from prefixes in Prefixes
                             from opecode in Contains(
                                 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, // ADD
@@ -117,36 +125,36 @@ namespace Emu86
                             from _2 in d ? SetRegData(m.reg, ret) : SetMemOrRegData(rmData.input, ret)
                             select Unit.unit;
 
-        static State<Unit> Cli_FA =
+        static State<Unit> Cli_FA =>
                             from opecode1 in Opecode(0xFA)
                             from _ in SetLog("Cli_FA")
                             select Unit.unit;
 
-        static State<Unit> Sti_FB =
+        static State<Unit> Sti_FB =>
                             from opecode1 in Opecode(0xFB)
                             from _ in SetLog("Sti_FB")
                             select Unit.unit;
 
-        static State<Unit> Cld_FC =
+        static State<Unit> Cld_FC =>
                             from opecode1 in Opecode(0xFC)
                             from _1 in SetLog("Cld_FC")
                             from _2 in SetCpu(cpu => { cpu.df = false; return cpu; })
                             select Unit.unit;
 
-        static State<Unit> Std_FD =
+        static State<Unit> Std_FD =>
                             from opecode in Opecode(0xFA)
                             from _1 in SetLog("Std_FD")
                             from _2 in SetCpu(cpu => { cpu.df = true; return cpu; })
                             select Unit.unit;
 
-        static State<Unit> Out_E6_E7 =
+        static State<Unit> Out_E6_E7 =>
                             from opecode in Range(0xE6, 0xE7)
                             from _1 in SetLog("Out_E6_E7")
                             let w = 0 != (opecode & 1)
                             from port in GetMemoryDataIp8
                             select Unit.unit;
 
-        static State<Unit> In_E4_E5 =
+        static State<Unit> In_E4_E5 =>
                             from opecode in Range(0xE4, 0xE5)
                             from _1 in SetLog("In_E4_E5")
                             let w = 0 != (opecode & 1)
@@ -168,7 +176,7 @@ namespace Emu86
                             from _ in SetCpu(cpu => { cpu.idt_base = dd; cpu.idt_limit = dw; return cpu; })
                             select Unit.unit;
 
-        static State<Unit> Group7_0F01 =
+        static State<Unit> Group7_0F01 =>
                             from prefixes in Prefixes
                             from opecode in Opecode(0x0F, 0x01)
                             from _1 in SetLog("Group7_0F01")
@@ -179,7 +187,7 @@ namespace Emu86
                             )
                             select Unit.unit;
 
-        static State<Unit> Group1_80_81 =
+        static State<Unit> Group1_80_81 =>
                             from prefixes in Prefixes
                             from opecode in Contains(0x80, 0x81)
                             let w = 0 != (opecode & 0x01)
@@ -218,15 +226,13 @@ namespace Emu86
 
             var machine = all.Many0();
 
-            var init_cpu = new CPU()
-            {
-                cs = 0xF000,
-                ip = 0xFFF0,
-            };
+            var init_cpu1 = new CPU();
+            var init_cpu2 = _ip.setter(init_cpu1)(0xFFF0);
+            var init_cpu3 = _cs.setter(init_cpu2)(0xF000);
 
             var env = new EmuEnvironment();
 
-            var ret_ = machine(env, init_cpu);
+            var ret_ = machine(env, init_cpu3);
 
             WriteLine(ret_.log);
         }

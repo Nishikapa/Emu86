@@ -1,85 +1,117 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using static Emu86.CPU;
 
 namespace Emu86
 {
     static public partial class Ext
     {
+        /// Mem /////////////////////////////////////
         static public IEnumerable<byte> EnvGetMemoryDatas(EmuEnvironment env, ushort segment, ushort offset)
         {
-            var addr = ((uint)segment) * 0x10 + offset;
+            var addr = GetMemoryAddr(segment, offset).addr;
             return env.OneMegaMemory_.Skip((int)addr);
         }
-        static public IEnumerable<byte> EnvGetMemoryDatas(EmuEnvironment env, ushort segment, ushort offset, int length) => EnvGetMemoryDatas(env, segment, offset).Take(length);
 
-        static public byte EnvGetMemoryData8(EmuEnvironment env, ushort segment, ushort offset) => EnvGetMemoryData8(env, ((uint)segment) * 0x10 + offset);
-        static public ushort EnvGetMemoryData16(EmuEnvironment env, ushort segment, ushort offset) => EnvGetMemoryData16(env, ((uint)segment) * 0x10 + offset);
-        static public uint EnvGetMemoryData32(EmuEnvironment env, ushort segment, ushort offset) => EnvGetMemoryData32(env, ((uint)segment) * 0x10 + offset);
+        static public IEnumerable<byte> EnvGetMemoryDatas(EmuEnvironment env, ushort segment, ushort offset, int length) =>
+            EnvGetMemoryDatas(env, segment, offset).Take(length);
 
-        static public (bool isMem, uint addr, int inc) EnvGetMemOrRegAddr(EmuEnvironment env, CPU cpu, int mod, int rm, ushort? segment, IEnumerable<byte> disp, bool address_size)
-            => address_size ?
-            EnvGetMemOrRegAddr32_(cpu, mod, rm, segment, disp) :
-            EnvGetMemOrRegAddr16_(cpu, mod, rm, segment, disp);
+        static public (bool isMem, uint addr) GetMemoryAddr
+            (
+                ushort segment,
+                ushort offset
+            ) => (true, ((uint)(0x10 * segment + offset)));
 
-        static public byte EnvGetMemOrRegData8_(EmuEnvironment env, bool isMem, uint addr, CPU cpu) => isMem ? EnvGetMemoryData8(env, addr) : EnvGetRegData8(cpu, (int)addr);
-        static public ushort EnvGetMemOrRegData16_(EmuEnvironment env, bool isMem, uint addr, CPU cpu) => isMem ? EnvGetMemoryData16(env, addr) : EnvGetRegData16(cpu, (int)addr);
-        static public uint EnvGetMemOrRegData32_(EmuEnvironment env, bool isMem, uint addr, CPU cpu) => isMem ? EnvGetMemoryData32(env, addr) : EnvGetRegData32(cpu, (int)addr);
-
-        static public CPU EnvSetMemOrRegData8_(EmuEnvironment env, bool isMem, uint addr, CPU cpu, byte data)
+        /// Reg /////////////////////////////////////
+        static private Accessor<CPU, byte>[] ArrayReg8 => new Accessor<CPU, byte>[]
         {
-            if (isMem)
-            {
-                EnvSetMemoryData8(env, addr, data);
-                return cpu;
-            }
-            else
-            {
-                return EnvSetRegData8(cpu, (int)addr, data);
-            }
-        }
-        static public CPU EnvSetMemOrRegData16_(EmuEnvironment env, bool isMem, uint addr, CPU cpu, ushort data)
+            CPU._al,CPU._cl,CPU._dl,CPU._bl,
+            CPU._ah,CPU._ch,CPU._dh,CPU._bh
+        };
+        static private Accessor<CPU, ushort>[] ArrayReg16 => new Accessor<CPU, ushort>[]
         {
-            if (isMem)
-            {
-                EnvSetMemoryData16(env, addr, data);
-                return cpu;
-            }
-            else
-            {
-                return EnvSetRegData16(cpu, (int)addr, data);
-            }
-        }
-        static public CPU EnvSetMemOrRegData32_(EmuEnvironment env, bool isMem, uint addr, CPU cpu, uint data)
+            CPU._ax,CPU._cx,CPU._dx,CPU._bx,
+            CPU._sp,CPU._bp,CPU._si,CPU._di
+        };
+        static private Accessor<CPU, uint>[] ArrayReg32 => new Accessor<CPU, uint>[]
         {
-            if (isMem)
-            {
-                EnvSetMemoryData32(env, addr, data);
-                return cpu;
-            }
-            else
-            {
-                return EnvSetRegData32(cpu, (int)addr, data);
-            }
-        }
+            CPU._eax,CPU._ecx,CPU._edx,CPU._ebx,
+            CPU._esp,CPU._ebp,CPU._esi,CPU._edi
+        };
+        static private Accessor<CPU, ushort>[] ArraySreg => new Accessor<CPU, ushort>[]
+        {
+            CPU._es,CPU._cs,CPU._ss,CPU._ds,CPU._fs,CPU._gs
+        };
 
-        ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-        static private uint EnvGetIndexRegData32(CPU cpu, int reg)
-        {
-            switch (reg)
-            {
-                case 0: return cpu.eax;
-                case 1: return cpu.ecx;
-                case 2: return cpu.edx;
-                case 3: return cpu.ebx;
-                case 4: return 0;
-                case 5: return cpu.ebp;
-                case 6: return cpu.esi;
-                case 7: return cpu.edi;
-                default: throw new Exception();
-            }
-        }
-        static private Func<CPU, int, T, CPU> EnvSetDataFromCPU<T>(Accessor<CPU, T>[] array) => (cpu, reg, data) => array.ElementAt(reg).setter(cpu)(data);
+        static private Func<int, Func<CPU, ushort>> GetSReg3 => EnvGetDataFromCPU(ArraySreg);
+        static public Func<byte, Func<int, Func<CPU, CPU>>> EnvSetRegData8 => EnvSetDataFromCPU(ArrayReg8);
+        static public Func<ushort, Func<int, Func<CPU, CPU>>> EnvSetRegData16 => EnvSetDataFromCPU(ArrayReg16);
+        static public Func<uint, Func<int, Func<CPU, CPU>>> EnvSetRegData32 => EnvSetDataFromCPU(ArrayReg32);
+
+        static public Func<ushort, Func<int, Func<CPU, CPU>>> EnvSetSReg3 => EnvSetDataFromCPU(ArraySreg);
+
+        static public State<Unit> SetRegData8(int reg, byte db) =>
+            SetCpu(EnvSetRegData8(db)(reg));
+
+        static public State<Unit> SetRegData16(int reg, ushort dw) =>
+            SetCpu(EnvSetRegData16(dw)(reg));
+
+        static public State<Unit> SetRegData32(int reg, uint dd) =>
+            SetCpu(EnvSetRegData32(dd)(reg));
+
+        static public State<Unit> SetCrReg(int reg, uint data) =>
+            Choice(
+                reg,
+                (0, _cr0),
+                (2, _cr2),
+                (3, _cr3)
+            ).SetCpu(data);
+
+        static public State<Unit> SetRegData(int reg, (int type, byte db, ushort dw, uint dd) data) =>
+            SetCpu(EnvSetRegData(data)(reg));
+
+        static public State<uint> GetRegData32(int reg) =>
+            GetDataFromCpu(EnvGetDataFromCPU(ArrayReg32)(reg));
+
+        static public State<(int type, byte db, ushort dw, uint dd)> GetRegData(int reg, int type) =>
+            GetDataFromCpu(GetTypeData_<CPU>(
+                type,
+                EnvGetDataFromCPU(ArrayReg8)(reg),
+                EnvGetDataFromCPU(ArrayReg16)(reg),
+                EnvGetDataFromCPU(ArrayReg32)(reg)
+                )
+            );
+
+        static public State<uint> GetCrReg(int reg) =>
+            Choice(
+                reg,
+                (0, Get(_cr0)),
+                (2, Get(_cr2)),
+                (3, Get(_cr3))
+            );
+
+        static public State<Unit> SetSReg3(int reg, (int type, byte db, ushort dw, uint dd) data) =>
+            SetCpu(
+                cpu =>
+                {
+                    var (type, db, dw, dd) = data;
+                    switch (type)
+                    {
+                        case 0:
+                        case 1:
+                            cpu = EnvSetSReg3(dw)(reg)(cpu);
+                            break;
+                        case 2:
+                            throw new NotImplementedException();
+                        default:
+                            throw new Exception();
+                    }
+                    return cpu;
+                }
+            );
+
+        /// MemReg //////////////////////////////////
         static private (bool isMem, uint addr, int inc) EnvGetMemOrRegAddr16_(CPU cpu, int mod, int rm, ushort? segment, IEnumerable<byte> disp)
         {
             var segment_base =
@@ -103,7 +135,7 @@ namespace Emu86
                                 (() => segment_base + (uint)disp.ElementAt(0) + 0x100 * (uint)disp.ElementAt(1), 2),    // DS:[d16]
                                 (() => segment_base + cpu.bx, 0),                                                       // DS:[BX]
                         };
-                        var (func, inc) = array.ElementAt(rm);
+                        var (func, inc) = array[rm];
                         return (true, func(), inc);
                     }
                 case 1:
@@ -120,7 +152,7 @@ namespace Emu86
                             ()=> (uint)(ss_base + cpu.bp + d8),                 // SS:[bp+d8]
                             ()=> (uint)(segment_base + cpu.di + d8),            // DS:[DI+d8]
                         };
-                        return (true, array.ElementAt(rm)(), 1);
+                        return (true, array[rm](), 1);
                     }
                 case 2:
                     {
@@ -136,7 +168,7 @@ namespace Emu86
                             ()=>  (uint)(ss_base + cpu.bp + d16),                   // SS:[bp+d16]
                             ()=>  (uint)(segment_base + cpu.di + d16),              // DS:[DI+d16]
                         };
-                        return (true, array.ElementAt(rm)(), 2);
+                        return (true, array[rm](), 2);
                     }
                 case 3:
                     return (false, (uint)rm, 0);
@@ -182,7 +214,7 @@ namespace Emu86
                                     var indexf = ((sib >> 3) & 0x7);
                                     var basef = (sib & 0x7);
 
-                                    var base_ = EnvGetRegData32(cpu, basef);
+                                    var base_ = EnvGetDataFromCPU(ArrayReg32)(basef)(cpu);
 
                                     var index_ = EnvGetIndexRegData32(cpu, indexf);
 
@@ -234,7 +266,7 @@ namespace Emu86
                                     var indexf = ((sib >> 3) & 0x7);
                                     var basef = (sib & 0x7);
 
-                                    var base_ = EnvGetRegData32(cpu, basef);
+                                    var base_ = EnvGetDataFromCPU(ArrayReg32)(basef)(cpu);
 
                                     var index_ = EnvGetIndexRegData32(cpu, indexf);
 
@@ -302,51 +334,125 @@ namespace Emu86
                     throw new Exception();
             }
         }
-        static private void EnvSetMemoryData16(EmuEnvironment env, uint addr, ushort data) => EnvSetMemoryDatas(env, addr, data.ToByteArray());
-        static private void EnvSetMemoryData32(EmuEnvironment env, uint addr, uint data) => EnvSetMemoryDatas(env, addr, data.ToByteArray());
-        static private (byte, int) EnvGetMemOrRegData8(EmuEnvironment env, CPU cpu, int mod, int rm, ushort? segment, IEnumerable<byte> disp, bool address_size)
-        {
-            var (isMem, addr, inc) = EnvGetMemOrRegAddr(env, cpu, mod, rm, segment, disp, address_size);
-            return (EnvGetMemOrRegData8_(env, isMem, addr, cpu), inc);
-        }
-        static private (CPU, int) EnvSetMemOrRegData8(EmuEnvironment env, CPU cpu, int mod, int rm, ushort? segment, IEnumerable<byte> disp, byte data, bool address_size)
-        {
-            var (isMem, addr, inc) = EnvGetMemOrRegAddr(env, cpu, mod, rm, segment, disp, address_size);
-            return (EnvSetMemOrRegData8_(env, isMem, addr, cpu, data), inc);
-        }
-        static private (ushort, int) EnvGetMemOrRegData16(EmuEnvironment env, CPU cpu, int mod, int rm, ushort? segment, IEnumerable<byte> disp, bool address_size)
-        {
-            var (isMem, addr, inc) = EnvGetMemOrRegAddr(env, cpu, mod, rm, segment, disp, address_size);
-            return (EnvGetMemOrRegData16_(env, isMem, addr, cpu), inc);
-        }
-        static private (CPU, int) EnvSetMemOrRegData16(EmuEnvironment env, CPU cpu, int mod, int rm, ushort? segment, IEnumerable<byte> disp, ushort data, bool address_size)
-        {
-            var (isMem, addr, inc) = EnvGetMemOrRegAddr(env, cpu, mod, rm, segment, disp, address_size);
-            return (EnvSetMemOrRegData16_(env, isMem, addr, cpu, data), inc);
-        }
-        static private (uint, int) EnvGetMemOrRegData32(EmuEnvironment env, CPU cpu, int mod, int rm, ushort? segment, IEnumerable<byte> disp, bool address_size)
-        {
-            var (isMem, addr, inc) = EnvGetMemOrRegAddr(env, cpu, mod, rm, segment, disp, address_size);
-            return (EnvGetMemOrRegData32_(env, isMem, addr, cpu), inc);
-        }
-        static private (CPU, int) EnvSetMemoryData32(EmuEnvironment env, CPU cpu, int mod, int rm, ushort? segment, IEnumerable<byte> disp, uint data, bool address_size)
-        {
-            var (isMem, addr, inc) = EnvGetMemOrRegAddr(env, cpu, mod, rm, segment, disp, address_size);
-            return (EnvSetMemOrRegData32_(env, isMem, addr, cpu, data), inc);
-        }
-        static private ushort EnvGetMemoryData16(EmuEnvironment env, uint addr) => (ushort)(EnvGetMemoryData8(env, (uint)(addr + 1)) * 0x100 + EnvGetMemoryData8(env, (uint)addr));
+        static public State<(bool isMem, uint addr)> GetMemOrRegAddr
+            (
+                int mod,
+                int rm,
+                (Boolean cs, Boolean es, Boolean fs, Boolean gs, Boolean operand_size, Boolean address_size) prefixes
+            ) =>
+            from data in GetDataFromEnvCpu(
+                (env, cpu) =>
+                prefixes.address_size ?
+                EnvGetMemOrRegAddr32_(cpu, mod, rm, cpu.cs, EnvGetMemoryDatas(env, cpu.cs, cpu.ip)) :
+                EnvGetMemOrRegAddr16_(cpu, mod, rm, cpu.cs, EnvGetMemoryDatas(env, cpu.cs, cpu.ip))
+            )
+            from _ in IpInc(data.inc)
+            select (data.isMem, data.addr);
+
+        static public State<byte> GetMemOrRegData8((bool isMem, uint addr) t) =>
+            GetDataFromEnvCpu((env, cpu) => t.isMem ? EnvGetMemoryData8(env, t.addr) : EnvGetDataFromCPU(ArrayReg8)((int)t.addr)(cpu));
+
+        static public State<ushort> GetMemOrRegData16((bool isMem, uint addr) t) =>
+            GetDataFromEnvCpu((env, cpu) => t.isMem ? EnvGetMemoryData16(env, t.addr) : EnvGetDataFromCPU(ArrayReg16)((int)t.addr)(cpu));
+
+        static public State<uint> GetMemOrRegData32((bool isMem, uint addr) t) =>
+            GetDataFromEnvCpu((env, cpu) => t.isMem ? EnvGetMemoryData32(env, t.addr) : EnvGetDataFromCPU(ArrayReg32)((int)t.addr)(cpu));
+
+        static Func<int, Func<CPU, CPU>> EnvSetRegData((int type, byte db, ushort dw, uint dd) data) =>
+            SetTypeData<Func<int, Func<CPU, CPU>>>
+            (
+                data,
+                EnvSetRegData8,
+                EnvSetRegData16,
+                EnvSetRegData32
+            );
+
+        static Action<EmuEnvironment, uint> EnvSetMemoryData((int type, byte db, ushort dw, uint dd) data) =>
+            SetTypeData<Action<EmuEnvironment, uint>>
+            (
+                data,
+                db => (env, addr) => { env.OneMegaMemory_[addr] = db; },
+                dw => (env, addr) => { EnvSetMemoryDatas(env, addr, dw.ToByteArray()); },
+                dd => (env, addr) => { EnvSetMemoryDatas(env, addr, dd.ToByteArray()); }
+            );
+
+        static public State<Unit> SetMemOrRegData(
+            (bool isMem, uint addr) t,
+            (int type, byte db, ushort dw, uint dd) data) =>
+            SetCpu((env, cpu) =>
+            {
+                if (t.isMem)
+                {
+                    EnvSetMemoryData(data)(env, t.addr);
+                    return cpu;
+                }
+                else
+                {
+                    return EnvSetRegData(data)((int)t.addr)(cpu);
+                }
+            });
+
+        static public State<(int type, byte db, ushort dw, uint dd)> GetMemOrRegData
+        (
+            (bool isMem, uint addr) t,
+            (Boolean cs, Boolean es, Boolean fs, Boolean gs, Boolean operand_size, Boolean address_size) prefixes,
+            Boolean w) =>
+            Choice(
+                w ? (prefixes.operand_size ? 2 : 1) : 0,
+                GetMemOrRegData8(t),
+                GetMemOrRegData16(t),
+                GetMemOrRegData32(t)
+            );
+
+        static public State<((int type, byte db, ushort dw, uint dd) data, (bool isMem, uint addr) input)> GetMemOrRegData
+            (
+                ushort segment,
+                ushort offset,
+                (Boolean cs, Boolean es, Boolean fs, Boolean gs, Boolean operand_size, Boolean address_size) prefixes,
+                Boolean w
+            ) =>
+            from addr in GetMemoryAddr(segment, offset).ToState()
+            from data in GetMemOrRegData(addr, prefixes, w)
+            select (data, addr);
+
+        static public State<((int type, byte db, ushort dw, uint dd) data, (bool isMem, uint addr) input)> GetMemOrRegData
+            (
+                int mod,
+                int rm,
+                (Boolean cs, Boolean es, Boolean fs, Boolean gs, Boolean operand_size, Boolean address_size) prefixes,
+                Boolean w
+            ) =>
+            from addr in GetMemOrRegAddr(mod, rm, prefixes)
+            from data in GetMemOrRegData(addr, prefixes, w)
+            select (data, addr);
+
+        ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+        static private uint EnvGetIndexRegData32(CPU cpu, int reg) =>
+            new uint[]
+            {
+                cpu.eax,
+                cpu.ecx,
+                cpu.edx,
+                cpu.ebx,
+                0,
+                cpu.ebp,
+                cpu.esi,
+                cpu.edi,
+            }[reg];
+
+        static private Func<T, Func<int, Func<CPU, CPU>>> EnvSetDataFromCPU<T>(Accessor<CPU, T>[] array) =>
+            data => reg => cpu => array[reg].setter(cpu)(data);
+
         static private void EnvSetMemoryDatas(EmuEnvironment env, uint addr, byte[] data)
         {
             for (int i = 0; i < data.Length; ++i)
             {
-                EnvSetMemoryData8(env, (uint)(addr + i), data[i]);
+                env.OneMegaMemory_[addr + i] = data[i];
             }
         }
+
         static private byte EnvGetMemoryData8(EmuEnvironment env, uint addr) => env.OneMegaMemory_[addr];
-        static private void EnvSetMemoryData8(EmuEnvironment env, uint addr, byte data)
-        {
-            env.OneMegaMemory_[addr] = data;
-        }
+        static private ushort EnvGetMemoryData16(EmuEnvironment env, uint addr) => env.OneMegaMemory_.Skip((int)addr).ToUint16();
         static private uint EnvGetMemoryData32(EmuEnvironment env, uint addr) => env.OneMegaMemory_.Skip((int)addr).ToUint32();
     }
 
