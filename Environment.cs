@@ -334,15 +334,11 @@ namespace Emu86
                     throw new Exception();
             }
         }
-        static public State<(bool isMem, uint addr)> GetMemOrRegAddr
-            (
-                int mod,
-                int rm,
-                (Boolean cs, Boolean es, Boolean fs, Boolean gs, Boolean operand_size, Boolean address_size) prefixes
-            ) =>
+        static public State<(bool isMem, uint addr)> GetMemOrRegAddr(int mod, int rm) =>
+            from address_size in _address_size_prefix.Get()
             from data in GetDataFromEnvCpu(
                 (env, cpu) =>
-                prefixes.address_size ?
+                address_size ?
                 EnvGetMemOrRegAddr32_(cpu, mod, rm, cpu.cs, EnvGetMemoryDatas(env, cpu.cs, cpu.ip)) :
                 EnvGetMemOrRegAddr16_(cpu, mod, rm, cpu.cs, EnvGetMemoryDatas(env, cpu.cs, cpu.ip))
             )
@@ -395,35 +391,34 @@ namespace Emu86
         static public State<(int type, byte db, ushort dw, uint dd)> GetMemOrRegData
         (
             (bool isMem, uint addr) t,
-            (Boolean cs, Boolean es, Boolean fs, Boolean gs, Boolean operand_size, Boolean address_size) prefixes,
             Boolean w) =>
-            Choice(
-                w ? (prefixes.operand_size ? 2 : 1) : 0,
+            from operand_size in _operand_size_prefix.Get()
+            from ret in Choice(
+                w ? (operand_size ? 2 : 1) : 0,
                 GetMemOrRegData8(t),
                 GetMemOrRegData16(t),
                 GetMemOrRegData32(t)
-            );
+            )
+            select ret;
 
         static public State<((int type, byte db, ushort dw, uint dd) data, (bool isMem, uint addr) input)> GetMemOrRegData
             (
                 ushort segment,
                 ushort offset,
-                (Boolean cs, Boolean es, Boolean fs, Boolean gs, Boolean operand_size, Boolean address_size) prefixes,
                 Boolean w
             ) =>
             from addr in GetMemoryAddr(segment, offset).ToState()
-            from data in GetMemOrRegData(addr, prefixes, w)
+            from data in GetMemOrRegData(addr, w)
             select (data, addr);
 
         static public State<((int type, byte db, ushort dw, uint dd) data, (bool isMem, uint addr) input)> GetMemOrRegData
             (
                 int mod,
                 int rm,
-                (Boolean cs, Boolean es, Boolean fs, Boolean gs, Boolean operand_size, Boolean address_size) prefixes,
                 Boolean w
             ) =>
-            from addr in GetMemOrRegAddr(mod, rm, prefixes)
-            from data in GetMemOrRegData(addr, prefixes, w)
+            from addr in GetMemOrRegAddr(mod, rm)
+            from data in GetMemOrRegData(addr, w)
             select (data, addr);
 
         ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

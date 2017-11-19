@@ -5,11 +5,11 @@ using static Emu86.Ext;
 
 namespace Emu86
 {
-    public delegate (Boolean IsSuccess, V value, CPU cpu, String log) State<V>(EmuEnvironment env, CPU param);
+    public delegate (Boolean IsSuccess, V value, CPU cpu, String log) State<V>(EmuEnvironment env, CPU param, byte[] opecodes);
 
     static public partial class Ext
     {
-        static public State<V> ToState<V>(this V value) => (env, cpu) => (true, value, cpu, String.Empty);
+        static public State<V> ToState<V>(this V value) => (env, cpu, ope) => (true, value, cpu, String.Empty);
 
         static public State<B> Select<A, B>(this State<A> stateA, Func<A, B> selector)
         {
@@ -17,9 +17,9 @@ namespace Emu86
             {
                 throw new Exception();
             }
-            return (env, cpu1) =>
+            return (env, cpu1, ope) =>
             {
-                var (f, value, cpu2, log) = stateA(env, cpu1);
+                var (f, value, cpu2, log) = stateA(env, cpu1, ope);
                 return (f, f ? selector(value) : default(B), f ? cpu2 : cpu1, log);
             };
         }
@@ -30,12 +30,12 @@ namespace Emu86
             {
                 throw new Exception();
             }
-            return (env, cpu1) =>
+            return (env, cpu1, ope) =>
             {
-                var (isSuccess1, valueA, cpu2, log1) = stateA(env, cpu1);
+                var (isSuccess1, valueA, cpu2, log1) = stateA(env, cpu1, ope);
                 if (isSuccess1)
                 {
-                    var (isSuccess2, valueB, cpu3, log2) = selector(valueA)(env, cpu2);
+                    var (isSuccess2, valueB, cpu3, log2) = selector(valueA)(env, cpu2, ope);
                     return (isSuccess2, isSuccess2 ? projector(valueA, valueB) : default(C), isSuccess2 ? cpu3 : cpu1, log1 + "\r\n" + log2);
                 }
                 else
@@ -48,7 +48,7 @@ namespace Emu86
         static public State<T> Choice<T>(params (bool f, State<T> state)[] states) =>
             Choice(states.Where(s => s.f).Select(s => s.state).ToArray());
 
-        static public State<T> Choice<T>(params State<T>[] states) => (env, cpu) =>
+        static public State<T> Choice<T>(params State<T>[] states) => (env, cpu, ope) =>
         {
             var log = String.Empty;
 
@@ -57,7 +57,7 @@ namespace Emu86
                 var f = default(Boolean);
                 var value = default(T);
 
-                (f, value, cpu, log) = state(env, cpu);
+                (f, value, cpu, log) = state(env, cpu, ope);
 
                 if (f)
                 {
@@ -70,7 +70,7 @@ namespace Emu86
         static public State<IEnumerable<T>> Sequence<T>(params State<T>[] states) =>
             Sequence((IEnumerable<State<T>>)states);
 
-        static public State<IEnumerable<T>> Sequence<T>(this IEnumerable<State<T>> states) => (env, cpu) =>
+        static public State<IEnumerable<T>> Sequence<T>(this IEnumerable<State<T>> states) => (env, cpu, ope) =>
         {
             var log_ = String.Empty;
             var ret = new List<T>();
@@ -81,7 +81,7 @@ namespace Emu86
                 var value = default(T);
                 var log = String.Empty;
 
-                (f, value, cpu, log) = state(env, cpu);
+                (f, value, cpu, log) = state(env, cpu, ope);
 
                 log_ = log_ + log;
 
@@ -99,7 +99,7 @@ namespace Emu86
             from data in s
             select Unit.unit;
 
-        static public State<IEnumerable<T>> Many0<T>(this State<T> next) => (env, cpu) =>
+        static public State<IEnumerable<T>> Many0<T>(this State<T> next) => (env, cpu, ope) =>
         {
             var ret = new List<T>();
             var log_ = String.Empty;
@@ -109,7 +109,7 @@ namespace Emu86
                 var log = String.Empty;
                 var t = default(T);
                 var f = default(Boolean);
-                (f, t, cpu, log) = next(env, cpu);
+                (f, t, cpu, log) = next(env, cpu, ope);
 
                 log_ = log_ + log;
 

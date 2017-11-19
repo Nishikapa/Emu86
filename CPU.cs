@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using static Emu86.CPU;
+using static Emu86.Unit;
 using static Emu86.Ext;
 using static System.Console;
 
@@ -11,12 +12,10 @@ namespace Emu86
     {
         static int[] arrLen = { 1, 2, 4 };
 
-        static public State<((int type, byte db, ushort dw, uint dd) data, (bool isMem, uint addr) input)> GetMemoryDataIp(
-            (Boolean cs, Boolean es, Boolean fs, Boolean gs, Boolean operand_size, Boolean address_size) prefixes,
-            Boolean w) =>
+        static public State<((int type, byte db, ushort dw, uint dd) data, (bool isMem, uint addr) input)> GetMemoryDataIp(Boolean w) =>
             from cpu in GetCpu
             let addr = GetMemoryAddr(cpu.cs, cpu.ip)
-            from data in GetMemOrRegData(addr, prefixes, w)
+            from data in GetMemOrRegData(addr, w)
             from _ in IpInc(arrLen[data.type])
             select (data, (addr.isMem, addr.addr));
 
@@ -31,32 +30,6 @@ namespace Emu86
             let rm = (value & 0x7)
             select (mod, reg, rm);
 
-        static public State<byte> Range(byte start, byte end) =>
-            from value in GetMemoryDataIp8
-            from _ in SetResult(start <= value && value <= end)
-            select value;
-
-        static public State<byte> Contains(params byte[] bs) =>
-            from value in GetMemoryDataIp8
-            from _ in SetResult(bs.Contains(value))
-            select value;
-
-        static public State<IEnumerable<byte>> Opecode(params byte[] bs) =>
-            from datas in GetMemoryDataIp(bs.Length)
-            from _ in SetResult(bs.SequenceEqual(datas))
-            select datas;
-
-        static public State<(Boolean cs, Boolean es, Boolean fs, Boolean gs, Boolean operand_size, Boolean address_size)> Prefixes =>
-            from data in Contains(0x2e, 0x26, 0x64, 0x64, 0x66, 0x67).Many0()
-            select (
-                data.Contains((byte)0x2e),
-                data.Contains((byte)0x26),
-                data.Contains((byte)0x64),
-                data.Contains((byte)0x65),
-                data.Contains((byte)0x66),
-                data.Contains((byte)0x67)
-            );
-
         static public State<(int type, byte db, ushort dw, uint dd)> Choice(
             int index, State<byte> dbState, State<ushort> dwState, State<uint> ddState) =>
             Choice_(
@@ -66,19 +39,6 @@ namespace Emu86
                 ddState.Select(ToTypeData)
             );
 
-        static public (int type, byte db, ushort dw, uint dd) GetTypeData
-            (
-            int index,
-            Func<byte> func_db,
-            Func<ushort> func_dw,
-            Func<uint> func_dd
-            ) =>
-            Choice_<Func<(int type, byte db, ushort dw, uint dd)>>(
-                index,
-                () => func_db().ToTypeData(),
-                () => func_dw().ToTypeData(),
-                () => func_dd().ToTypeData()
-            )();
         static public Func<T, (int type, byte db, ushort dw, uint dd)> GetTypeData_<T>
             (
             int index,
@@ -270,10 +230,13 @@ namespace Emu86
         static private State<T> Get<T>(this Accessor<CPU, T> acc) =>
             GetDataFromCpu(acc.getter);
 
+        static public State<Unit> Set<T>(this Accessor<CPU, T> acc, T value) =>
+            SetCpu(cpu => acc.setter(cpu)(value));
+
         static public State<Unit> IpInc(int inc) =>
-            from ip in Get(_ip)
-            from _ in SetCpu(_ip, (ushort)(ip + inc))
-            select _;
+                from ip in Get(_ip)
+                from _ in SetCpu(_ip, (ushort)(ip + inc))
+                select _;
 
         static public State<Unit> SetCpu(Func<CPU, CPU> func) =>
             from cpu in GetCpu
@@ -393,11 +356,12 @@ namespace Emu86
 
         /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         static public State<T> GetDataFromEnvCpu<T>(Func<EmuEnvironment, CPU, T> func) =>                              //無理
-            (env, cpu) => (true, func(env, cpu), cpu, String.Empty);
+            (env, cpu, ope) => (true, func(env, cpu), cpu, String.Empty);
 
-        static public State<Unit> SetCpu(CPU new_cpu) => (env, cpu) => (true, Unit.unit, new_cpu, String.Empty); //無理
-        static public State<Unit> SetResult(Boolean f) => (env, cpu) => (f, Unit.unit, cpu, String.Empty);        //無理
-        static public State<Unit> SetLog(String log) => (env, cpu) => (true, Unit.unit, cpu, log);                //無理
+        static public State<Unit> SetCpu(CPU new_cpu) => (env, cpu, ope) => (true, unit, new_cpu, String.Empty); //無理
+        static public State<Unit> SetResult(Boolean f) => (env, cpu, ope) => (f, unit, cpu, String.Empty);        //無理
+        static public State<Unit> SetLog(String log) => (env, cpu, ope) => (true, unit, cpu, log);                //無理
+        static public State<byte[]> Opecodes => (env, cpu, ope) => (true, ope, cpu, String.Empty);                //無理
     }
 
     public class Accessor<O, P>
@@ -489,6 +453,19 @@ namespace Emu86
         private bool GetEflags(uint flag) => 0 != (this.eflags & flag);
 
         public bool pe => 0 != (this.cr0 & 0x1);
+
+        public bool cs_prefix;
+        public bool es_prefix;
+        public bool fs_prefix;
+        public bool gs_prefix;
+        public bool operand_size_prefix;
+        public bool address_size_prefix;
+        static public Accessor<CPU, bool> _cs_prefix => new Accessor<CPU, bool>(c => c.cs_prefix, c => v => { c.cs_prefix = v; return c; });
+        static public Accessor<CPU, bool> _es_prefix => new Accessor<CPU, bool>(c => c.es_prefix, c => v => { c.es_prefix = v; return c; });
+        static public Accessor<CPU, bool> _fs_prefix => new Accessor<CPU, bool>(c => c.fs_prefix, c => v => { c.fs_prefix = v; return c; });
+        static public Accessor<CPU, bool> _gs_prefix => new Accessor<CPU, bool>(c => c.gs_prefix, c => v => { c.gs_prefix = v; return c; });
+        static public Accessor<CPU, bool> _operand_size_prefix => new Accessor<CPU, bool>(c => c.operand_size_prefix, c => v => { c.operand_size_prefix = v; return c; });
+        static public Accessor<CPU, bool> _address_size_prefix => new Accessor<CPU, bool>(c => c.address_size_prefix, c => v => { c.address_size_prefix = v; return c; });
 
         public bool cf { get { return GetEflags(CF); } set { UpdateEflags(CF, value); } }
         public bool pf { get { return GetEflags(PF); } set { UpdateEflags(PF, value); } }
