@@ -18,8 +18,8 @@ namespace Emu86
             from _1 in SetLog("FarJump_EA")
             from offset in GetMemoryDataIp16
             from segment in GetMemoryDataIp16
-            from _2 in _ip.SetCpu(offset)
-            from _3 in _cs.SetCpu(segment)
+            from _2 in _ip.Set(offset)
+            from _3 in _cs.Set(segment)
             select unit;
 
         static State<Unit> Jump_E9 =>

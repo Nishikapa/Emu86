@@ -66,7 +66,7 @@ namespace Emu86
                 (0, _cr0),
                 (2, _cr2),
                 (3, _cr3)
-            ).SetCpu(data);
+            ).Set(data);
 
         static public State<Unit> SetRegData(int reg, (int type, byte db, ushort dw, uint dd) data) =>
             SetCpu(EnvSetRegData(data)(reg));

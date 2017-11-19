@@ -235,7 +235,7 @@ namespace Emu86
 
         static public State<Unit> IpInc(int inc) =>
                 from ip in Get(_ip)
-                from _ in SetCpu(_ip, (ushort)(ip + inc))
+                from _ in Set(_ip, (ushort)(ip + inc))
                 select _;
 
         static public State<Unit> SetCpu(Func<CPU, CPU> func) =>
@@ -251,9 +251,6 @@ namespace Emu86
             from cpu in GetDataFromEnvCpu(func)
             from _ in SetCpu(cpu)
             select _;
-
-        static public State<Unit> SetCpu<T>(this Accessor<CPU, T> acc, T value) =>
-            SetCpu(cpu => acc.setter(cpu)(value));
 
         static public State<Unit> SetCpu<T>(params (Accessor<CPU, T> acc, T value)[] arr) =>
             arr.Select(
