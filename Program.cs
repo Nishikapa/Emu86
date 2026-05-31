@@ -123,6 +123,46 @@ static class Program
         from _2 in _df.Set(true)
         select unit;
 
+    static State<Unit> Push_50_57 =>
+        from _1 in SetLog("Push_50_57")
+        from opecode in Opecodes
+        let reg = opecode[0] & 0x07
+        from value in GetRegData16(reg)
+        from _2 in Push16(value)
+        select unit;
+
+    static State<Unit> Pop_58_5F =>
+        from _1 in SetLog("Pop_58_5F")
+        from opecode in Opecodes
+        let reg = opecode[0] & 0x07
+        from value in Pop16
+        from _2 in SetRegData16(reg, value)
+        select unit;
+
+    static State<Unit> PushImm_68 =>
+        from _1 in SetLog("PushImm_68")
+        from value in GetMemoryDataIp16
+        from _2 in Push16(value)
+        select unit;
+
+    static State<Unit> PushImm_6A =>
+        from _1 in SetLog("PushImm_6A")
+        from value in GetMemoryDataIp8
+        from _2 in Push16((ushort)(sbyte)value)
+        select unit;
+
+    static State<Unit> Pushf_9C =>
+        from _1 in SetLog("Pushf_9C")
+        from fl in GetDataFromCpu(cpu => (ushort)cpu.eflags)
+        from _2 in Push16(fl)
+        select unit;
+
+    static State<Unit> Popf_9D =>
+        from _1 in SetLog("Popf_9D")
+        from fl in Pop16
+        from _2 in SetCpu(cpu => { cpu.eflags = (cpu.eflags & 0xFFFF0000) | fl; return cpu; })
+        select unit;
+
     static State<Unit> Nop_90 =>
         from _ in SetLog("Nop_90")
         select unit;
@@ -257,12 +297,18 @@ static class Program
         (0x28, 6, Arithmetic),
         (0x30, 6, Arithmetic),
         (0x38, 6, Arithmetic),
+        (0x50, 8, Push_50_57),
+        (0x58, 8, Pop_58_5F),
+        (0x68, 1, PushImm_68),
+        (0x6A, 1, PushImm_6A),
         (0x70, 16, Jcc_70_7F),
         (0x80, 2, Group1_80_81),
         (0x83, 1, Group1_83),
         (0x88, 4, Mov_88_8B),
         (0x8E, 1, Mov_8E),
         (0x90, 1, Nop_90),
+        (0x9C, 1, Pushf_9C),
+        (0x9D, 1, Popf_9D),
         (0xB0, 16, Mov_B0_BF),
         (0xE4, 2, In_E4_E5),
         (0xE6, 2, Out_E6_E7),
