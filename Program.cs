@@ -73,7 +73,7 @@ static class Program
         var cpu = cpu2;
         while (_cx.getter(cpu) != 0)
         {
-            var (ok2, _, cpuN, _) = state(env, cpu, [(byte)op]);
+            var (ok2, _, cpuN, _) = state(env, cpu, [op]);
             if (!ok2)
                 return (false, default, cpu1, log);
             cpu = _cx.setter(cpuN)((ushort)(_cx.getter(cpuN) - 1));
