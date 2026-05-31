@@ -123,6 +123,40 @@ static class Program
         from _2 in _df.Set(true)
         select unit;
 
+    static State<Unit> Test_84_85 =>
+        from _1 in SetLog("Test_84_85")
+        from opecode in Opecodes
+        let w = 0 != (opecode[0] & 0x01)
+        from m in ModRegRm()
+        from rmData in GetMemOrRegData(m.mod, m.rm, w)
+        from regData in GetRegData(m.reg, rmData.data.type)
+        // TEST は AND の結果を捨ててフラグ(CF=OF=0, ZF/SF)だけ更新する。
+        from _2 in w
+            ? update_eflags((ushort)(rmData.data.dw & regData.dw))
+            : update_eflags((byte)(rmData.data.db & regData.db))
+        select unit;
+
+    static State<Unit> Test_A8_A9 =>
+        from _1 in SetLog("Test_A8_A9")
+        from opecode in Opecodes
+        let w = 0 != (opecode[0] & 0x01)
+        from acc in GetRegData(0, w ? 1 : 0) // 0=AL/AX
+        from imm in GetMemoryDataIp_(acc.type)
+        from _2 in w
+            ? update_eflags((ushort)(acc.dw & imm.dw))
+            : update_eflags((byte)(acc.db & imm.db))
+        select unit;
+
+    static State<Unit> Xchg_91_97 =>
+        from _1 in SetLog("Xchg_91_97")
+        from opecode in Opecodes
+        let reg = opecode[0] & 0x07
+        from ax in GetRegData16(0)
+        from rv in GetRegData16(reg)
+        from _2 in SetRegData16(0, rv)
+        from _3 in SetRegData16(reg, ax)
+        select unit;
+
     static State<Unit> Inc_40_47 =>
         from _1 in SetLog("Inc_40_47")
         from opecode in Opecodes
@@ -347,11 +381,14 @@ static class Program
         (0x70, 16, Jcc_70_7F),
         (0x80, 2, Group1_80_81),
         (0x83, 1, Group1_83),
+        (0x84, 2, Test_84_85),
         (0x88, 4, Mov_88_8B),
         (0x8E, 1, Mov_8E),
         (0x90, 1, Nop_90),
+        (0x91, 7, Xchg_91_97),
         (0x9C, 1, Pushf_9C),
         (0x9D, 1, Popf_9D),
+        (0xA8, 2, Test_A8_A9),
         (0xB0, 16, Mov_B0_BF),
         (0xC2, 1, Ret_C2),
         (0xC3, 1, Ret_C3),
