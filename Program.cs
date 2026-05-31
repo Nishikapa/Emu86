@@ -36,6 +36,14 @@ static class Program
         from d6 in SetMemOrRegData(d2, d5)
         select d6;
 
+    static State<Unit> Lea_8D =>
+        from _1 in SetLog("Lea_8D")
+        from m in ModRegRm()
+        // LEA はメモリを読まず、実効アドレス(オフセット)そのものを reg へ書く。
+        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from _2 in SetRegData16(m.reg, (ushort)addr.addr)
+        select unit;
+
     static State<Unit> Mov_8E =>
         from _1 in SetLog("Mov_8E")
         from m in ModRegRm()
@@ -383,6 +391,7 @@ static class Program
         (0x83, 1, Group1_83),
         (0x84, 2, Test_84_85),
         (0x88, 4, Mov_88_8B),
+        (0x8D, 1, Lea_8D),
         (0x8E, 1, Mov_8E),
         (0x90, 1, Nop_90),
         (0x91, 7, Xchg_91_97),
