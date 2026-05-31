@@ -43,6 +43,20 @@ static class Program
         from _2 in Movs(w)
         select unit;
 
+    static State<Unit> Stos_AA_AB =>
+        from _1 in SetLog("Stos_AA_AB")
+        from opecode in Opecodes
+        let w = 0 != (opecode[0] & 0x01)
+        from _2 in Stos(w)
+        select unit;
+
+    static State<Unit> Lods_AC_AD =>
+        from _1 in SetLog("Lods_AC_AD")
+        from opecode in Opecodes
+        let w = 0 != (opecode[0] & 0x01)
+        from _2 in Lods(w)
+        select unit;
+
     static State<Unit> Lea_8D =>
         from _1 in SetLog("Lea_8D")
         from m in ModRegRm()
@@ -406,6 +420,8 @@ static class Program
         (0x9D, 1, Popf_9D),
         (0xA4, 2, Movs_A4_A5),
         (0xA8, 2, Test_A8_A9),
+        (0xAA, 2, Stos_AA_AB),
+        (0xAC, 2, Lods_AC_AD),
         (0xB0, 16, Mov_B0_BF),
         (0xC2, 1, Ret_C2),
         (0xC3, 1, Ret_C3),

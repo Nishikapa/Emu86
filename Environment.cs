@@ -108,6 +108,36 @@ static public partial class Ext
             return cpu;
         });
 
+    // STOS: AL/AX -> [ES:DI]、DF に従って DI を増減する。
+    static public State<Unit> Stos(bool w) =>
+        SetCpu((env, cpu) =>
+        {
+            var dst = GetMemoryAddr(_es.getter(cpu), _di.getter(cpu)).addr;
+            var size = w ? 2 : 1;
+
+            var bytes = w ? _ax.getter(cpu).ToByteArray() : _al.getter(cpu).ToByteArray();
+            EnvSetMemoryDatas(env, dst, bytes);
+
+            var delta = _df.getter(cpu) ? -size : size;
+            cpu = _di.setter(cpu)((ushort)(_di.getter(cpu) + delta));
+            return cpu;
+        });
+
+    // LODS: [DS:SI] -> AL/AX、DF に従って SI を増減する。
+    static public State<Unit> Lods(bool w) =>
+        SetCpu((env, cpu) =>
+        {
+            var src = GetMemoryAddr(_ds.getter(cpu), _si.getter(cpu)).addr;
+            var size = w ? 2 : 1;
+
+            cpu = w ? _ax.setter(cpu)(EnvGetMemoryData16(env, src))
+                    : _al.setter(cpu)(EnvGetMemoryData8(env, src));
+
+            var delta = _df.getter(cpu) ? -size : size;
+            cpu = _si.setter(cpu)((ushort)(_si.getter(cpu) + delta));
+            return cpu;
+        });
+
     static public State<(int type, byte db, ushort dw, uint dd)> GetRegData(int reg, int type) =>
         GetDataFromCpu(GetTypeData_<CPU>(
             type,
