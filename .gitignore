@@ -1,0 +1,11 @@
+# Build output
+bin/
+obj/
+
+# IDE
+.vscode/
+*.user
+*.suo
+
+# Backups
+*.orig
