@@ -78,13 +78,16 @@ static class Program
         from _2 in SetRegData(reg, data.data)
         select unit;
 
-    static State<Unit> Mov_88_89 =>
-        from _1 in SetLog("Mov_88_89")
+    static State<Unit> Mov_88_8B =>
+        from _1 in SetLog("Mov_88_8B")
         from opecode in Opecodes
         let w = 0 != (opecode[0] & 0x01)
+        let d = 0 != (opecode[0] & 0x02)
         from m in ModRegRm()
-        from data in GetMemOrRegData(m.mod, m.rm, w)
-        from _2 in SetRegData(m.reg, data.data)
+        from rmData in GetMemOrRegData(m.mod, m.rm, w)
+        from regData in GetRegData(m.reg, rmData.data.type)
+        // d=1: reg <- r/m (0x8A/0x8B) , d=0: r/m <- reg (0x88/0x89)
+        from _2 in d ? SetRegData(m.reg, rmData.data) : SetMemOrRegData(rmData.input, regData)
         select unit;
 
     static State<Unit> Arithmetic =>
@@ -118,6 +121,46 @@ static class Program
     static State<Unit> Std_FD =>
         from _1 in SetLog("Std_FD")
         from _2 in _df.Set(true)
+        select unit;
+
+    static State<Unit> Nop_90 =>
+        from _ in SetLog("Nop_90")
+        select unit;
+
+    static State<Unit> Hlt_F4 =>
+        from _ in SetLog("Hlt_F4")
+        select unit;
+
+    static State<Unit> Clc_F8 =>
+        from _1 in SetLog("Clc_F8")
+        from _2 in _cf.Set(false)
+        select unit;
+
+    static State<Unit> Stc_F9 =>
+        from _1 in SetLog("Stc_F9")
+        from _2 in _cf.Set(true)
+        select unit;
+
+    static State<Unit> Cmc_F5 =>
+        from _1 in SetLog("Cmc_F5")
+        from cf in Get(_cf)
+        from _2 in _cf.Set(!cf)
+        select unit;
+
+    static State<Unit> Jmp_EB =>
+        from _1 in SetLog("Jmp_EB")
+        from offset in GetMemoryDataIp8
+        from _2 in IpInc((sbyte)offset)
+        select unit;
+
+    static State<Unit> Jcc_70_7F =>
+        from _1 in SetLog("Jcc_70_7F")
+        from opecode in Opecodes
+        let type = opecode[0] & 0xF
+        from f in Jcc(type)
+        from offset in GetMemoryDataIp8
+        let inc = f ? (sbyte)offset : 0
+        from _2 in IpInc(inc)
         select unit;
 
     static State<Unit> Out_E6_E7 =>
@@ -215,15 +258,22 @@ static class Program
         (0x28, 6, Arithmetic),
         (0x30, 6, Arithmetic),
         (0x38, 6, Arithmetic),
+        (0x70, 16, Jcc_70_7F),
         (0x80, 2, Group1_80_81),
         (0x83, 1, Group1_83),
-        (0x88, 2, Mov_88_89),
+        (0x88, 4, Mov_88_8B),
         (0x8E, 1, Mov_8E),
+        (0x90, 1, Nop_90),
         (0xB0, 16, Mov_B0_BF),
         (0xE4, 2, In_E4_E5),
         (0xE6, 2, Out_E6_E7),
         (0xE9, 1, Jump_E9),
         (0xEA, 1, FarJump_EA),
+        (0xEB, 1, Jmp_EB),
+        (0xF4, 1, Hlt_F4),
+        (0xF5, 1, Cmc_F5),
+        (0xF8, 1, Clc_F8),
+        (0xF9, 1, Stc_F9),
         (0xFA, 1, Cli_FA),
         (0xFB, 1, Sti_FB),
         (0xFC, 1, Cld_FC),
