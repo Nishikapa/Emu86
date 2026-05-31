@@ -66,8 +66,28 @@ static public partial class Ext
     static public State<Unit> SetRegData(int reg, (int type, byte db, ushort dw, uint dd) data) =>
         SetCpu(EnvSetRegData(data)(reg));
 
+    static public State<ushort> GetRegData16(int reg) =>
+        GetDataFromCpu(EnvGetDataFromCPU(ArrayReg16)(reg));
+
     static public State<uint> GetRegData32(int reg) =>
         GetDataFromCpu(EnvGetDataFromCPU(ArrayReg32)(reg));
+
+    /// Stack ////////////////////////////////////
+    // SP を 2 減らしてから SS:SP に 16bit を書き込む（PUSH）。
+    static public State<Unit> Push16(ushort value) =>
+        from _1 in SetCpu(cpu => { cpu.sp -= 2; return cpu; })
+        from _2 in SetCpu((env, cpu) =>
+        {
+            EnvSetMemoryDatas(env, GetMemoryAddr(cpu.ss, cpu.sp).addr, value.ToByteArray());
+            return cpu;
+        })
+        select Unit.unit;
+
+    // SS:SP から 16bit を読み出してから SP を 2 増やす（POP）。
+    static public State<ushort> Pop16 =>
+        from value in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryData16(env, GetMemoryAddr(cpu.ss, cpu.sp).addr))
+        from _ in SetCpu(cpu => { cpu.sp += 2; return cpu; })
+        select value;
 
     static public State<(int type, byte db, ushort dw, uint dd)> GetRegData(int reg, int type) =>
         GetDataFromCpu(GetTypeData_<CPU>(
