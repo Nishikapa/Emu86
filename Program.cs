@@ -127,6 +127,12 @@ namespace Emu86
             from opecode in Opecodes
             let w = 0 != (opecode[0] & 1)
             from port in GetMemoryDataIp8
+            from _2 in SetCpu((env, cpu) =>
+            {
+                env.IoPort[port] = cpu.al;
+                if (w) { env.IoPort[port + 1] = cpu.ah; }
+                return cpu;
+            })
             select unit;
 
         static State<Unit> In_E4_E5 =>
@@ -134,20 +140,25 @@ namespace Emu86
             from opecode in Opecodes
             let w = 0 != (opecode[0] & 1)
             from port in GetMemoryDataIp8
-            from _2 in SetCpu(cpu => { if (w) { cpu.ax = 0; } else { cpu.al = 0; } return cpu; })
+            from _2 in SetCpu((env, cpu) =>
+            {
+                if (w) { cpu.ax = (ushort)(env.IoPort[port] | (env.IoPort[port + 1] << 8)); }
+                else { cpu.al = env.IoPort[port]; }
+                return cpu;
+            })
             select unit;
 
         static State<Unit> Lgdt(int mod, int rm) =>
             from addr in GetMemOrRegAddr(mod, rm)
             from dw in GetMemOrRegData16(addr)
-            from dd in GetMemOrRegData16((addr.isMem, addr.addr + 2))
-            from _ in SetCpu(cpu => { cpu.idt_base = dd; cpu.idt_limit = dw; return cpu; })
+            from dd in GetMemOrRegData32((addr.isMem, addr.addr + 2))
+            from _ in SetCpu(cpu => { cpu.gdt_base = dd; cpu.gdt_limit = dw; return cpu; })
             select unit;
 
         static State<Unit> Lidt(int mod, int rm) =>
             from addr in GetMemOrRegAddr(mod, rm)
             from dw in GetMemOrRegData16(addr)
-            from dd in GetMemOrRegData16((addr.isMem, addr.addr + 2))
+            from dd in GetMemOrRegData32((addr.isMem, addr.addr + 2))
             from _ in SetCpu(cpu => { cpu.idt_base = dd; cpu.idt_limit = dw; return cpu; })
             select unit;
 

@@ -118,7 +118,7 @@ namespace Emu86
                     from cf in Get(_cf)
                     let _data2 = (uint)(dd2 + (cf ? 1 : 0))
                     from _ in update_eflags_sub(dd1, _data2)
-                    select (db1 - _data2)
+                    select (dd1 - _data2)
                 ),
                 Choice( // AND
                     type,
@@ -327,16 +327,16 @@ namespace Emu86
 
         static public State<Unit> update_eflags_add(byte v1, byte v2) =>
             SetCpu(
-                (_cf, (v1 + v2) < v1),
-                (_zf, 0 == (v1 + v2)),
+                (_cf, 0xFF < (v1 + v2)),
+                (_zf, 0 == (byte)(v1 + v2)),
                 (_sf, TopBit((byte)(v1 + v2))),
                 (_of, (TopBit(v1) == TopBit(v2)) && (TopBit(v1) != TopBit((byte)(v1 + v2))))
             );
 
         static public State<Unit> update_eflags_add(ushort v1, ushort v2) =>
             SetCpu(
-                (_cf, (v1 + v2) < v1),
-                (_zf, 0 == (v1 + v2)),
+                (_cf, 0xFFFF < (v1 + v2)),
+                (_zf, 0 == (ushort)(v1 + v2)),
                 (_sf, TopBit((ushort)(v1 + v2))),
                 (_of, (TopBit(v1) == TopBit(v2)) && (TopBit(v1) != TopBit((ushort)(v1 + v2))))
             );

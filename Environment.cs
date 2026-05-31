@@ -312,8 +312,6 @@ namespace Emu86
                                 break;
                             case 4: // SS:[ESP+d32]
                                 throw new NotImplementedException();
-                                addr = (uint)(ss_base + cpu.esp + d32);
-                                break;
                             case 5: // SS:[EBP+d32]
                                 addr = (uint)(ss_base + cpu.ebp + d32);
                                 break;
@@ -455,13 +453,24 @@ namespace Emu86
     {
         public EmuEnvironment()
         {
-            // bios
+            // bios: 埋め込みリソース "bios.bin" が存在すれば 1MB メモリ空間の末尾に配置する。
+            //       リソースが無い場合はゼロ初期化のまま起動する。
+            var asm = System.Reflection.Assembly.GetExecutingAssembly();
+            var resName = asm.GetManifestResourceNames()
+                .FirstOrDefault(n => n.EndsWith("bios.bin", StringComparison.OrdinalIgnoreCase));
+            if (resName != null)
             {
-                var biosdata = Properties.Resources.bios;
-                Array.Copy(biosdata, 0, this.OneMegaMemory_, 0x100000 - biosdata.Length, biosdata.Length);
+                using (var stream = asm.GetManifestResourceStream(resName))
+                {
+                    var biosdata = new byte[stream.Length];
+                    stream.ReadExactly(biosdata);
+                    Array.Copy(biosdata, 0, this.OneMegaMemory_, 0x100000 - biosdata.Length, biosdata.Length);
+                }
             }
         }
 
         public byte[] OneMegaMemory_ = new byte[1024 * 1024];
+
+        public byte[] IoPort = new byte[0x10000];
     }
 }
