@@ -57,6 +57,30 @@ static class Program
         from _2 in Lods(w)
         select unit;
 
+    // REP が前置できる文字列命令のオペコード集合。
+    static readonly HashSet<int> stringOps = [0xA4, 0xA5, 0xA6, 0xA7, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF];
+
+    // REP (0xF3): 後続の文字列命令を CX 回繰り返す。CX==0 なら 1 回も実行しない。
+    static State<Unit> Rep_F3 => (env, cpu1, ope) =>
+    {
+        var (ok, op, cpu2, log) = GetMemoryDataIp8(env, cpu1, ope);
+        if (!ok)
+            return (false, default, cpu1, log);
+
+        if (!stringOps.Contains(op) || !oneByte.TryGetValue(op, out var state))
+            return (false, default, cpu1, log);
+
+        var cpu = cpu2;
+        while (_cx.getter(cpu) != 0)
+        {
+            var (ok2, _, cpuN, _) = state(env, cpu, [(byte)op]);
+            if (!ok2)
+                return (false, default, cpu1, log);
+            cpu = _cx.setter(cpuN)((ushort)(_cx.getter(cpuN) - 1));
+        }
+        return (true, unit, cpu, log);
+    };
+
     static State<Unit> Lea_8D =>
         from _1 in SetLog("Lea_8D")
         from m in ModRegRm()
@@ -431,6 +455,7 @@ static class Program
         (0xE9, 1, Jump_E9),
         (0xEA, 1, FarJump_EA),
         (0xEB, 1, Jmp_EB),
+        (0xF3, 1, Rep_F3),
         (0xF4, 1, Hlt_F4),
         (0xF5, 1, Cmc_F5),
         (0xF8, 1, Clc_F8),
