@@ -57,11 +57,30 @@ static class Program
         from _2 in Lods(w)
         select unit;
 
+    static State<Unit> Cmps_A6_A7 =>
+        from _1 in SetLog("Cmps_A6_A7")
+        from opecode in Opecodes
+        let w = 0 != (opecode[0] & 0x01)
+        from _2 in Cmps(w)
+        select unit;
+
+    static State<Unit> Scas_AE_AF =>
+        from _1 in SetLog("Scas_AE_AF")
+        from opecode in Opecodes
+        let w = 0 != (opecode[0] & 0x01)
+        from _2 in Scas(w)
+        select unit;
+
     // REP が前置できる文字列命令のオペコード集合。
     static readonly HashSet<int> stringOps = [0xA4, 0xA5, 0xA6, 0xA7, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF];
+    // ZF を見て継続判定する比較系（CMPS/SCAS）。それ以外は CX のみで判定する。
+    static readonly HashSet<int> zfStringOps = [0xA6, 0xA7, 0xAE, 0xAF];
 
-    // REP (0xF3): 後続の文字列命令を CX 回繰り返す。CX==0 なら 1 回も実行しない。
-    static State<Unit> Rep_F3 => (env, cpu1, ope) =>
+    // 文字列命令を CX 回繰り返す共通ループ。
+    //   repZf==null     : REP    (0xF3, 非比較系) — CX 回そのまま繰り返す
+    //   repZf==true     : REPE   (0xF3, 比較系)   — ZF==0 になったら打ち切り
+    //   repZf==false    : REPNE  (0xF2)           — ZF==1 になったら打ち切り
+    static State<Unit> RepLoop(bool? repZf) => (env, cpu1, ope) =>
     {
         var (ok, op, cpu2, log) = GetMemoryDataIp8(env, cpu1, ope);
         if (!ok)
@@ -70,6 +89,9 @@ static class Program
         if (!stringOps.Contains(op) || !oneByte.TryGetValue(op, out var state))
             return (false, default, cpu1, log);
 
+        // 比較系のみ ZF 条件を適用する（MOVS/STOS/LODS は CX だけで回す）。
+        var checkZf = repZf is bool && zfStringOps.Contains(op);
+
         var cpu = cpu2;
         while (_cx.getter(cpu) != 0)
         {
@@ -77,9 +99,17 @@ static class Program
             if (!ok2)
                 return (false, default, cpu1, log);
             cpu = _cx.setter(cpuN)((ushort)(_cx.getter(cpuN) - 1));
+
+            if (checkZf && _zf.getter(cpu) != repZf.Value)
+                break;
         }
         return (true, unit, cpu, log);
     };
+
+    // REP / REPE / REPZ (0xF3)
+    static State<Unit> Rep_F3 => RepLoop(true);
+    // REPNE / REPNZ (0xF2)
+    static State<Unit> Repne_F2 => RepLoop(false);
 
     static State<Unit> Lea_8D =>
         from _1 in SetLog("Lea_8D")
@@ -443,9 +473,11 @@ static class Program
         (0x9C, 1, Pushf_9C),
         (0x9D, 1, Popf_9D),
         (0xA4, 2, Movs_A4_A5),
+        (0xA6, 2, Cmps_A6_A7),
         (0xA8, 2, Test_A8_A9),
         (0xAA, 2, Stos_AA_AB),
         (0xAC, 2, Lods_AC_AD),
+        (0xAE, 2, Scas_AE_AF),
         (0xB0, 16, Mov_B0_BF),
         (0xC2, 1, Ret_C2),
         (0xC3, 1, Ret_C3),
@@ -455,6 +487,7 @@ static class Program
         (0xE9, 1, Jump_E9),
         (0xEA, 1, FarJump_EA),
         (0xEB, 1, Jmp_EB),
+        (0xF2, 1, Repne_F2),
         (0xF3, 1, Rep_F3),
         (0xF4, 1, Hlt_F4),
         (0xF5, 1, Cmc_F5),
