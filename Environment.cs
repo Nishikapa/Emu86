@@ -138,6 +138,45 @@ static public partial class Ext
             return cpu;
         });
 
+    // DF に従って SI/DI を size 分だけ増減する補助。
+    static State<Unit> AdvanceSiDi(bool w, bool si, bool di) =>
+        SetCpu(cpu =>
+        {
+            var delta = _df.getter(cpu) ? -(w ? 2 : 1) : (w ? 2 : 1);
+            if (si) cpu = _si.setter(cpu)((ushort)(_si.getter(cpu) + delta));
+            if (di) cpu = _di.setter(cpu)((ushort)(_di.getter(cpu) + delta));
+            return cpu;
+        });
+
+    // CMPS: [DS:SI] - [ES:DI] でフラグを更新（結果は破棄）し、SI/DI を増減する。
+    static public State<Unit> Cmps(bool w) =>
+        from vals in GetDataFromEnvCpu((env, cpu) =>
+        {
+            var src = GetMemoryAddr(_ds.getter(cpu), _si.getter(cpu)).addr;
+            var dst = GetMemoryAddr(_es.getter(cpu), _di.getter(cpu)).addr;
+            return w
+                ? (s: (uint)EnvGetMemoryData16(env, src), d: (uint)EnvGetMemoryData16(env, dst))
+                : (s: (uint)EnvGetMemoryData8(env, src), d: (uint)EnvGetMemoryData8(env, dst));
+        })
+        from _f in w ? update_eflags_sub((ushort)vals.s, (ushort)vals.d)
+                     : update_eflags_sub((byte)vals.s, (byte)vals.d)
+        from _adv in AdvanceSiDi(w, si: true, di: true)
+        select Unit.unit;
+
+    // SCAS: AL/AX - [ES:DI] でフラグを更新（結果は破棄）し、DI を増減する。
+    static public State<Unit> Scas(bool w) =>
+        from vals in GetDataFromEnvCpu((env, cpu) =>
+        {
+            var dst = GetMemoryAddr(_es.getter(cpu), _di.getter(cpu)).addr;
+            return w
+                ? (a: (uint)_ax.getter(cpu), m: (uint)EnvGetMemoryData16(env, dst))
+                : (a: (uint)_al.getter(cpu), m: (uint)EnvGetMemoryData8(env, dst));
+        })
+        from _f in w ? update_eflags_sub((ushort)vals.a, (ushort)vals.m)
+                     : update_eflags_sub((byte)vals.a, (byte)vals.m)
+        from _adv in AdvanceSiDi(w, si: false, di: true)
+        select Unit.unit;
+
     static public State<(int type, byte db, ushort dw, uint dd)> GetRegData(int reg, int type) =>
         GetDataFromCpu(GetTypeData_<CPU>(
             type,
