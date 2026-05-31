@@ -123,6 +123,29 @@ static class Program
         from _2 in _df.Set(true)
         select unit;
 
+    static State<Unit> Call_E8 =>
+        from _1 in SetLog("Call_E8")
+        from offset in GetMemoryDataIp16
+        // rel16 読み取り後の IP（＝次命令アドレス）を戻り番地として push する。
+        from ret in GetDataFromCpu(cpu => cpu.ip)
+        from _2 in Push16(ret)
+        from _3 in IpInc((short)offset)
+        select unit;
+
+    static State<Unit> Ret_C3 =>
+        from _1 in SetLog("Ret_C3")
+        from ret in Pop16
+        from _2 in _ip.Set(ret)
+        select unit;
+
+    static State<Unit> Ret_C2 =>
+        from _1 in SetLog("Ret_C2")
+        from imm in GetMemoryDataIp16
+        from ret in Pop16
+        from _2 in _ip.Set(ret)
+        from _3 in SetCpu(cpu => { cpu.sp += imm; return cpu; })
+        select unit;
+
     static State<Unit> Push_50_57 =>
         from _1 in SetLog("Push_50_57")
         from opecode in Opecodes
@@ -310,8 +333,11 @@ static class Program
         (0x9C, 1, Pushf_9C),
         (0x9D, 1, Popf_9D),
         (0xB0, 16, Mov_B0_BF),
+        (0xC2, 1, Ret_C2),
+        (0xC3, 1, Ret_C3),
         (0xE4, 2, In_E4_E5),
         (0xE6, 2, Out_E6_E7),
+        (0xE8, 1, Call_E8),
         (0xE9, 1, Jump_E9),
         (0xEA, 1, FarJump_EA),
         (0xEB, 1, Jmp_EB),
