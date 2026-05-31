@@ -36,6 +36,13 @@ static class Program
         from d6 in SetMemOrRegData(d2, d5)
         select d6;
 
+    static State<Unit> Movs_A4_A5 =>
+        from _1 in SetLog("Movs_A4_A5")
+        from opecode in Opecodes
+        let w = 0 != (opecode[0] & 0x01)
+        from _2 in Movs(w)
+        select unit;
+
     static State<Unit> Lea_8D =>
         from _1 in SetLog("Lea_8D")
         from m in ModRegRm()
@@ -397,6 +404,7 @@ static class Program
         (0x91, 7, Xchg_91_97),
         (0x9C, 1, Pushf_9C),
         (0x9D, 1, Popf_9D),
+        (0xA4, 2, Movs_A4_A5),
         (0xA8, 2, Test_A8_A9),
         (0xB0, 16, Mov_B0_BF),
         (0xC2, 1, Ret_C2),
