@@ -322,6 +322,21 @@ static public partial class Ext
             (_of, (TopBit(v1) == TopBit(v2)) && (TopBit(v1) != TopBit(v1 + v2)))
         );
 
+    // INC/DEC は CF を変更しない（ZF/SF/OF のみ更新）。
+    static public State<Unit> update_eflags_inc(ushort v) =>
+        SetCpu(
+            (_zf, 0 == (ushort)(v + 1)),
+            (_sf, TopBit((ushort)(v + 1))),
+            (_of, v == 0x7FFF)
+        );
+
+    static public State<Unit> update_eflags_dec(ushort v) =>
+        SetCpu(
+            (_zf, 0 == (ushort)(v - 1)),
+            (_sf, TopBit((ushort)(v - 1))),
+            (_of, v == 0x8000)
+        );
+
     static public State<CPU> GetCpu => GetDataFromEnvCpu((env, cpu) => cpu);
 
     /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

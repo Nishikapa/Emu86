@@ -123,6 +123,24 @@ static class Program
         from _2 in _df.Set(true)
         select unit;
 
+    static State<Unit> Inc_40_47 =>
+        from _1 in SetLog("Inc_40_47")
+        from opecode in Opecodes
+        let reg = opecode[0] & 0x07
+        from v in GetRegData16(reg)
+        from _2 in update_eflags_inc(v)
+        from _3 in SetRegData16(reg, (ushort)(v + 1))
+        select unit;
+
+    static State<Unit> Dec_48_4F =>
+        from _1 in SetLog("Dec_48_4F")
+        from opecode in Opecodes
+        let reg = opecode[0] & 0x07
+        from v in GetRegData16(reg)
+        from _2 in update_eflags_dec(v)
+        from _3 in SetRegData16(reg, (ushort)(v - 1))
+        select unit;
+
     static State<Unit> Call_E8 =>
         from _1 in SetLog("Call_E8")
         from offset in GetMemoryDataIp16
@@ -320,6 +338,8 @@ static class Program
         (0x28, 6, Arithmetic),
         (0x30, 6, Arithmetic),
         (0x38, 6, Arithmetic),
+        (0x40, 8, Inc_40_47),
+        (0x48, 8, Dec_48_4F),
         (0x50, 8, Push_50_57),
         (0x58, 8, Pop_58_5F),
         (0x68, 1, PushImm_68),
