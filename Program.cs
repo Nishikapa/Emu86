@@ -143,8 +143,7 @@ static class Program
 
     static State<Unit> Cmc_F5 =>
         from _1 in SetLog("Cmc_F5")
-        from cf in Get(_cf)
-        from _2 in _cf.Set(!cf)
+        from _2 in SetCpu(cpu => { cpu.cf = !cpu.cf; return cpu; })
         select unit;
 
     static State<Unit> Jmp_EB =>
