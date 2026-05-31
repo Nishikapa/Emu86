@@ -89,6 +89,25 @@ static public partial class Ext
         from _ in SetCpu(cpu => { cpu.sp += 2; return cpu; })
         select value;
 
+    /// String ////////////////////////////////////
+    // MOVS: [DS:SI] -> [ES:DI] を 1 要素コピーし、DF に従って SI/DI を増減する。
+    static public State<Unit> Movs(bool w) =>
+        SetCpu((env, cpu) =>
+        {
+            var src = GetMemoryAddr(_ds.getter(cpu), _si.getter(cpu)).addr;
+            var dst = GetMemoryAddr(_es.getter(cpu), _di.getter(cpu)).addr;
+            var size = w ? 2 : 1;
+
+            var bytes = w ? EnvGetMemoryData16(env, src).ToByteArray()
+                          : EnvGetMemoryData8(env, src).ToByteArray();
+            EnvSetMemoryDatas(env, dst, bytes);
+
+            var delta = _df.getter(cpu) ? -size : size;
+            cpu = _si.setter(cpu)((ushort)(_si.getter(cpu) + delta));
+            cpu = _di.setter(cpu)((ushort)(_di.getter(cpu) + delta));
+            return cpu;
+        });
+
     static public State<(int type, byte db, ushort dw, uint dd)> GetRegData(int reg, int type) =>
         GetDataFromCpu(GetTypeData_<CPU>(
             type,
