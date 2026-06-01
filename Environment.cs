@@ -163,6 +163,14 @@ static public partial class Ext
         from _adv in AdvanceSiDi(w, si: true, di: true)
         select Unit.unit;
 
+    // XLAT: AL <- [DS:BX + AL]（バイト変換テーブル参照）。
+    static public State<Unit> Xlat =>
+        SetCpu((env, cpu) =>
+        {
+            var addr = GetMemoryAddr(cpu.ds, (ushort)(cpu.bx + cpu.al)).addr;
+            return _al.setter(cpu)(EnvGetMemoryData8(env, addr));
+        });
+
     // MOV AL/AX, [moffs]: 直接アドレス DS:offset から読み、アキュムレータへ書く。
     static public State<Unit> MovAccFromMoffs(bool w, ushort offset) =>
         SetCpu((env, cpu) =>
