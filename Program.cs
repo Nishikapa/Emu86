@@ -586,6 +586,24 @@ static class Program
         from _2 in SetCpu(cpu => { cpu.eflags = (cpu.eflags & 0xFFFF0000) | fl; return cpu; })
         select unit;
 
+    // CBW (0x98): AL を符号拡張して AX にする。
+    static State<Unit> Cbw_98 =>
+        from _1 in SetLog("Cbw_98")
+        from _2 in SetCpu(cpu => { cpu.ax = (ushort)(short)(sbyte)cpu.al; return cpu; })
+        select unit;
+
+    // CWD (0x99): AX を符号拡張して DX:AX にする（DX は符号ビットで埋める）。
+    static State<Unit> Cwd_99 =>
+        from _1 in SetLog("Cwd_99")
+        from _2 in SetCpu(cpu => { cpu.dx = (ushort)((short)cpu.ax < 0 ? 0xFFFF : 0x0000); return cpu; })
+        select unit;
+
+    // XLAT (0xD7): AL <- [DS:BX + AL]
+    static State<Unit> Xlat_D7 =>
+        from _1 in SetLog("Xlat_D7")
+        from _2 in Xlat
+        select unit;
+
     static State<Unit> Nop_90 =>
         from _ in SetLog("Nop_90")
         select unit;
@@ -764,6 +782,8 @@ static class Program
         (0x8E, 1, Mov_8E),
         (0x90, 1, Nop_90),
         (0x91, 7, Xchg_91_97),
+        (0x98, 1, Cbw_98),
+        (0x99, 1, Cwd_99),
         (0x9C, 1, Pushf_9C),
         (0x9D, 1, Popf_9D),
         (0xA0, 2, Mov_A0_A1),
@@ -781,6 +801,7 @@ static class Program
         (0xC6, 2, Mov_C6_C7),
         (0xD0, 2, Group2_D0_D1),
         (0xD2, 2, Group2_D2_D3),
+        (0xD7, 1, Xlat_D7),
         (0xE0, 3, Loop_E0_E2),
         (0xE3, 1, Jcxz_E3),
         (0xE4, 2, In_E4_E5),
