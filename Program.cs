@@ -182,6 +182,22 @@ static class Program
         from _2 in IpInc(inc)
         select unit;
 
+    // MOVZX/MOVSX r16, r/m8|r/m16 (0F B6/B7/BE/BF)
+    //   bit0 of ope2: 0=ソース8bit, 1=ソース16bit
+    //   0xBE/0xBF は符号拡張、0xB6/0xB7 はゼロ拡張。
+    static State<Unit> MovzxMovsx_0FB6_BF =>
+        from _1 in SetLog("MovzxMovsx_0FB6_BF")
+        from opecode in Opecodes
+        let srcW = 0 != (opecode[1] & 0x01)
+        let signed = 0 != (opecode[1] & 0x08)
+        from m in ModRegRm()
+        from src in GetMemOrRegData(m.mod, m.rm, srcW)
+        let value = srcW
+            ? (signed ? (ushort)(short)src.data.dw : src.data.dw)
+            : (signed ? (ushort)(sbyte)src.data.db : src.data.db)
+        from _2 in SetRegData16(m.reg, value)
+        select unit;
+
     static State<Unit> Mov_B0_BF =>
         from _1 in SetLog("Mov_B0_BF")
         from opecode in Opecodes
@@ -859,7 +875,9 @@ static class Program
         (0x0F, 0x80, 0x10, Jcc_0F80_0F8F),
         (0x0F, 0x01, 0x01, Group7_0F01),
         (0x0F, 0x20, 0x01, Mov_0F20),
-        (0x0F, 0x22, 0x01, Mov_0F22)
+        (0x0F, 0x22, 0x01, Mov_0F22),
+        (0x0F, 0xB6, 0x02, MovzxMovsx_0FB6_BF),   // MOVZX r,r/m8 ; r,r/m16
+        (0x0F, 0xBE, 0x02, MovzxMovsx_0FB6_BF)    // MOVSX r,r/m8 ; r,r/m16
     ];
 
     static Dictionary<int, State<Unit>> oneByte =>
