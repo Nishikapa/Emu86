@@ -606,6 +606,56 @@ static class Program
         from _3 in SetCpu(cpu => { cpu.sp += imm; return cpu; })
         select unit;
 
+    // PUSHA (0x60): AX,CX,DX,BX,(開始時SP),BP,SI,DI をこの順で push する。
+    static State<Unit> Pusha_60 =>
+        from _1 in SetLog("Pusha_60")
+        from sp0 in GetRegData16(4) // 開始時点の SP を退避
+        from _ax in GetRegData16(0)
+        from p0 in Push16(_ax)
+        from _cx in GetRegData16(1)
+        from p1 in Push16(_cx)
+        from _dx in GetRegData16(2)
+        from p2 in Push16(_dx)
+        from _bx in GetRegData16(3)
+        from p3 in Push16(_bx)
+        from p4 in Push16(sp0)
+        from _bp in GetRegData16(5)
+        from p5 in Push16(_bp)
+        from _si in GetRegData16(6)
+        from p6 in Push16(_si)
+        from _di in GetRegData16(7)
+        from p7 in Push16(_di)
+        select unit;
+
+    // POPA (0x61): DI,SI,BP,(SP読み飛ばし),BX,DX,CX,AX の順で pop する。SP は破棄。
+    static State<Unit> Popa_61 =>
+        from _1 in SetLog("Popa_61")
+        from di in Pop16
+        from _2 in SetRegData16(7, di)
+        from si in Pop16
+        from _3 in SetRegData16(6, si)
+        from bp in Pop16
+        from _4 in SetRegData16(5, bp)
+        from skip in Pop16            // 元 SP は読み飛ばす
+        from bx in Pop16
+        from _5 in SetRegData16(3, bx)
+        from dx in Pop16
+        from _6 in SetRegData16(2, dx)
+        from cx in Pop16
+        from _7 in SetRegData16(1, cx)
+        from ax in Pop16
+        from _8 in SetRegData16(0, ax)
+        select unit;
+
+    // LEAVE (0xC9): SP <- BP; BP <- pop()。スタックフレームを破棄する。
+    static State<Unit> Leave_C9 =>
+        from _1 in SetLog("Leave_C9")
+        from bp in GetRegData16(5)
+        from _2 in _sp.Set(bp)        // SP <- BP
+        from val in Pop16
+        from _3 in SetRegData16(5, val) // BP <- [SP]
+        select unit;
+
     static State<Unit> Push_50_57 =>
         from _1 in SetLog("Push_50_57")
         from opecode in Opecodes
@@ -857,6 +907,8 @@ static class Program
         (0x48, 8, Dec_48_4F),
         (0x50, 8, Push_50_57),
         (0x58, 8, Pop_58_5F),
+        (0x60, 1, Pusha_60),
+        (0x61, 1, Popa_61),
         (0x68, 1, PushImm_68),
         (0x6A, 1, PushImm_6A),
         (0x70, 16, Jcc_70_7F),
@@ -888,6 +940,7 @@ static class Program
         (0xC2, 1, Ret_C2),
         (0xC3, 1, Ret_C3),
         (0xC6, 2, Mov_C6_C7),
+        (0xC9, 1, Leave_C9),
         (0xD0, 2, Group2_D0_D1),
         (0xD2, 2, Group2_D2_D3),
         (0xD7, 1, Xlat_D7),
