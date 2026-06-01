@@ -586,6 +586,32 @@ static class Program
         from _2 in SetCpu(cpu => { cpu.eflags = (cpu.eflags & 0xFFFF0000) | fl; return cpu; })
         select unit;
 
+    // SAHF (0x9E): AH の下位8bit を FLAGS の下位8bit(SF/ZF/AF/PF/CF)へ転送する。
+    static State<Unit> Sahf_9E =>
+        from _1 in SetLog("Sahf_9E")
+        from _2 in SetCpu(cpu =>
+        {
+            // FLAGS 下位8bit のうち bit1 は常に 1。AH をそのまま反映する。
+            cpu.eflags = (cpu.eflags & 0xFFFFFF00) | cpu.ah | 0x02u;
+            return cpu;
+        })
+        select unit;
+
+    // LAHF (0x9F): FLAGS の下位8bit を AH へ転送する。
+    static State<Unit> Lahf_9F =>
+        from _1 in SetLog("Lahf_9F")
+        from _2 in SetCpu(cpu => { cpu.ah = (byte)(cpu.eflags & 0xFF); return cpu; })
+        select unit;
+
+    // MOV r/m, Sreg (0x8C): セグメントレジスタを r/m16 へ格納する。
+    static State<Unit> Mov_8C =>
+        from _1 in SetLog("Mov_8C")
+        from m in ModRegRm()
+        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from sreg in GetSRegData(m.reg)
+        from _2 in SetMemOrRegData(addr, sreg.ToTypeData())
+        select unit;
+
     // CBW (0x98): AL を符号拡張して AX にする。
     static State<Unit> Cbw_98 =>
         from _1 in SetLog("Cbw_98")
@@ -778,6 +804,7 @@ static class Program
         (0x83, 1, Group1_83),
         (0x84, 2, Test_84_85),
         (0x88, 4, Mov_88_8B),
+        (0x8C, 1, Mov_8C),
         (0x8D, 1, Lea_8D),
         (0x8E, 1, Mov_8E),
         (0x90, 1, Nop_90),
@@ -785,6 +812,8 @@ static class Program
         (0x98, 1, Cbw_98),
         (0x99, 1, Cwd_99),
         (0x9C, 1, Pushf_9C),
+        (0x9E, 1, Sahf_9E),
+        (0x9F, 1, Lahf_9F),
         (0x9D, 1, Popf_9D),
         (0xA0, 2, Mov_A0_A1),
         (0xA2, 2, Mov_A2_A3),
