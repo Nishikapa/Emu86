@@ -163,6 +163,30 @@ static public partial class Ext
         from _adv in AdvanceSiDi(w, si: true, di: true)
         select Unit.unit;
 
+    // BT系: r/m の bit 番目を CF にコピーし、op に応じて値を変更して書き戻す。
+    //   op: 0=BT(変更なし) 1=BTS(セット) 2=BTR(クリア) 3=BTC(反転)
+    static public State<Unit> BitTest((bool isMem, uint addr) addr, (int type, byte db, ushort dw, uint dd) data, int bit, int op) =>
+        from _f in _cf.Set(((data.type == 1 ? data.dw : data.dd) & (1u << (bit & (data.type == 1 ? 15 : 31)))) != 0)
+        from _w in op == 0
+            ? Unit.unit.ToState()
+            : SetMemOrRegData(addr, BitModify(data, bit, op))
+        select Unit.unit;
+
+    static (int type, byte db, ushort dw, uint dd) BitModify((int type, byte db, ushort dw, uint dd) data, int bit, int op)
+    {
+        var bits = data.type == 1 ? 16 : 32;
+        var mask = 1u << (bit & (bits - 1));
+        var v = data.type == 1 ? (uint)data.dw : data.dd;
+        v = op switch
+        {
+            1 => v | mask,    // BTS
+            2 => v & ~mask,   // BTR
+            3 => v ^ mask,    // BTC
+            _ => v,
+        };
+        return data.type == 1 ? ((ushort)v).ToTypeData() : v.ToTypeData();
+    }
+
     // XLAT: AL <- [DS:BX + AL]（バイト変換テーブル参照）。
     static public State<Unit> Xlat =>
         SetCpu((env, cpu) =>
