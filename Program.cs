@@ -182,6 +182,17 @@ static class Program
         from _2 in IpInc(inc)
         select unit;
 
+    // SETcc r/m8 (0F 90-9F): 条件成立なら 1、不成立なら 0 を r/m8 に書く。
+    static State<Unit> Setcc_0F90_9F =>
+        from _1 in SetLog("Setcc_0F90_9F")
+        from opecode in Opecodes
+        let type = opecode[1] & 0xF
+        from m in ModRegRm()
+        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from f in Jcc(type)
+        from _2 in SetMemOrRegData(addr, ((byte)(f ? 1 : 0)).ToTypeData())
+        select unit;
+
     // MOVZX/MOVSX r16, r/m8|r/m16 (0F B6/B7/BE/BF)
     //   bit0 of ope2: 0=ソース8bit, 1=ソース16bit
     //   0xBE/0xBF は符号拡張、0xB6/0xB7 はゼロ拡張。
@@ -876,6 +887,7 @@ static class Program
         (0x0F, 0x01, 0x01, Group7_0F01),
         (0x0F, 0x20, 0x01, Mov_0F20),
         (0x0F, 0x22, 0x01, Mov_0F22),
+        (0x0F, 0x90, 0x10, Setcc_0F90_9F),        // SETcc r/m8 (16 条件)
         (0x0F, 0xB6, 0x02, MovzxMovsx_0FB6_BF),   // MOVZX r,r/m8 ; r,r/m16
         (0x0F, 0xBE, 0x02, MovzxMovsx_0FB6_BF)    // MOVSX r,r/m8 ; r,r/m16
     ];
