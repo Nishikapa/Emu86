@@ -205,6 +205,16 @@ static class Program
         from _2 in BitTest(addr, data, imm, m.reg & 0x3)
         select unit;
 
+    // BSF/BSR r16, r/m16 (0F BC/BD): ビットスキャン。BC=前方(最下位), BD=後方(最上位)。
+    static State<Unit> BitScan_0FBC_BD =>
+        from _1 in SetLog("BitScan_0FBC_BD")
+        from opecode in Opecodes
+        let forward = opecode[1] == 0xBC
+        from m in ModRegRm()
+        from src in GetMemOrRegData(m.mod, m.rm, true)
+        from _2 in BitScan(m.reg, src.data.dw, forward)
+        select unit;
+
     // SETcc r/m8 (0F 90-9F): 条件成立なら 1、不成立なら 0 を r/m8 に書く。
     static State<Unit> Setcc_0F90_9F =>
         from _1 in SetLog("Setcc_0F90_9F")
@@ -917,6 +927,7 @@ static class Program
         (0x0F, 0xBA, 0x01, Group8_0FBA),          // BT/BTS/BTR/BTC r/m, imm8
         (0x0F, 0xBB, 0x01, BitTest_reg),          // BTC r/m, r
         (0x0F, 0xB6, 0x02, MovzxMovsx_0FB6_BF),   // MOVZX r,r/m8 ; r,r/m16
+        (0x0F, 0xBC, 0x02, BitScan_0FBC_BD),      // BSF/BSR r16, r/m16
         (0x0F, 0xBE, 0x02, MovzxMovsx_0FB6_BF)    // MOVSX r,r/m8 ; r,r/m16
     ];
 

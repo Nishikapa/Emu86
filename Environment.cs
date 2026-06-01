@@ -187,6 +187,31 @@ static public partial class Ext
         return data.type == 1 ? ((ushort)v).ToTypeData() : v.ToTypeData();
     }
 
+    // BSF/BSR: r/m16 内のセットビット位置を求めて reg へ書く。
+    //   forward=true で最下位(BSF)、false で最上位(BSR)。
+    //   ソースが 0 なら ZF=1 とし、結果は書き込まない（未定義）。
+    static public State<Unit> BitScan(int reg, ushort src, bool forward) =>
+        src == 0
+            ? _zf.Set(true)
+            : from _z in _zf.Set(false)
+              from _w in SetRegData16(reg, (ushort)BitScanIndex(src, forward))
+              select Unit.unit;
+
+    static int BitScanIndex(ushort src, bool forward)
+    {
+        if (forward)
+        {
+            for (int i = 0; i < 16; i++)
+                if ((src & (1 << i)) != 0) return i;
+        }
+        else
+        {
+            for (int i = 15; i >= 0; i--)
+                if ((src & (1 << i)) != 0) return i;
+        }
+        return 0;
+    }
+
     // XLAT: AL <- [DS:BX + AL]（バイト変換テーブル参照）。
     static public State<Unit> Xlat =>
         SetCpu((env, cpu) =>
