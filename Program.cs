@@ -182,6 +182,29 @@ static class Program
         from _2 in IpInc(inc)
         select unit;
 
+    // BT/BTS/BTR/BTC r/m, r (0F A3/AB/B3/BB): ビット番号はレジスタ reg。
+    //   ope2 の bit3-4 で op を選ぶ: A3->BT(0) AB->BTS(1) B3->BTR(2) BB->BTC(3)
+    static State<Unit> BitTest_reg =>
+        from _1 in SetLog("BitTest_reg")
+        from opecode in Opecodes
+        let op = (opecode[1] >> 3) & 0x3
+        from m in ModRegRm()
+        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from data in GetMemOrRegData(addr, true)
+        from bit in GetRegData16(m.reg)
+        from _2 in BitTest(addr, data, bit, op)
+        select unit;
+
+    // Group8 (0F BA): BT/BTS/BTR/BTC r/m, imm8。reg=4..7 で op を選ぶ。
+    static State<Unit> Group8_0FBA =>
+        from _1 in SetLog("Group8_0FBA")
+        from m in ModRegRm()
+        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from data in GetMemOrRegData(addr, true)
+        from imm in GetMemoryDataIp8
+        from _2 in BitTest(addr, data, imm, m.reg & 0x3)
+        select unit;
+
     // SETcc r/m8 (0F 90-9F): 条件成立なら 1、不成立なら 0 を r/m8 に書く。
     static State<Unit> Setcc_0F90_9F =>
         from _1 in SetLog("Setcc_0F90_9F")
@@ -888,6 +911,11 @@ static class Program
         (0x0F, 0x20, 0x01, Mov_0F20),
         (0x0F, 0x22, 0x01, Mov_0F22),
         (0x0F, 0x90, 0x10, Setcc_0F90_9F),        // SETcc r/m8 (16 条件)
+        (0x0F, 0xA3, 0x01, BitTest_reg),          // BT  r/m, r
+        (0x0F, 0xAB, 0x01, BitTest_reg),          // BTS r/m, r
+        (0x0F, 0xB3, 0x01, BitTest_reg),          // BTR r/m, r
+        (0x0F, 0xBA, 0x01, Group8_0FBA),          // BT/BTS/BTR/BTC r/m, imm8
+        (0x0F, 0xBB, 0x01, BitTest_reg),          // BTC r/m, r
         (0x0F, 0xB6, 0x02, MovzxMovsx_0FB6_BF),   // MOVZX r,r/m8 ; r,r/m16
         (0x0F, 0xBE, 0x02, MovzxMovsx_0FB6_BF)    // MOVSX r,r/m8 ; r,r/m16
     ];
