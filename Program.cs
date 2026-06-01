@@ -226,6 +226,145 @@ static class Program
         from _2 in SetMemOrRegData(addr, ret)
         select unit;
 
+    // Group3 (0xF6/0xF7): reg で TEST/NOT/NEG/MUL/IMUL/DIV/IDIV を選ぶ。
+    static State<Unit> Group3_F6_F7 =>
+        from _1 in SetLog("Group3_F6_F7")
+        from opecode in Opecodes
+        let w = 0 != (opecode[0] & 0x01)
+        from m in ModRegRm()
+        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from data in GetMemOrRegData(addr, w)
+        from _2 in Choice(
+            m.reg,
+            (0, Group3_Test(data)),
+            (1, Group3_Test(data)),
+            (2, Group3_Not(addr, data)),
+            (3, Group3_Neg(addr, data)),
+            (4, Group3_Mul(data)),
+            (5, Group3_Imul(data)),
+            (6, Group3_Div(data)),
+            (7, Group3_Idiv(data))
+        )
+        select unit;
+
+    // TEST r/m, imm : AND の結果を捨ててフラグ(CF=OF=0, ZF/SF)だけ更新する。
+    static State<Unit> Group3_Test((int type, byte db, ushort dw, uint dd) data) =>
+        from imm in GetMemoryDataIp_(data.type)
+        from _ in data.type == 0 ? update_eflags((byte)(data.db & imm.db))
+                : data.type == 1 ? update_eflags((ushort)(data.dw & imm.dw))
+                : update_eflags(data.dd & imm.dd)
+        select unit;
+
+    // NOT r/m : ビット反転（フラグ変化なし）。
+    static State<Unit> Group3_Not((bool isMem, uint addr) addr, (int type, byte db, ushort dw, uint dd) data) =>
+        SetMemOrRegData(addr,
+            data.type == 0 ? ((byte)~data.db).ToTypeData()
+          : data.type == 1 ? ((ushort)~data.dw).ToTypeData()
+          : (~data.dd).ToTypeData());
+
+    // NEG r/m : 0 - r/m。フラグは SUB と同じ。
+    static State<Unit> Group3_Neg((bool isMem, uint addr) addr, (int type, byte db, ushort dw, uint dd) data) =>
+        from _f in data.type == 0 ? update_eflags_sub((byte)0, data.db)
+                 : data.type == 1 ? update_eflags_sub((ushort)0, data.dw)
+                 : update_eflags_sub(0u, data.dd) // 注: byte/ushort の (byte)0/(ushort)0 はオーバーロード解決を明示するため残す
+        from _w in SetMemOrRegData(addr,
+            data.type == 0 ? ((byte)(0 - data.db)).ToTypeData()
+          : data.type == 1 ? ((ushort)(0 - data.dw)).ToTypeData()
+          : (0u - data.dd).ToTypeData())
+        select unit;
+
+    // MUL r/m : 符号なし乗算。AL*r/m8->AX, AX*r/m16->DX:AX, EAX*r/m32->EDX:EAX。
+    static State<Unit> Group3_Mul((int type, byte db, ushort dw, uint dd) data) =>
+        from cpu in GetCpu
+        let upper =
+            data.type == 0 ? (uint)((cpu.al * data.db) >> 8) & 0xFF :
+            data.type == 1 ? ((uint)cpu.ax * data.dw >> 16) & 0xFFFF :
+                             (uint)((ulong)cpu.eax * data.dd >> 32)
+        from _1 in SetCpu(c =>
+        {
+            if (data.type == 0) { c.ax = (ushort)(c.al * data.db); }
+            else if (data.type == 1) { uint p = (uint)c.ax * data.dw; c.ax = (ushort)p; c.dx = (ushort)(p >> 16); }
+            else { ulong p = (ulong)c.eax * data.dd; c.eax = (uint)p; c.edx = (uint)(p >> 32); }
+            return c;
+        })
+        from _2 in SetCpu((_cf, upper != 0), (_of, upper != 0))
+        select unit;
+
+    // IMUL r/m : 符号付き乗算。
+    static State<Unit> Group3_Imul((int type, byte db, ushort dw, uint dd) data) =>
+        from cpu in GetCpu
+        let prod = data.type == 0 ? (sbyte)cpu.al * (sbyte)data.db
+                 : data.type == 1 ? (short)cpu.ax * (short)data.dw
+                 : (long)(int)cpu.eax * (int)data.dd
+        let of = data.type == 0 ? prod < sbyte.MinValue || prod > sbyte.MaxValue
+               : data.type == 1 ? prod < short.MinValue || prod > short.MaxValue
+               : prod < int.MinValue || prod > int.MaxValue
+        from _1 in SetCpu(c =>
+        {
+            if (data.type == 0) { c.ax = (ushort)(short)prod; }
+            else if (data.type == 1) { c.ax = (ushort)prod; c.dx = (ushort)(prod >> 16); }
+            else { c.eax = (uint)prod; c.edx = (uint)(prod >> 32); }
+            return c;
+        })
+        from _2 in SetCpu((_cf, of), (_of, of))
+        select unit;
+
+    // DIV r/m : 符号なし除算。商と剰余を AL/AH, AX/DX, EAX/EDX へ。
+    static State<Unit> Group3_Div((int type, byte db, ushort dw, uint dd) data) =>
+        SetCpu(c =>
+        {
+            if (data.type == 0)
+            {
+                if (data.db == 0) throw new DivideByZeroException();
+                uint dividend = c.ax;
+                c.al = (byte)(dividend / data.db);
+                c.ah = (byte)(dividend % data.db);
+            }
+            else if (data.type == 1)
+            {
+                if (data.dw == 0) throw new DivideByZeroException();
+                uint dividend = ((uint)c.dx << 16) | c.ax;
+                c.ax = (ushort)(dividend / data.dw);
+                c.dx = (ushort)(dividend % data.dw);
+            }
+            else
+            {
+                if (data.dd == 0) throw new DivideByZeroException();
+                ulong dividend = ((ulong)c.edx << 32) | c.eax;
+                c.eax = (uint)(dividend / data.dd);
+                c.edx = (uint)(dividend % data.dd);
+            }
+            return c;
+        });
+
+    // IDIV r/m : 符号付き除算。
+    static State<Unit> Group3_Idiv((int type, byte db, ushort dw, uint dd) data) =>
+        SetCpu(c =>
+        {
+            if (data.type == 0)
+            {
+                if (data.db == 0) throw new DivideByZeroException();
+                int dividend = (short)c.ax;
+                c.al = (byte)(sbyte)(dividend / (sbyte)data.db);
+                c.ah = (byte)(sbyte)(dividend % (sbyte)data.db);
+            }
+            else if (data.type == 1)
+            {
+                if (data.dw == 0) throw new DivideByZeroException();
+                int dividend = (int)(((uint)c.dx << 16) | c.ax);
+                c.ax = (ushort)(short)(dividend / (short)data.dw);
+                c.dx = (ushort)(short)(dividend % (short)data.dw);
+            }
+            else
+            {
+                if (data.dd == 0) throw new DivideByZeroException();
+                long dividend = (long)(((ulong)c.edx << 32) | c.eax);
+                c.eax = (uint)(dividend / (int)data.dd);
+                c.edx = (uint)(dividend % (int)data.dd);
+            }
+            return c;
+        });
+
     static State<Unit> Cli_FA =>
         from _ in SetLog("Cli_FA")
         select unit;
@@ -530,6 +669,7 @@ static class Program
         (0xEB, 1, Jmp_EB),
         (0xF2, 1, Repne_F2),
         (0xF3, 1, Rep_F3),
+        (0xF6, 2, Group3_F6_F7),
         (0xF4, 1, Hlt_F4),
         (0xF5, 1, Cmc_F5),
         (0xF8, 1, Clc_F8),
