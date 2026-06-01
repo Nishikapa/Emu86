@@ -26,6 +26,39 @@ static class Program
         from _2 in IpInc((short)offset)
         select unit;
 
+    // CALL far ptr16:16 (0x9A): CS, IP を push してから offset:segment へ far ジャンプ。
+    static State<Unit> CallFar_9A =>
+        from _1 in SetLog("CallFar_9A")
+        from offset in GetMemoryDataIp16
+        from segment in GetMemoryDataIp16
+        from cs in GetSRegData(1)
+        from _2 in Push16(cs)
+        from ip in GetDataFromCpu(cpu => cpu.ip)
+        from _3 in Push16(ip)
+        from _4 in _ip.Set(offset)
+        from _5 in _cs.Set(segment)
+        select unit;
+
+    // RETF (0xCB): IP, CS を pop して far 復帰する。
+    static State<Unit> Retf_CB =>
+        from _1 in SetLog("Retf_CB")
+        from ip in Pop16
+        from _2 in _ip.Set(ip)
+        from cs in Pop16
+        from _3 in _cs.Set(cs)
+        select unit;
+
+    // RETF imm16 (0xCA): IP, CS を pop して復帰後、SP += imm16。
+    static State<Unit> Retf_CA =>
+        from _1 in SetLog("Retf_CA")
+        from imm in GetMemoryDataIp16
+        from ip in Pop16
+        from _2 in _ip.Set(ip)
+        from cs in Pop16
+        from _3 in _cs.Set(cs)
+        from _4 in SetCpu(cpu => { cpu.sp += imm; return cpu; })
+        select unit;
+
     static State<Unit> Group1_83 =>
         from _ in SetLog("Group1_83")
         from d1 in ModRegRm()
@@ -929,6 +962,7 @@ static class Program
         (0x8E, 1, Mov_8E),
         (0x90, 1, Nop_90),
         (0x91, 7, Xchg_91_97),
+        (0x9A, 1, CallFar_9A),
         (0x98, 1, Cbw_98),
         (0x99, 1, Cwd_99),
         (0x9C, 1, Pushf_9C),
@@ -950,6 +984,8 @@ static class Program
         (0xC6, 2, Mov_C6_C7),
         (0xC8, 1, Enter_C8),
         (0xC9, 1, Leave_C9),
+        (0xCA, 1, Retf_CA),
+        (0xCB, 1, Retf_CB),
         (0xD0, 2, Group2_D0_D1),
         (0xD2, 2, Group2_D2_D3),
         (0xD7, 1, Xlat_D7),
