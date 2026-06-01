@@ -609,6 +609,35 @@ static class Program
         from _2 in SetCpu(cpu => { cpu.cf = !cpu.cf; return cpu; })
         select unit;
 
+    // LOOP系 (0xE0-0xE2): CX-- してから、条件を満たせば rel8 分岐する。
+    //   0xE2 LOOP   : CX!=0
+    //   0xE1 LOOPE  : CX!=0 && ZF==1
+    //   0xE0 LOOPNE : CX!=0 && ZF==0
+    static State<Unit> Loop_E0_E2 =>
+        from _1 in SetLog("Loop_E0_E2")
+        from opecode in Opecodes
+        from offset in GetMemoryDataIp8
+        from cx in GetRegData16(1)
+        let newCx = (ushort)(cx - 1)
+        from _2 in SetRegData16(1, newCx)
+        from zf in GetDataFromCpu(cpu => cpu.zf)
+        let cond = (opecode[0] & 0x03) switch
+        {
+            0 => newCx != 0 && !zf,   // LOOPNE
+            1 => newCx != 0 && zf,    // LOOPE
+            _ => newCx != 0,          // LOOP
+        }
+        from _3 in IpInc(cond ? (sbyte)offset : 0)
+        select unit;
+
+    // JCXZ (0xE3): CX==0 なら rel8 分岐（CX は変更しない）。
+    static State<Unit> Jcxz_E3 =>
+        from _1 in SetLog("Jcxz_E3")
+        from offset in GetMemoryDataIp8
+        from cx in GetRegData16(1)
+        from _2 in IpInc(cx == 0 ? (sbyte)offset : 0)
+        select unit;
+
     static State<Unit> Jmp_EB =>
         from _1 in SetLog("Jmp_EB")
         from offset in GetMemoryDataIp8
@@ -752,6 +781,8 @@ static class Program
         (0xC6, 2, Mov_C6_C7),
         (0xD0, 2, Group2_D0_D1),
         (0xD2, 2, Group2_D2_D3),
+        (0xE0, 3, Loop_E0_E2),
+        (0xE3, 1, Jcxz_E3),
         (0xE4, 2, In_E4_E5),
         (0xE6, 2, Out_E6_E7),
         (0xE8, 1, Call_E8),
