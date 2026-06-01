@@ -163,6 +163,24 @@ static public partial class Ext
         from _adv in AdvanceSiDi(w, si: true, di: true)
         select Unit.unit;
 
+    // MOV AL/AX, [moffs]: 直接アドレス DS:offset から読み、アキュムレータへ書く。
+    static public State<Unit> MovAccFromMoffs(bool w, ushort offset) =>
+        SetCpu((env, cpu) =>
+        {
+            var addr = GetMemoryAddr(cpu.ds, offset).addr;
+            return w ? _ax.setter(cpu)(EnvGetMemoryData16(env, addr))
+                     : _al.setter(cpu)(EnvGetMemoryData8(env, addr));
+        });
+
+    // MOV [moffs], AL/AX: アキュムレータを直接アドレス DS:offset へ書く。
+    static public State<Unit> MovMoffsFromAcc(bool w, ushort offset) =>
+        SetCpu((env, cpu) =>
+        {
+            var addr = GetMemoryAddr(cpu.ds, offset).addr;
+            EnvSetMemoryDatas(env, addr, w ? _ax.getter(cpu).ToByteArray() : _al.getter(cpu).ToByteArray());
+            return cpu;
+        });
+
     // SCAS: AL/AX - [ES:DI] でフラグを更新（結果は破棄）し、DI を増減する。
     static public State<Unit> Scas(bool w) =>
         from vals in GetDataFromEnvCpu((env, cpu) =>
