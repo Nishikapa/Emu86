@@ -119,6 +119,36 @@ static class Program
         from _2 in SetRegData16(m.reg, (ushort)addr.addr)
         select unit;
 
+    // MOV r/m, imm (0xC6/0xC7)
+    static State<Unit> Mov_C6_C7 =>
+        from _1 in SetLog("Mov_C6_C7")
+        from opecode in Opecodes
+        let w = 0 != (opecode[0] & 0x01)
+        from m in ModRegRm()
+        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from imm in w ? GetMemoryDataIp16.Select(v => v.ToTypeData())
+                      : GetMemoryDataIp8.Select(v => v.ToTypeData())
+        from _2 in SetMemOrRegData(addr, imm)
+        select unit;
+
+    // MOV AL/AX, [moffs] (0xA0/0xA1): 直接アドレス(DS:offset16)から読み込む。
+    static State<Unit> Mov_A0_A1 =>
+        from _1 in SetLog("Mov_A0_A1")
+        from opecode in Opecodes
+        let w = 0 != (opecode[0] & 0x01)
+        from offset in GetMemoryDataIp16
+        from _2 in MovAccFromMoffs(w, offset)
+        select unit;
+
+    // MOV [moffs], AL/AX (0xA2/0xA3): アキュムレータを直接アドレス(DS:offset16)へ書き込む。
+    static State<Unit> Mov_A2_A3 =>
+        from _1 in SetLog("Mov_A2_A3")
+        from opecode in Opecodes
+        let w = 0 != (opecode[0] & 0x01)
+        from offset in GetMemoryDataIp16
+        from _2 in MovMoffsFromAcc(w, offset)
+        select unit;
+
     static State<Unit> Mov_8E =>
         from _1 in SetLog("Mov_8E")
         from m in ModRegRm()
@@ -707,6 +737,8 @@ static class Program
         (0x91, 7, Xchg_91_97),
         (0x9C, 1, Pushf_9C),
         (0x9D, 1, Popf_9D),
+        (0xA0, 2, Mov_A0_A1),
+        (0xA2, 2, Mov_A2_A3),
         (0xA4, 2, Movs_A4_A5),
         (0xA6, 2, Cmps_A6_A7),
         (0xA8, 2, Test_A8_A9),
@@ -717,6 +749,7 @@ static class Program
         (0xC0, 2, Group2_C0_C1),
         (0xC2, 1, Ret_C2),
         (0xC3, 1, Ret_C3),
+        (0xC6, 2, Mov_C6_C7),
         (0xD0, 2, Group2_D0_D1),
         (0xD2, 2, Group2_D2_D3),
         (0xE4, 2, In_E4_E5),
