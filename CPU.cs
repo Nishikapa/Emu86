@@ -171,6 +171,93 @@ static public partial class Ext
         return Calc(type1, db1, dw1, dd1, db2, dw2, dd2, kind);
     }
 
+    // Group2 シフト/ローテートを 1bit ずつ count 回適用する。
+    // kind: 0=ROL 1=ROR 2=RCL 3=RCR 4=SHL/SAL 5=SHR 6=SAL 7=SAR
+    static (uint result, bool cf, bool of) ComputeShift(uint v, int count, int kind, int bits, bool cfIn)
+    {
+        var mask = bits == 8 ? 0xFFu : bits == 16 ? 0xFFFFu : 0xFFFFFFFFu;
+        var msb = 1u << (bits - 1);
+        var result = v & mask;
+        var cf = cfIn;
+
+        for (int i = 0; i < count; i++)
+        {
+            switch (kind)
+            {
+                case 0: // ROL
+                    cf = (result & msb) != 0;
+                    result = ((result << 1) | (cf ? 1u : 0u)) & mask;
+                    break;
+                case 1: // ROR
+                    cf = (result & 1) != 0;
+                    result = ((result >> 1) | (cf ? msb : 0u)) & mask;
+                    break;
+                case 2: // RCL
+                    {
+                        var newcf = (result & msb) != 0;
+                        result = ((result << 1) | (cf ? 1u : 0u)) & mask;
+                        cf = newcf;
+                    }
+                    break;
+                case 3: // RCR
+                    {
+                        var newcf = (result & 1) != 0;
+                        result = ((result >> 1) | (cf ? msb : 0u)) & mask;
+                        cf = newcf;
+                    }
+                    break;
+                case 4: // SHL / SAL
+                case 6:
+                    cf = (result & msb) != 0;
+                    result = (result << 1) & mask;
+                    break;
+                case 5: // SHR
+                    cf = (result & 1) != 0;
+                    result = (result >> 1) & mask;
+                    break;
+                case 7: // SAR (算術右シフト: 符号ビットを保持)
+                    cf = (result & 1) != 0;
+                    result = ((result >> 1) | (result & msb)) & mask;
+                    break;
+            }
+        }
+
+        // OF は count==1 のときのみ定義される。
+        var of = false;
+        if (count == 1)
+        {
+            of = kind switch
+            {
+                0 or 2 or 4 or 6 => ((result & msb) != 0) ^ cf,                          // ROL/RCL/SHL
+                1 or 3 => ((result & msb) != 0) ^ ((result & (msb >> 1)) != 0),          // ROR/RCR: 上位2bit
+                5 => (v & msb) != 0,                                                      // SHR: 元の MSB
+                _ => false,                                                              // SAR
+            };
+        }
+
+        return (result, cf, of);
+    }
+
+    // Group2 を実行し、フラグを更新して結果を type タプルで返す。
+    static public State<(int type, byte db, ushort dw, uint dd)> Group2(
+        (int type, byte db, ushort dw, uint dd) data, int count, int kind) =>
+        from cf0 in Get(_cf)
+        let cnt = count & 0x1F   // 80386 はシフト量を 5bit にマスクする
+        let bits = data.type == 0 ? 8 : data.type == 1 ? 16 : 32
+        let v = data.type == 0 ? (uint)data.db : data.type == 1 ? data.dw : data.dd
+        let res = ComputeShift(v, cnt, kind, bits, cf0)
+        let isShift = kind >= 4
+        let msb = 1u << (bits - 1)
+        // count==0 のときはフラグを変更しない。
+        from _f in cnt == 0
+            ? unit.ToState()
+            : isShift
+                ? SetCpu((_cf, res.cf), (_of, res.of), (_zf, res.result == 0), (_sf, (res.result & msb) != 0))
+                : SetCpu((_cf, res.cf), (_of, res.of))
+        select data.type == 0 ? ((byte)res.result).ToTypeData()
+             : data.type == 1 ? ((ushort)res.result).ToTypeData()
+             : res.result.ToTypeData();
+
     static public State<bool> Not(State<bool> s) =>
         s.Select(b => !b);
 

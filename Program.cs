@@ -188,6 +188,44 @@ static class Program
         from _2 in d ? SetRegData(m.reg, ret) : SetMemOrRegData(rmData.input, ret)
         select unit;
 
+    // Group2 (0xD0/0xD1): r/m, 1
+    static State<Unit> Group2_D0_D1 =>
+        from _1 in SetLog("Group2_D0_D1")
+        from opecode in Opecodes
+        let w = 0 != (opecode[0] & 0x01)
+        from m in ModRegRm()
+        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from data in GetMemOrRegData(addr, w)
+        from ret in Group2(data, 1, m.reg)
+        from _2 in SetMemOrRegData(addr, ret)
+        select unit;
+
+    // Group2 (0xD2/0xD3): r/m, CL
+    static State<Unit> Group2_D2_D3 =>
+        from _1 in SetLog("Group2_D2_D3")
+        from opecode in Opecodes
+        let w = 0 != (opecode[0] & 0x01)
+        from m in ModRegRm()
+        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from data in GetMemOrRegData(addr, w)
+        from cl in GetRegData(1, 0) // CL = reg8 #1
+        from ret in Group2(data, cl.db, m.reg)
+        from _2 in SetMemOrRegData(addr, ret)
+        select unit;
+
+    // Group2 (0xC0/0xC1): r/m, imm8
+    static State<Unit> Group2_C0_C1 =>
+        from _1 in SetLog("Group2_C0_C1")
+        from opecode in Opecodes
+        let w = 0 != (opecode[0] & 0x01)
+        from m in ModRegRm()
+        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from data in GetMemOrRegData(addr, w)
+        from imm in GetMemoryDataIp8
+        from ret in Group2(data, imm, m.reg)
+        from _2 in SetMemOrRegData(addr, ret)
+        select unit;
+
     static State<Unit> Cli_FA =>
         from _ in SetLog("Cli_FA")
         select unit;
@@ -479,8 +517,11 @@ static class Program
         (0xAC, 2, Lods_AC_AD),
         (0xAE, 2, Scas_AE_AF),
         (0xB0, 16, Mov_B0_BF),
+        (0xC0, 2, Group2_C0_C1),
         (0xC2, 1, Ret_C2),
         (0xC3, 1, Ret_C3),
+        (0xD0, 2, Group2_D0_D1),
+        (0xD2, 2, Group2_D2_D3),
         (0xE4, 2, In_E4_E5),
         (0xE6, 2, Out_E6_E7),
         (0xE8, 1, Call_E8),
