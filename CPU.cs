@@ -410,6 +410,20 @@ static public partial class Ext
         );
 
     // INC/DEC は CF を変更しない（ZF/SF/OF のみ更新）。
+    static public State<Unit> update_eflags_inc(byte v) =>
+        SetCpu(
+            (_zf, 0 == (byte)(v + 1)),
+            (_sf, TopBit((byte)(v + 1))),
+            (_of, v == 0x7F)
+        );
+
+    static public State<Unit> update_eflags_dec(byte v) =>
+        SetCpu(
+            (_zf, 0 == (byte)(v - 1)),
+            (_sf, TopBit((byte)(v - 1))),
+            (_of, v == 0x80)
+        );
+
     static public State<Unit> update_eflags_inc(ushort v) =>
         SetCpu(
             (_zf, 0 == (ushort)(v + 1)),
@@ -422,6 +436,20 @@ static public partial class Ext
             (_zf, 0 == (ushort)(v - 1)),
             (_sf, TopBit((ushort)(v - 1))),
             (_of, v == 0x8000)
+        );
+
+    static public State<Unit> update_eflags_inc(uint v) =>
+        SetCpu(
+            (_zf, 0 == (v + 1)),
+            (_sf, TopBit(v + 1)),
+            (_of, v == 0x7FFFFFFF)
+        );
+
+    static public State<Unit> update_eflags_dec(uint v) =>
+        SetCpu(
+            (_zf, 0 == (v - 1)),
+            (_sf, TopBit(v - 1)),
+            (_of, v == 0x80000000)
         );
 
     static public State<CPU> GetCpu => GetDataFromEnvCpu((env, cpu) => cpu);

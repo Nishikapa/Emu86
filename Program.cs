@@ -365,6 +365,64 @@ static class Program
             return c;
         });
 
+    // INC r/m: type に応じて +1 し、フラグ(CF以外)を更新して書き戻す。
+    static State<Unit> IncData((bool isMem, uint addr) addr, (int type, byte db, ushort dw, uint dd) data) =>
+        from _f in data.type == 0 ? update_eflags_inc(data.db)
+                 : data.type == 1 ? update_eflags_inc(data.dw)
+                 : update_eflags_inc(data.dd)
+        from _w in SetMemOrRegData(addr,
+            data.type == 0 ? ((byte)(data.db + 1)).ToTypeData()
+          : data.type == 1 ? ((ushort)(data.dw + 1)).ToTypeData()
+          : (data.dd + 1).ToTypeData())
+        select unit;
+
+    // DEC r/m: type に応じて -1 し、フラグ(CF以外)を更新して書き戻す。
+    static State<Unit> DecData((bool isMem, uint addr) addr, (int type, byte db, ushort dw, uint dd) data) =>
+        from _f in data.type == 0 ? update_eflags_dec(data.db)
+                 : data.type == 1 ? update_eflags_dec(data.dw)
+                 : update_eflags_dec(data.dd)
+        from _w in SetMemOrRegData(addr,
+            data.type == 0 ? ((byte)(data.db - 1)).ToTypeData()
+          : data.type == 1 ? ((ushort)(data.dw - 1)).ToTypeData()
+          : (data.dd - 1).ToTypeData())
+        select unit;
+
+    // Group4 (0xFE): reg=0 INC r/m8, reg=1 DEC r/m8
+    static State<Unit> Group4_FE =>
+        from _1 in SetLog("Group4_FE")
+        from m in ModRegRm()
+        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from data in GetMemOrRegData(addr, false)
+        from _2 in Choice(
+            m.reg,
+            (0, IncData(addr, data)),
+            (1, DecData(addr, data))
+        )
+        select unit;
+
+    // Group5 (0xFF): INC/DEC/CALL/JMP r/m, PUSH r/m
+    static State<Unit> Group5_FF =>
+        from _1 in SetLog("Group5_FF")
+        from m in ModRegRm()
+        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from data in GetMemOrRegData(addr, true)
+        from _2 in Choice(
+            m.reg,
+            (0, IncData(addr, data)),
+            (1, DecData(addr, data)),
+            (2, Call_rm(data.dw)),      // 近傍間接 CALL
+            (4, _ip.Set(data.dw)),      // 近傍間接 JMP
+            (6, Push16(data.dw))        // PUSH r/m16
+        )
+        select unit;
+
+    // 近傍間接 CALL: 戻り番地(現在のIP)を push してから IP を target に設定する。
+    static State<Unit> Call_rm(ushort target) =>
+        from ret in GetDataFromCpu(cpu => cpu.ip)
+        from _1 in Push16(ret)
+        from _2 in _ip.Set(target)
+        select unit;
+
     static State<Unit> Cli_FA =>
         from _ in SetLog("Cli_FA")
         select unit;
@@ -678,6 +736,8 @@ static class Program
         (0xFB, 1, Sti_FB),
         (0xFC, 1, Cld_FC),
         (0xFD, 1, Std_FD),
+        (0xFE, 1, Group4_FE),
+        (0xFF, 1, Group5_FF),
     ];
 
     static (byte ope1, byte ope2, int len, State<Unit> state)[] TwoBytesStates =>
