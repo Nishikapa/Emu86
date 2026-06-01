@@ -212,6 +212,29 @@ static public partial class Ext
         return 0;
     }
 
+    // ENTER imm16, level: スタックフレームを構築する。
+    //   push BP; frame=SP; level 回ネストリンクをコピー; BP=frame; SP-=alloc。
+    static public State<Unit> Enter(ushort alloc, int level) =>
+        from bp0 in GetRegData16(5)
+        from _p in Push16(bp0)
+        from frame in GetRegData16(4)
+        from _n in EnterNesting(frame, level & 0x1F)
+        from _b in _bp.Set(frame)
+        from _s in SetCpu(cpu => { cpu.sp -= alloc; return cpu; })
+        select Unit.unit;
+
+    // ネストレベル>0 のとき、外側フレームのリンクを順に push し、最後に frame を push する。
+    static State<Unit> EnterNesting(ushort frame, int level) =>
+        Enumerable.Range(1, level)
+            .Select(i => i < level
+                ? from _r in SetCpu(cpu => { cpu.bp -= 2; return cpu; })
+                  from v in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryData16(env, GetMemoryAddr(cpu.ss, cpu.bp).addr))
+                  from _p in Push16(v)
+                  select Unit.unit
+                : Push16(frame))
+            .Sequence()
+            .Ignore();
+
     // XLAT: AL <- [DS:BX + AL]（バイト変換テーブル参照）。
     static public State<Unit> Xlat =>
         SetCpu((env, cpu) =>
