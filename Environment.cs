@@ -203,6 +203,10 @@ static public partial class Ext
         from _adv in AdvanceSiDi(w, si: false, di: true)
         select Unit.unit;
 
+    // セグメントレジスタ(ES/CS/SS/DS/FS/GS)を reg 番号で読み出す。
+    static public State<ushort> GetSRegData(int reg) =>
+        GetDataFromCpu(GetSReg3(reg));
+
     static public State<(int type, byte db, ushort dw, uint dd)> GetRegData(int reg, int type) =>
         GetDataFromCpu(GetTypeData_<CPU>(
             type,
