@@ -647,6 +647,14 @@ static class Program
         from _8 in SetRegData16(0, ax)
         select unit;
 
+    // ENTER imm16, imm8 (0xC8): スタックフレームを構築する。
+    static State<Unit> Enter_C8 =>
+        from _1 in SetLog("Enter_C8")
+        from alloc in GetMemoryDataIp16
+        from level in GetMemoryDataIp8
+        from _2 in Enter(alloc, level)
+        select unit;
+
     // LEAVE (0xC9): SP <- BP; BP <- pop()。スタックフレームを破棄する。
     static State<Unit> Leave_C9 =>
         from _1 in SetLog("Leave_C9")
@@ -940,6 +948,7 @@ static class Program
         (0xC2, 1, Ret_C2),
         (0xC3, 1, Ret_C3),
         (0xC6, 2, Mov_C6_C7),
+        (0xC8, 1, Enter_C8),
         (0xC9, 1, Leave_C9),
         (0xD0, 2, Group2_D0_D1),
         (0xD2, 2, Group2_D2_D3),
