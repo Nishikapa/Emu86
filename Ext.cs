@@ -34,4 +34,13 @@ static public partial class Ext
 
     static public T Choice<T, K>(K key, params (K key, T state)[] states) => states.ToDictionary(s => s.key, s => s.state)[key];
     static public T Choice_<T>(int index, params T[] states) => states[index];
+
+    // type(0=byte,1=word,2=dword) に応じて幅ごとの関数を適用し、結果を TypeData にまとめる。
+    // NOT/NEG/INC/DEC など「型別の値計算 → 書き戻し用 TypeData」を 1 行で書くための共通化。
+    static public (int type, byte db, ushort dw, uint dd) MapType(
+        this (int type, byte db, ushort dw, uint dd) d,
+        Func<byte, byte> fb, Func<ushort, ushort> fw, Func<uint, uint> fd) =>
+        d.type == 0 ? fb(d.db).ToTypeData()
+      : d.type == 1 ? fw(d.dw).ToTypeData()
+      : fd(d.dd).ToTypeData();
 }
