@@ -260,6 +260,31 @@ static public partial class Ext
             .Sequence()
             .Ignore();
 
+    // INT vector: リアルモード割り込み。FLAGS,CS,IP を push し、
+    //   IVT(物理 vector*4)から CS:IP を読んでジャンプする。
+    static public State<Unit> Interrupt(int vector) =>
+        from fl in GetDataFromCpu(cpu => (ushort)cpu.eflags)
+        from _1 in Push16(fl)
+        from cs in GetSRegData(1)
+        from _2 in Push16(cs)
+        from ip in GetDataFromCpu(cpu => cpu.ip)
+        from _3 in Push16(ip)
+        from newip in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryData16(env, (uint)(vector * 4)))
+        from newcs in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryData16(env, (uint)(vector * 4 + 2)))
+        from _4 in _ip.Set(newip)
+        from _5 in _cs.Set(newcs)
+        select Unit.unit;
+
+    // IRET: IP, CS, FLAGS を pop して割り込みから復帰する。
+    static public State<Unit> Iret =>
+        from ip in Pop16
+        from _1 in _ip.Set(ip)
+        from cs in Pop16
+        from _2 in _cs.Set(cs)
+        from fl in Pop16
+        from _3 in SetCpu(cpu => { cpu.eflags = (cpu.eflags & 0xFFFF0000) | fl; return cpu; })
+        select Unit.unit;
+
     // XLAT: AL <- [DS:BX + AL]（バイト変換テーブル参照）。
     static public State<Unit> Xlat =>
         SetCpu((env, cpu) =>
