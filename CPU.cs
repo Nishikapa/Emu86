@@ -361,6 +361,12 @@ static public partial class Ext
             (_of, false)
         );
 
+    // type(0=byte,1=word,2=dword) に応じて幅ごとの update_eflags を呼ぶ。
+    static public State<Unit> update_eflags(int type, byte db, ushort dw, uint dd) =>
+        type == 0 ? update_eflags(db)
+      : type == 1 ? update_eflags(dw)
+      : update_eflags(dd);
+
     static public State<Unit> update_eflags_sub(byte v1, byte v2) =>
         SetCpu(
             (_cf, v1 < v2),

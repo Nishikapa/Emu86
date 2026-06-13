@@ -410,27 +410,19 @@ static class Program
     // TEST r/m, imm : AND の結果を捨ててフラグ(CF=OF=0, ZF/SF)だけ更新する。
     static State<Unit> Group3_Test((int type, byte db, ushort dw, uint dd) data) =>
         from imm in GetMemoryDataIp_(data.type)
-        from _ in data.type == 0 ? update_eflags((byte)(data.db & imm.db))
-                : data.type == 1 ? update_eflags((ushort)(data.dw & imm.dw))
-                : update_eflags(data.dd & imm.dd)
+        from _ in update_eflags(data.type, (byte)(data.db & imm.db), (ushort)(data.dw & imm.dw), data.dd & imm.dd)
         select unit;
 
     // NOT r/m : ビット反転（フラグ変化なし）。
     static State<Unit> Group3_Not((bool isMem, uint addr) addr, (int type, byte db, ushort dw, uint dd) data) =>
-        SetMemOrRegData(addr,
-            data.type == 0 ? ((byte)~data.db).ToTypeData()
-          : data.type == 1 ? ((ushort)~data.dw).ToTypeData()
-          : (~data.dd).ToTypeData());
+        SetMemOrRegData(addr, data.MapType(b => (byte)~b, w => (ushort)~w, d => ~d));
 
     // NEG r/m : 0 - r/m。フラグは SUB と同じ。
     static State<Unit> Group3_Neg((bool isMem, uint addr) addr, (int type, byte db, ushort dw, uint dd) data) =>
         from _f in data.type == 0 ? update_eflags_sub((byte)0, data.db)
                  : data.type == 1 ? update_eflags_sub((ushort)0, data.dw)
                  : update_eflags_sub(0u, data.dd) // 注: byte/ushort の (byte)0/(ushort)0 はオーバーロード解決を明示するため残す
-        from _w in SetMemOrRegData(addr,
-            data.type == 0 ? ((byte)(0 - data.db)).ToTypeData()
-          : data.type == 1 ? ((ushort)(0 - data.dw)).ToTypeData()
-          : (0u - data.dd).ToTypeData())
+        from _w in SetMemOrRegData(addr, data.MapType(b => (byte)(0 - b), w => (ushort)(0 - w), d => 0u - d))
         select unit;
 
     // MUL r/m : 符号なし乗算。AL*r/m8->AX, AX*r/m16->DX:AX, EAX*r/m32->EDX:EAX。
@@ -530,10 +522,7 @@ static class Program
         from _f in data.type == 0 ? update_eflags_inc(data.db)
                  : data.type == 1 ? update_eflags_inc(data.dw)
                  : update_eflags_inc(data.dd)
-        from _w in SetMemOrRegData(addr,
-            data.type == 0 ? ((byte)(data.db + 1)).ToTypeData()
-          : data.type == 1 ? ((ushort)(data.dw + 1)).ToTypeData()
-          : (data.dd + 1).ToTypeData())
+        from _w in SetMemOrRegData(addr, data.MapType(b => (byte)(b + 1), w => (ushort)(w + 1), d => d + 1))
         select unit;
 
     // DEC r/m: type に応じて -1 し、フラグ(CF以外)を更新して書き戻す。
@@ -541,10 +530,7 @@ static class Program
         from _f in data.type == 0 ? update_eflags_dec(data.db)
                  : data.type == 1 ? update_eflags_dec(data.dw)
                  : update_eflags_dec(data.dd)
-        from _w in SetMemOrRegData(addr,
-            data.type == 0 ? ((byte)(data.db - 1)).ToTypeData()
-          : data.type == 1 ? ((ushort)(data.dw - 1)).ToTypeData()
-          : (data.dd - 1).ToTypeData())
+        from _w in SetMemOrRegData(addr, data.MapType(b => (byte)(b - 1), w => (ushort)(w - 1), d => d - 1))
         select unit;
 
     // Group4 (0xFE): reg=0 INC r/m8, reg=1 DEC r/m8
@@ -638,9 +624,8 @@ static class Program
         from rmData in GetMemOrRegData(m.mod, m.rm, w)
         from regData in GetRegData(m.reg, rmData.data.type)
         // TEST は AND の結果を捨ててフラグ(CF=OF=0, ZF/SF)だけ更新する。
-        from _2 in rmData.data.type == 0 ? update_eflags((byte)(rmData.data.db & regData.db))
-                 : rmData.data.type == 1 ? update_eflags((ushort)(rmData.data.dw & regData.dw))
-                 : update_eflags(rmData.data.dd & regData.dd)
+        from _2 in update_eflags(rmData.data.type,
+            (byte)(rmData.data.db & regData.db), (ushort)(rmData.data.dw & regData.dw), rmData.data.dd & regData.dd)
         select unit;
 
     static State<Unit> Test_A8_A9 =>
@@ -650,9 +635,7 @@ static class Program
         from type in OperandType(w)
         from acc in GetRegData(0, type) // 0=AL/AX/EAX
         from imm in GetMemoryDataIp_(type)
-        from _2 in type == 0 ? update_eflags((byte)(acc.db & imm.db))
-                 : type == 1 ? update_eflags((ushort)(acc.dw & imm.dw))
-                 : update_eflags(acc.dd & imm.dd)
+        from _2 in update_eflags(type, (byte)(acc.db & imm.db), (ushort)(acc.dw & imm.dw), acc.dd & imm.dd)
         select unit;
 
     static State<Unit> Xchg_91_97 =>
