@@ -586,6 +586,32 @@ static class Program
         from _2 in Jmp_rm(target)
         select unit;
 
+    // INT imm8 (0xCD): 指定ベクタへソフトウェア割り込み。
+    static State<Unit> Int_CD =>
+        from _1 in SetLog("Int_CD")
+        from vector in GetMemoryDataIp8
+        from _2 in Interrupt(vector)
+        select unit;
+
+    // INT3 (0xCC): ベクタ 3 へのブレークポイント割り込み。
+    static State<Unit> Int3_CC =>
+        from _1 in SetLog("Int3_CC")
+        from _2 in Interrupt(3)
+        select unit;
+
+    // INTO (0xCE): OF=1 のときのみベクタ 4 へ割り込む。
+    static State<Unit> Into_CE =>
+        from _1 in SetLog("Into_CE")
+        from of in GetDataFromCpu(cpu => cpu.of)
+        from _2 in of ? Interrupt(4) : unit.ToState()
+        select unit;
+
+    // IRET (0xCF): IP, CS, FLAGS を pop して割り込みから復帰する。
+    static State<Unit> Iret_CF =>
+        from _1 in SetLog("Iret_CF")
+        from _2 in Iret
+        select unit;
+
     static State<Unit> Cli_FA =>
         from _ in SetLog("Cli_FA")
         select unit;
@@ -1068,6 +1094,10 @@ static class Program
         (0xC9, 1, Leave_C9),
         (0xCA, 1, Retf_CA),
         (0xCB, 1, Retf_CB),
+        (0xCC, 1, Int3_CC),
+        (0xCD, 1, Int_CD),
+        (0xCE, 1, Into_CE),
+        (0xCF, 1, Iret_CF),
         (0xD0, 2, Group2_D0_D1),
         (0xD2, 2, Group2_D2_D3),
         (0xD7, 1, Xlat_D7),
