@@ -1,6 +1,7 @@
 using static Emu86.CPU;
 using static Emu86.Ext;
 using static Emu86.Unit;
+using static System.Console;
 
 namespace Emu86;
 
@@ -12,18 +13,28 @@ struct OpecodeDic
 
 static class Program
 {
+    // JMP far ptr16:16 / ptr16:32 (0xEA)。
+    // 実効オペランドサイズが32ビット(66プレフィックスまたは32ビットコード)なら offset は 32 ビット。
+    // プロテクトモード中は CS にセレクタをロードし、32ビットコードセグメント(D=1)へのジャンプとみなす。
     static State<Unit> FarJump_EA =>
         from _1 in SetLog("FarJump_EA")
-        from offset in GetMemoryDataIp16
+        from type in OperandType(true)
+        from offset in (2 == type) ?
+            GetMemoryDataIp32 :
+            GetMemoryDataIp16.Select(dw => (uint)dw)
         from segment in GetMemoryDataIp16
-        from _2 in _ip.Set(offset)
+        from _2 in _eip.Set(offset)
         from _3 in _cs.Set(segment)
+        from _4 in SetCpu(cpu => { cpu.code32 = cpu.pe; return cpu; })
         select unit;
 
     static State<Unit> Jump_E9 =>
         from _1 in SetLog("Jump_E9")
-        from offset in GetMemoryDataIp16
-        from _2 in IpInc((short)offset)
+        from type in OperandType(true)
+        from inc in (2 == type) ?
+            GetMemoryDataIp32.Select(dd => (int)dd) :
+            GetMemoryDataIp16.Select(dw => (int)(short)dw)
+        from _2 in IpInc(inc)
         select unit;
 
     // CALL far ptr16:16 (0x9A): CS, IP を push してから offset:segment へ far ジャンプ。
@@ -148,8 +159,12 @@ static class Program
         from _1 in SetLog("Lea_8D")
         from m in ModRegRm()
         // LEA はメモリを読まず、実効アドレス(オフセット)そのものを reg へ書く。
+        // GetMemOrRegAddr は物理アドレスを返すため、フラットモデル(code32)では実効アドレスと一致する。
         from addr in GetMemOrRegAddr(m.mod, m.rm)
-        from _2 in SetRegData16(m.reg, (ushort)addr.addr)
+        from type in OperandType(true)
+        from _2 in (2 == type) ?
+            SetRegData32(m.reg, addr.addr) :
+            SetRegData16(m.reg, (ushort)addr.addr)
         select unit;
 
     // MOV r/m, imm (0xC6/0xC7)
@@ -159,8 +174,8 @@ static class Program
         let w = 0 != (opecode[0] & 0x01)
         from m in ModRegRm()
         from addr in GetMemOrRegAddr(m.mod, m.rm)
-        from imm in w ? GetMemoryDataIp16.Select(v => v.ToTypeData())
-                      : GetMemoryDataIp8.Select(v => v.ToTypeData())
+        from type in OperandType(w)
+        from imm in GetMemoryDataIp_(type)
         from _2 in SetMemOrRegData(addr, imm)
         select unit;
 
@@ -208,10 +223,13 @@ static class Program
     static State<Unit> Jcc_0F80_0F8F =>
         from _1 in SetLog("Jcc_0F80_0F8F")
         from opecode in Opecodes
-        let type = opecode[1] & 0xF
-        from f in Jcc(type)
-        from offset in GetMemoryDataIp16
-        let inc = f ? (short)offset : 0
+        let cond = opecode[1] & 0xF
+        from f in Jcc(cond)
+        from type in OperandType(true)
+        from offset in (2 == type) ?
+            GetMemoryDataIp32.Select(dd => (int)dd) :
+            GetMemoryDataIp16.Select(dw => (int)(short)dw)
+        let inc = f ? offset : 0
         from _2 in IpInc(inc)
         select unit;
 
@@ -259,7 +277,7 @@ static class Program
         from _2 in SetMemOrRegData(addr, ((byte)(f ? 1 : 0)).ToTypeData())
         select unit;
 
-    // MOVZX/MOVSX r16, r/m8|r/m16 (0F B6/B7/BE/BF)
+    // MOVZX/MOVSX reg, r/m8|r/m16 (0F B6/B7/BE/BF)
     //   bit0 of ope2: 0=ソース8bit, 1=ソース16bit
     //   0xBE/0xBF は符号拡張、0xB6/0xB7 はゼロ拡張。
     static State<Unit> MovzxMovsx_0FB6_BF =>
@@ -268,11 +286,15 @@ static class Program
         let srcW = 0 != (opecode[1] & 0x01)
         let signed = 0 != (opecode[1] & 0x08)
         from m in ModRegRm()
-        from src in GetMemOrRegData(m.mod, m.rm, srcW)
-        let value = srcW
-            ? (signed ? (ushort)(short)src.data.dw : src.data.dw)
-            : (signed ? (ushort)(sbyte)src.data.db : src.data.db)
-        from _2 in SetRegData16(m.reg, value)
+        // ソースサイズはオペコードで固定(8/16bit)のため、OperandType を介さず直接読む。
+        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from value in srcW
+            ? GetMemOrRegData16(addr).Select(dw => signed ? (uint)(int)(short)dw : dw)
+            : GetMemOrRegData8(addr).Select(db => signed ? (uint)(int)(sbyte)db : db)
+        from type in OperandType(true)
+        from _2 in (2 == type) ?
+            SetRegData32(m.reg, value) :
+            SetRegData16(m.reg, (ushort)value)
         select unit;
 
     static State<Unit> Mov_B0_BF =>
@@ -299,9 +321,16 @@ static class Program
     static State<Unit> Arithmetic =>
         from _1 in SetLog("Arithmetic")
         from opecode in Opecodes
+        let kind = (opecode[0] >> 3) & 0x7
+        let form = opecode[0] & 0x7
+        // 下位3ビットが 4/5 のものは ModRM を持たない AL/AX/EAX, imm 形式。
+        from _2 in (form < 4) ? ArithmeticModRM(kind) : ArithmeticAccImm(kind, 0 != (form & 1))
+        select unit;
+
+    static State<Unit> ArithmeticModRM(int kind) =>
+        from opecode in Opecodes
         let w = 0 != (opecode[0] & 1)
         let d = 0 != (opecode[0] & 2)
-        let kind = (opecode[0] >> 3) & 0x7
         from m in ModRegRm()
         from rmData in GetMemOrRegData(m.mod, m.rm, w)
         from regData in GetRegData(m.reg, rmData.data.type)
@@ -309,6 +338,14 @@ static class Program
         let d2 = d ? rmData.data : regData
         from ret in Calc(d1, d2, kind)
         from _2 in d ? SetRegData(m.reg, ret) : SetMemOrRegData(rmData.input, ret)
+        select unit;
+
+    static State<Unit> ArithmeticAccImm(int kind, bool w) =>
+        from type in OperandType(w)
+        from imm in GetMemoryDataIp_(type)
+        from acc in GetRegData(0, type)
+        from ret in Calc(acc, imm, kind)
+        from _ in SetRegData(0, ret)
         select unit;
 
     // Group2 (0xD0/0xD1): r/m, 1
@@ -533,17 +570,20 @@ static class Program
             m.reg,
             (0, IncData(addr, data)),
             (1, DecData(addr, data)),
-            (2, Call_rm(data.dw)),      // 近傍間接 CALL
-            (4, _ip.Set(data.dw)),      // 近傍間接 JMP
-            (6, Push16(data.dw))        // PUSH r/m16
+            (2, Call_rm(data)),         // 近傍間接 CALL
+            (4, Jmp_rm(data)),          // 近傍間接 JMP
+            (6, Push(data))             // PUSH r/m
         )
         select unit;
 
-    // 近傍間接 CALL: 戻り番地(現在のIP)を push してから IP を target に設定する。
-    static State<Unit> Call_rm(ushort target) =>
-        from ret in GetDataFromCpu(cpu => cpu.ip)
-        from _1 in Push16(ret)
-        from _2 in _ip.Set(target)
+    static State<Unit> Jmp_rm((int type, byte db, ushort dw, uint dd) target) =>
+        (2 == target.type) ? _eip.Set(target.dd) : _ip.Set(target.dw);
+
+    // 近傍間接 CALL: 戻り番地(現在のIP/EIP)を push してから IP/EIP を target に設定する。
+    static State<Unit> Call_rm((int type, byte db, ushort dw, uint dd) target) =>
+        from cpu in GetCpu
+        from _1 in Push((2 == target.type) ? cpu.eip.ToTypeData() : cpu.ip.ToTypeData())
+        from _2 in Jmp_rm(target)
         select unit;
 
     static State<Unit> Cli_FA =>
@@ -572,71 +612,84 @@ static class Program
         from rmData in GetMemOrRegData(m.mod, m.rm, w)
         from regData in GetRegData(m.reg, rmData.data.type)
         // TEST は AND の結果を捨ててフラグ(CF=OF=0, ZF/SF)だけ更新する。
-        from _2 in w
-            ? update_eflags((ushort)(rmData.data.dw & regData.dw))
-            : update_eflags((byte)(rmData.data.db & regData.db))
+        from _2 in rmData.data.type == 0 ? update_eflags((byte)(rmData.data.db & regData.db))
+                 : rmData.data.type == 1 ? update_eflags((ushort)(rmData.data.dw & regData.dw))
+                 : update_eflags(rmData.data.dd & regData.dd)
         select unit;
 
     static State<Unit> Test_A8_A9 =>
         from _1 in SetLog("Test_A8_A9")
         from opecode in Opecodes
         let w = 0 != (opecode[0] & 0x01)
-        from acc in GetRegData(0, w ? 1 : 0) // 0=AL/AX
-        from imm in GetMemoryDataIp_(acc.type)
-        from _2 in w
-            ? update_eflags((ushort)(acc.dw & imm.dw))
-            : update_eflags((byte)(acc.db & imm.db))
+        from type in OperandType(w)
+        from acc in GetRegData(0, type) // 0=AL/AX/EAX
+        from imm in GetMemoryDataIp_(type)
+        from _2 in type == 0 ? update_eflags((byte)(acc.db & imm.db))
+                 : type == 1 ? update_eflags((ushort)(acc.dw & imm.dw))
+                 : update_eflags(acc.dd & imm.dd)
         select unit;
 
     static State<Unit> Xchg_91_97 =>
         from _1 in SetLog("Xchg_91_97")
         from opecode in Opecodes
         let reg = opecode[0] & 0x07
-        from ax in GetRegData16(0)
-        from rv in GetRegData16(reg)
-        from _2 in SetRegData16(0, rv)
-        from _3 in SetRegData16(reg, ax)
+        from type in OperandType(true)
+        from ax in GetRegData(0, type)
+        from rv in GetRegData(reg, type)
+        from _2 in SetRegData(0, rv)
+        from _3 in SetRegData(reg, ax)
         select unit;
 
     static State<Unit> Inc_40_47 =>
         from _1 in SetLog("Inc_40_47")
         from opecode in Opecodes
         let reg = opecode[0] & 0x07
-        from v in GetRegData16(reg)
-        from _2 in update_eflags_inc(v)
-        from _3 in SetRegData16(reg, (ushort)(v + 1))
+        from type in OperandType(true)
+        from v in GetRegData(reg, type)
+        from _2 in (2 == type) ? update_eflags_inc(v.dd) : update_eflags_inc(v.dw)
+        from _3 in (2 == type) ?
+            SetRegData32(reg, v.dd + 1) :
+            SetRegData16(reg, (ushort)(v.dw + 1))
         select unit;
 
     static State<Unit> Dec_48_4F =>
         from _1 in SetLog("Dec_48_4F")
         from opecode in Opecodes
         let reg = opecode[0] & 0x07
-        from v in GetRegData16(reg)
-        from _2 in update_eflags_dec(v)
-        from _3 in SetRegData16(reg, (ushort)(v - 1))
+        from type in OperandType(true)
+        from v in GetRegData(reg, type)
+        from _2 in (2 == type) ? update_eflags_dec(v.dd) : update_eflags_dec(v.dw)
+        from _3 in (2 == type) ?
+            SetRegData32(reg, v.dd - 1) :
+            SetRegData16(reg, (ushort)(v.dw - 1))
         select unit;
 
     static State<Unit> Call_E8 =>
         from _1 in SetLog("Call_E8")
-        from offset in GetMemoryDataIp16
-        // rel16 読み取り後の IP（＝次命令アドレス）を戻り番地として push する。
-        from ret in GetDataFromCpu(cpu => cpu.ip)
-        from _2 in Push16(ret)
-        from _3 in IpInc((short)offset)
+        from type in OperandType(true)
+        from offset in (2 == type) ?
+            GetMemoryDataIp32.Select(dd => (int)dd) :
+            GetMemoryDataIp16.Select(dw => (int)(short)dw)
+        // rel 読み取り後の IP/EIP（＝次命令アドレス）を戻り番地として push する。
+        from cpu in GetCpu
+        from _2 in Push((2 == type) ? cpu.eip.ToTypeData() : cpu.ip.ToTypeData())
+        from _3 in IpInc(offset)
         select unit;
 
     static State<Unit> Ret_C3 =>
         from _1 in SetLog("Ret_C3")
-        from ret in Pop16
-        from _2 in _ip.Set(ret)
+        from type in OperandType(true)
+        from ret in Pop(type)
+        from _2 in (2 == type) ? _eip.Set(ret.dd) : _ip.Set(ret.dw)
         select unit;
 
     static State<Unit> Ret_C2 =>
         from _1 in SetLog("Ret_C2")
         from imm in GetMemoryDataIp16
-        from ret in Pop16
-        from _2 in _ip.Set(ret)
-        from _3 in SetCpu(cpu => { cpu.sp += imm; return cpu; })
+        from type in OperandType(true)
+        from ret in Pop(type)
+        from _2 in (2 == type) ? _eip.Set(ret.dd) : _ip.Set(ret.dw)
+        from _3 in SetCpu(cpu => { if (cpu.code32) { cpu.esp += imm; } else { cpu.sp += imm; } return cpu; })
         select unit;
 
     // PUSHA (0x60): AX,CX,DX,BX,(開始時SP),BP,SI,DI をこの順で push する。
@@ -701,16 +754,18 @@ static class Program
         from _1 in SetLog("Push_50_57")
         from opecode in Opecodes
         let reg = opecode[0] & 0x07
-        from value in GetRegData16(reg)
-        from _2 in Push16(value)
+        from type in OperandType(true)
+        from value in GetRegData(reg, type)
+        from _2 in Push(value)
         select unit;
 
     static State<Unit> Pop_58_5F =>
         from _1 in SetLog("Pop_58_5F")
         from opecode in Opecodes
         let reg = opecode[0] & 0x07
-        from value in Pop16
-        from _2 in SetRegData16(reg, value)
+        from type in OperandType(true)
+        from value in Pop(type)
+        from _2 in SetRegData(reg, value)
         select unit;
 
     static State<Unit> PushImm_68 =>
@@ -875,6 +930,32 @@ static class Program
         })
         select unit;
 
+    // IN AL/AX, DX (0xEC/0xED)
+    static State<Unit> In_EC_ED =>
+        from _1 in SetLog("In_EC_ED")
+        from opecode in Opecodes
+        let w = 0 != (opecode[0] & 1)
+        from _2 in SetCpu((env, cpu) =>
+        {
+            if (w) { cpu.ax = (ushort)(env.IoPort[cpu.dx] | (env.IoPort[cpu.dx + 1] << 8)); }
+            else { cpu.al = env.IoPort[cpu.dx]; }
+            return cpu;
+        })
+        select unit;
+
+    // OUT DX, AL/AX (0xEE/0xEF)
+    static State<Unit> Out_EE_EF =>
+        from _1 in SetLog("Out_EE_EF")
+        from opecode in Opecodes
+        let w = 0 != (opecode[0] & 1)
+        from _2 in SetCpu((env, cpu) =>
+        {
+            env.IoPort[cpu.dx] = cpu.al;
+            if (w) { env.IoPort[cpu.dx + 1] = cpu.ah; }
+            return cpu;
+        })
+        select unit;
+
     static State<Unit> Lgdt(int mod, int rm) =>
         from addr in GetMemOrRegAddr(mod, rm)
         from dw in GetMemOrRegData16(addr)
@@ -921,7 +1002,8 @@ static class Program
             { 0x67, _address_size_prefix }
         };
 
-    static OpecodeDic[] dicPrefixes =>
+    // 毎命令の再構築を避けるため、オペコードテーブルは static readonly でキャッシュする。
+    static readonly OpecodeDic[] dicPrefixes =
         [.. Enumerable.Range(0, 256).Select(
             index => PrefixStates.TryGetValue(index, out var acc) ?
                 new OpecodeDic() { state = acc.Set(true) } :
@@ -997,6 +1079,8 @@ static class Program
         (0xE9, 1, Jump_E9),
         (0xEA, 1, FarJump_EA),
         (0xEB, 1, Jmp_EB),
+        (0xEC, 2, In_EC_ED),
+        (0xEE, 2, Out_EE_EF),
         (0xF2, 1, Repne_F2),
         (0xF3, 1, Rep_F3),
         (0xF6, 2, Group3_F6_F7),
@@ -1029,7 +1113,7 @@ static class Program
         (0x0F, 0xBE, 0x02, MovzxMovsx_0FB6_BF)    // MOVSX r,r/m8 ; r,r/m16
     ];
 
-    static Dictionary<int, State<Unit>> oneByte =>
+    static readonly Dictionary<int, State<Unit>> oneByte =
         OneByteStates
         .SelectMany(
             item =>
@@ -1041,7 +1125,7 @@ static class Program
             item => item.state
         );
 
-    static Dictionary<int, Dictionary<int, State<Unit>>> twoBytes =>
+    static readonly Dictionary<int, Dictionary<int, State<Unit>>> twoBytes =
         TwoBytesStates
         .ToLookup(item => item.ope1)
         .ToDictionary(
@@ -1055,7 +1139,7 @@ static class Program
                 .ToDictionary(j => (int)j.ope, j => j.state)
             );
 
-    static OpecodeDic[] dic =>
+    static readonly OpecodeDic[] dic =
         [.. Enumerable.Range(0, 256).Select(
             index =>
                 oneByte.TryGetValue(index, out var state) ? new OpecodeDic() { state = state } :
@@ -1137,14 +1221,37 @@ static class Program
 
     static void Main(string[] args)
     {
-        var machine = Execute2.Many0();
-
         var init_cpu1 = new CPU();
         var init_cpu2 = _ip.setter(init_cpu1)(0xFFF0);
         var init_cpu3 = _cs.setter(init_cpu2)(0xF000);
 
         var env = new EmuEnvironment();
 
-        var ret_ = machine(env, init_cpu3, default);
+        // 1命令ずつ実行し、trace.log に CS:EIP を記録する。
+        // 未実装オペコードで停止したら、その地点とオペコードを表示する。
+        var cpu = init_cpu3;
+        var step = Execute2;
+        long count = 0;
+        using (var sw = new StreamWriter("trace.log"))
+        {
+            while (true)
+            {
+                var (ok, _, cpu2, log) = step(env, cpu, default);
+                if (!ok)
+                    break;
+                cpu = cpu2;
+                count++;
+                sw.WriteLine($"{cpu.cs:x4}:{cpu.eip:x8}");
+                if (5_000_000 <= count)
+                {
+                    WriteLine("instruction limit reached");
+                    break;
+                }
+            }
+        }
+
+        var addr = GetCodeAddr(cpu).addr;
+        WriteLine($"STOP at {cpu.cs:x4}:{cpu.eip:x8} after {count} instructions, opcode: " +
+            string.Join(" ", env.OneMegaMemory_.Skip((int)addr).Take(6).Select(b => b.ToString("x2"))));
     }
 }

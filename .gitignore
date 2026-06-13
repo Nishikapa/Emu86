@@ -9,3 +9,12 @@ obj/
 
 # Backups
 *.orig
+
+# BIOS image (intentionally not committed)
+bios.bin
+
+# Emulator trace output
+trace.log
+
+# Claude Code local settings
+.claude/
