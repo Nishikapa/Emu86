@@ -11,7 +11,7 @@ static public partial class Ext
 
     static public State<((int type, byte db, ushort dw, uint dd) data, (bool isMem, uint addr) input)> GetMemoryDataIp(bool w) =>
         from cpu in GetCpu
-        let addr = GetMemoryAddr(cpu.cs, cpu.ip)
+        let addr = GetCodeAddr(cpu)
         from data in GetMemOrRegData(addr, w)
         from _ in IpInc(arrLen[data.type])
         select (data, (addr.isMem, addr.addr));
@@ -294,8 +294,8 @@ static public partial class Ext
         SetCpu(cpu => acc.setter(cpu)(value));
 
     static public State<Unit> IpInc(int inc) =>
-        from ip in Get(_ip)
-        from _ in Set(_ip, (ushort)(ip + inc))
+        from eip in Get(_eip)
+        from _ in Set(_eip, (uint)(eip + inc))
         select _;
 
     static public State<Unit> SetCpu(Func<CPU, CPU> func) =>
@@ -318,22 +318,22 @@ static public partial class Ext
         ).Sequence().Ignore();
 
     static public State<IEnumerable<byte>> GetMemoryDataIp(int length) =>
-        from data in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryDatas(env, cpu.cs, cpu.ip, length))
+        from data in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryDatas(env, GetCodeAddr(cpu).addr).Take(length))
         from _ in IpInc(data.Count())
         select data;
 
     static public State<byte> GetMemoryDataIp8 =>
-        from data in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryData8(env, GetMemoryAddr(cpu.cs, cpu.ip).addr))
+        from data in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryData8(env, GetCodeAddr(cpu).addr))
         from _ in IpInc(1)
         select data;
 
     static public State<ushort> GetMemoryDataIp16 =>
-        from data in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryData16(env, GetMemoryAddr(cpu.cs, cpu.ip).addr))
+        from data in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryData16(env, GetCodeAddr(cpu).addr))
         from _ in IpInc(2)
         select data;
 
     static public State<uint> GetMemoryDataIp32 =>
-        from data in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryData32(env, GetMemoryAddr(cpu.cs, cpu.ip).addr))
+        from data in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryData32(env, GetCodeAddr(cpu).addr))
         from _ in IpInc(4)
         select data;
 
@@ -491,13 +491,19 @@ public struct CPU
         c => v =>
         {
             c.ip = v;
-            WriteLine(v.ToString("x"));
+            //WriteLine(v.ToString("x"));
             return c;
         }
     );
 
+    static public Accessor<CPU, uint> _eip => new(c => c.eip, c => v => { c.eip = v; return c; });
+
     public uint eip { get; private set; }
     public ushort ip { get { return (ushort)(this.eip & 0xFFFF); } private set { this.eip = (this.eip & 0xFFFF0000) + value; } }
+
+    // プロテクトモードで32ビットコードセグメント(D=1)を実行中かどうか。
+    // CSがプロテクトモードでロードされたときにセットされる。
+    public bool code32;
 
     public ushort idt_limit { get; set; }
     public uint idt_base { get; set; }

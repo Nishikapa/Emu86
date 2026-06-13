@@ -6,17 +6,23 @@ namespace Emu86;
 static public partial class Ext
 {
     /// Mem /////////////////////////////////////
-    static public IEnumerable<byte> EnvGetMemoryDatas(EmuEnvironment env, ushort segment, ushort offset)
-    {
-        var addr = GetMemoryAddr(segment, offset).addr;
-        return env.OneMegaMemory_.Skip((int)addr);
-    }
+    // ArraySegment を使い、LINQ Skip の O(addr) 走査を避ける。
+    static public IEnumerable<byte> EnvGetMemoryDatas(EmuEnvironment env, uint addr) =>
+        new ArraySegment<byte>(env.OneMegaMemory_, (int)addr, env.OneMegaMemory_.Length - (int)addr);
+
+    static public IEnumerable<byte> EnvGetMemoryDatas(EmuEnvironment env, ushort segment, ushort offset) =>
+        EnvGetMemoryDatas(env, GetMemoryAddr(segment, offset).addr);
 
     static public IEnumerable<byte> EnvGetMemoryDatas(EmuEnvironment env, ushort segment, ushort offset, int length) =>
         EnvGetMemoryDatas(env, segment, offset).Take(length);
 
     static public (bool isMem, uint addr) GetMemoryAddr(ushort segment, ushort offset) =>
         (true, (uint)(0x10 * segment + offset));
+
+    // コードフェッチ用アドレス。
+    // 32ビットコードセグメント実行中はフラットモデル(ベース0)を仮定してeipをそのまま使う。
+    static public (bool isMem, uint addr) GetCodeAddr(CPU cpu) =>
+        cpu.code32 ? (true, cpu.eip) : GetMemoryAddr(cpu.cs, cpu.ip);
 
     /// Reg /////////////////////////////////////
     static private Accessor<CPU, byte>[] ArrayReg8 =>
@@ -73,21 +79,40 @@ static public partial class Ext
         GetDataFromCpu(EnvGetDataFromCPU(ArrayReg32)(reg));
 
     /// Stack ////////////////////////////////////
-    // SP を 2 減らしてから SS:SP に 16bit を書き込む（PUSH）。
-    static public State<Unit> Push16(ushort value) =>
-        from _1 in SetCpu(cpu => { cpu.sp -= 2; return cpu; })
-        from _2 in SetCpu((env, cpu) =>
-        {
-            EnvSetMemoryDatas(env, GetMemoryAddr(cpu.ss, cpu.sp).addr, value.ToByteArray());
-            return cpu;
-        })
+    // スタックトップの物理アドレス。32ビットコード実行中はフラットモデル(ベース0)で ESP を使う。
+    static private (bool isMem, uint addr) EnvGetStackAddr(CPU cpu) =>
+        (true, cpu.code32 ? cpu.esp : (uint)(0x10 * cpu.ss + cpu.sp));
+
+    // SP/ESP をデータ長分減らしてからスタックトップへ書き込む（PUSH）。
+    static public State<Unit> Push((int type, byte db, ushort dw, uint dd) data) =>
+        from cpu0 in GetCpu
+        from _1 in cpu0.code32 ?
+            _esp.Set((uint)(cpu0.esp - arrLen[data.type])) :
+            _sp.Set((ushort)(cpu0.sp - arrLen[data.type]))
+        from cpu in GetCpu
+        from _2 in SetMemOrRegData(EnvGetStackAddr(cpu), data)
         select Unit.unit;
 
-    // SS:SP から 16bit を読み出してから SP を 2 増やす（POP）。
+    // スタックトップから type 長を読み出してから SP/ESP を増やす（POP）。
+    static public State<(int type, byte db, ushort dw, uint dd)> Pop(int type) =>
+        from cpu in GetCpu
+        let addr = EnvGetStackAddr(cpu)
+        from data in Choice(
+            type,
+            GetMemOrRegData8(addr),
+            GetMemOrRegData16(addr),
+            GetMemOrRegData32(addr)
+        )
+        from _ in cpu.code32 ?
+            _esp.Set((uint)(cpu.esp + arrLen[type])) :
+            _sp.Set((ushort)(cpu.sp + arrLen[type]))
+        select data;
+
+    static public State<Unit> Push16(ushort value) =>
+        Push(value.ToTypeData());
+
     static public State<ushort> Pop16 =>
-        from value in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryData16(env, GetMemoryAddr(cpu.ss, cpu.sp).addr))
-        from _ in SetCpu(cpu => { cpu.sp += 2; return cpu; })
-        select value;
+        Pop(1).Select(data => data.dw);
 
     /// String ////////////////////////////////////
     // MOVS: [DS:SI] -> [ES:DI] を 1 要素コピーし、DF に従って SI/DI を増減する。
@@ -304,7 +329,8 @@ static public partial class Ext
                 return type switch
                 {
                     0 or 1 => EnvSetSReg3(dw)(reg)(cpu),
-                    2 => throw new NotImplementedException(),
+                    // MOV Sreg, r/m は常に下位16ビットのみロードする
+                    2 => EnvSetSReg3((ushort)dd)(reg)(cpu),
                     _ => throw new Exception(),
                 };
             }
@@ -313,12 +339,14 @@ static public partial class Ext
     /// MemReg //////////////////////////////////
     static private (bool isMem, uint addr, int inc) EnvGetMemOrRegAddr16_(CPU cpu, int mod, int rm, ushort? segment, IEnumerable<byte> disp)
     {
+        // 32ビットコード実行中はフラットモデル(ベース0)を仮定する
         var segment_base =
+            cpu.code32 ? 0 :
             segment == default(ushort?) ?
             (uint)cpu.ds * 0x10 :
             (uint)segment * 0x10;
 
-        var ss_base = (uint)cpu.ss * 0x10;
+        var ss_base = cpu.code32 ? 0 : (uint)cpu.ss * 0x10;
 
         switch (mod)
         {
@@ -378,12 +406,14 @@ static public partial class Ext
     }
     static private (bool isMem, uint addr, int inc) EnvGetMemOrRegAddr32_(CPU cpu, int mod, int rm, ushort? segment, IEnumerable<byte> disp)
     {
+        // 32ビットコード実行中はフラットモデル(ベース0)を仮定する
         var segment_base =
+            cpu.code32 ? 0 :
             segment == default(ushort?) ?
             (uint)cpu.ds * 0x10 :
             (uint)segment * 0x10;
 
-        var ss_base = (uint)cpu.ss * 0x10;
+        var ss_base = cpu.code32 ? 0 : (uint)cpu.ss * 0x10;
 
         int inc = 0;
 
@@ -533,12 +563,12 @@ static public partial class Ext
         }
     }
     static public State<(bool isMem, uint addr)> GetMemOrRegAddr(int mod, int rm) =>
-        from address_size in _address_size_prefix.Get()
         from data in GetDataFromEnvCpu(
             (env, cpu) =>
-            address_size ?
-            EnvGetMemOrRegAddr32_(cpu, mod, rm, cpu.cs, EnvGetMemoryDatas(env, cpu.cs, cpu.ip)) :
-            EnvGetMemOrRegAddr16_(cpu, mod, rm, cpu.cs, EnvGetMemoryDatas(env, cpu.cs, cpu.ip))
+            // 32ビットコードではデフォルトが32ビットModRMになり、address_size_prefix(0x67)で反転する
+            (cpu.code32 != cpu.address_size_prefix) ?
+            EnvGetMemOrRegAddr32_(cpu, mod, rm, cpu.cs, EnvGetMemoryDatas(env, GetCodeAddr(cpu).addr)) :
+            EnvGetMemOrRegAddr16_(cpu, mod, rm, cpu.cs, EnvGetMemoryDatas(env, GetCodeAddr(cpu).addr))
         )
         from _ in IpInc(data.inc)
         select (data.isMem, data.addr);
@@ -586,12 +616,17 @@ static public partial class Ext
             }
         });
 
+    // 実効オペランドサイズ(type)。32ビットコードセグメントではデフォルトが32ビットになり、
+    // operand_size_prefix(0x66)は意味が反転する。
+    static public State<int> OperandType(bool w) =>
+        GetDataFromCpu(cpu => w ? ((cpu.code32 != cpu.operand_size_prefix) ? 2 : 1) : 0);
+
     static public State<(int type, byte db, ushort dw, uint dd)> GetMemOrRegData(
         (bool isMem, uint addr) t,
         bool w) =>
-        from operand_size in _operand_size_prefix.Get()
+        from type in OperandType(w)
         from ret in Choice(
-            w ? (operand_size ? 2 : 1) : 0,
+            type,
             GetMemOrRegData8(t),
             GetMemOrRegData16(t),
             GetMemOrRegData32(t)
@@ -640,8 +675,8 @@ static public partial class Ext
     }
 
     static private byte EnvGetMemoryData8(EmuEnvironment env, uint addr) => env.OneMegaMemory_[addr];
-    static private ushort EnvGetMemoryData16(EmuEnvironment env, uint addr) => env.OneMegaMemory_.Skip((int)addr).ToUint16();
-    static private uint EnvGetMemoryData32(EmuEnvironment env, uint addr) => env.OneMegaMemory_.Skip((int)addr).ToUint32();
+    static private ushort EnvGetMemoryData16(EmuEnvironment env, uint addr) => BitConverter.ToUInt16(env.OneMegaMemory_, (int)addr);
+    static private uint EnvGetMemoryData32(EmuEnvironment env, uint addr) => BitConverter.ToUInt32(env.OneMegaMemory_, (int)addr);
 }
 
 public class EmuEnvironment
