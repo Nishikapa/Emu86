@@ -720,6 +720,27 @@ static public partial class Ext
         }
     }
 
+    /// I/O port ///////////////////////////////////
+    // CMOS(0x70/0x71)を特別扱いする以外は IoPort 配列を素通しする。
+    static public byte EnvInPort(EmuEnvironment env, int port) =>
+        (port & 0xFFFF) == 0x71 ? env.Cmos[env.CmosIndex] : env.IoPort[port & 0xFFFF];
+
+    static public void EnvOutPort(EmuEnvironment env, int port, byte val)
+    {
+        switch (port & 0xFFFF)
+        {
+            case 0x70: // インデックス選択(bit7 は NMI 禁止フラグなので落とす)
+                env.CmosIndex = val & 0x7F;
+                break;
+            case 0x71: // 選択中の CMOS レジスタへ書き込み
+                env.Cmos[env.CmosIndex] = val;
+                break;
+            default:
+                env.IoPort[port & 0xFFFF] = val;
+                break;
+        }
+    }
+
     static private byte EnvGetMemoryData8(EmuEnvironment env, uint addr) => env.OneMegaMemory_[addr];
     static private ushort EnvGetMemoryData16(EmuEnvironment env, uint addr) => BitConverter.ToUInt16(env.OneMegaMemory_, (int)addr);
     static private uint EnvGetMemoryData32(EmuEnvironment env, uint addr) => BitConverter.ToUInt32(env.OneMegaMemory_, (int)addr);
@@ -727,9 +748,13 @@ static public partial class Ext
 
 public class EmuEnvironment
 {
+    // 搭載RAM量。SeaBIOS の init 再配置は 1MB 超のRAMを要求するため、
+    // 1MBちょうどではなく拡張メモリを持たせる。BIOS(bios.bin)は先頭1MBの末尾に配置される。
+    public const int RamSize = 32 * 1024 * 1024; // 32MB
+
     public EmuEnvironment()
     {
-        // bios: 埋め込みリソース "bios.bin" が存在すれば 1MB メモリ空間の末尾に配置する。
+        // bios: 埋め込みリソース "bios.bin" が存在すれば先頭1MB空間の末尾に配置する。
         //       リソースが無い場合はゼロ初期化のまま起動する。
         var asm = Assembly.GetExecutingAssembly();
         var resName = asm.GetManifestResourceNames()
@@ -741,9 +766,32 @@ public class EmuEnvironment
             stream.ReadExactly(biosdata);
             Array.Copy(biosdata, 0, OneMegaMemory_, 0x100000 - biosdata.Length, biosdata.Length);
         }
+
+        InitCmos();
     }
 
-    public byte[] OneMegaMemory_ = new byte[1024 * 1024];
+    // SeaBIOS が CMOS(RTC)経由でメモリ量を検出できるよう、メモリサイズレジスタを設定する。
+    //   0x15/0x16: ベースメモリ(KB)          … 640KB
+    //   0x17/0x18, 0x30/0x31: 1-16MB の拡張メモリ(KB、最大15MB)
+    //   0x34/0x35: 16MB超のメモリ(64KB単位)
+    private void InitCmos()
+    {
+        int baseKB = 640;
+        int extKB = Math.Min((RamSize - 0x100000) / 1024, 15 * 1024); // 1-16MB窓(KB)
+        int ext64 = RamSize > 0x1000000 ? (RamSize - 0x1000000) / (64 * 1024) : 0; // 16MB超(64KB単位)
+
+        Cmos[0x15] = (byte)baseKB; Cmos[0x16] = (byte)(baseKB >> 8);
+        Cmos[0x17] = (byte)extKB; Cmos[0x18] = (byte)(extKB >> 8);
+        Cmos[0x30] = (byte)extKB; Cmos[0x31] = (byte)(extKB >> 8);
+        Cmos[0x34] = (byte)ext64; Cmos[0x35] = (byte)(ext64 >> 8);
+    }
+
+    // 名前は歴史的経緯で OneMegaMemory_ のままだが、実サイズは RamSize。
+    public byte[] OneMegaMemory_ = new byte[RamSize];
 
     public byte[] IoPort = new byte[0x10000];
+
+    // CMOS/RTC: 0x70 でインデックス選択、0x71 でデータ read/write。
+    public byte[] Cmos = new byte[128];
+    public int CmosIndex;
 }
