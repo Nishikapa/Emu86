@@ -115,77 +115,77 @@ static public partial class Ext
         Pop(1).Select(data => data.dw);
 
     /// String ////////////////////////////////////
+    // 文字列命令の実効パラメータ。
+    //   要素サイズ(バイト): operand size に従う(w かつ 32bit なら4、そうでなければ 2/1)。
+    //   アドレスモード     : code32 でフラット32bit(ESI/EDI, ベース0)、そうでなければ real(DS:SI/ES:DI)。
+    static int StrSize(CPU cpu, bool w) => w ? ((cpu.code32 != cpu.operand_size_prefix) ? 4 : 2) : 1;
+    static bool StrA32(CPU cpu) => cpu.code32 != cpu.address_size_prefix;
+    static uint StrSrc(CPU cpu) => (cpu.code32 ? 0u : (uint)cpu.ds * 0x10) + (StrA32(cpu) ? cpu.esi : cpu.si);
+    static uint StrDst(CPU cpu) => (cpu.code32 ? 0u : (uint)_es.getter(cpu) * 0x10) + (StrA32(cpu) ? cpu.edi : cpu.di);
+
+    static uint EnvReadN(EmuEnvironment env, uint addr, int size) =>
+        size == 1 ? EnvGetMemoryData8(env, addr) : size == 2 ? EnvGetMemoryData16(env, addr) : EnvGetMemoryData32(env, addr);
+
+    static void EnvWriteN(EmuEnvironment env, uint addr, int size, uint val)
+    {
+        switch (size)
+        {
+            case 1: env.OneMegaMemory_[addr] = (byte)val; break;
+            case 2: EnvSetMemoryDatas(env, addr, ((ushort)val).ToByteArray()); break;
+            default: EnvSetMemoryDatas(env, addr, val.ToByteArray()); break;
+        }
+    }
+
+    // DF に従って SI/DI(32bit なら ESI/EDI)を size 分だけ増減する。
+    static CPU StrAdvance(CPU cpu, int size, bool si, bool di)
+    {
+        int delta = cpu.df ? -size : size;
+        bool a32 = StrA32(cpu);
+        if (si) cpu = a32 ? _esi.setter(cpu)((uint)(cpu.esi + delta)) : _si.setter(cpu)((ushort)(cpu.si + delta));
+        if (di) cpu = a32 ? _edi.setter(cpu)((uint)(cpu.edi + delta)) : _di.setter(cpu)((ushort)(cpu.di + delta));
+        return cpu;
+    }
+
     // MOVS: [DS:SI] -> [ES:DI] を 1 要素コピーし、DF に従って SI/DI を増減する。
     static public State<Unit> Movs(bool w) =>
         SetCpu((env, cpu) =>
         {
-            var src = GetMemoryAddr(_ds.getter(cpu), _si.getter(cpu)).addr;
-            var dst = GetMemoryAddr(_es.getter(cpu), _di.getter(cpu)).addr;
-            var size = w ? 2 : 1;
-
-            var bytes = w ? EnvGetMemoryData16(env, src).ToByteArray()
-                          : EnvGetMemoryData8(env, src).ToByteArray();
-            EnvSetMemoryDatas(env, dst, bytes);
-
-            var delta = _df.getter(cpu) ? -size : size;
-            cpu = _si.setter(cpu)((ushort)(_si.getter(cpu) + delta));
-            cpu = _di.setter(cpu)((ushort)(_di.getter(cpu) + delta));
-            return cpu;
+            int size = StrSize(cpu, w);
+            EnvWriteN(env, StrDst(cpu), size, EnvReadN(env, StrSrc(cpu), size));
+            return StrAdvance(cpu, size, si: true, di: true);
         });
 
-    // STOS: AL/AX -> [ES:DI]、DF に従って DI を増減する。
+    // STOS: AL/AX/EAX -> [ES:DI]、DF に従って DI を増減する。
     static public State<Unit> Stos(bool w) =>
         SetCpu((env, cpu) =>
         {
-            var dst = GetMemoryAddr(_es.getter(cpu), _di.getter(cpu)).addr;
-            var size = w ? 2 : 1;
-
-            var bytes = w ? _ax.getter(cpu).ToByteArray() : _al.getter(cpu).ToByteArray();
-            EnvSetMemoryDatas(env, dst, bytes);
-
-            var delta = _df.getter(cpu) ? -size : size;
-            cpu = _di.setter(cpu)((ushort)(_di.getter(cpu) + delta));
-            return cpu;
+            int size = StrSize(cpu, w);
+            uint val = size == 1 ? cpu.al : size == 2 ? cpu.ax : cpu.eax;
+            EnvWriteN(env, StrDst(cpu), size, val);
+            return StrAdvance(cpu, size, si: false, di: true);
         });
 
-    // LODS: [DS:SI] -> AL/AX、DF に従って SI を増減する。
+    // LODS: [DS:SI] -> AL/AX/EAX、DF に従って SI を増減する。
     static public State<Unit> Lods(bool w) =>
         SetCpu((env, cpu) =>
         {
-            var src = GetMemoryAddr(_ds.getter(cpu), _si.getter(cpu)).addr;
-            var size = w ? 2 : 1;
-
-            cpu = w ? _ax.setter(cpu)(EnvGetMemoryData16(env, src))
-                    : _al.setter(cpu)(EnvGetMemoryData8(env, src));
-
-            var delta = _df.getter(cpu) ? -size : size;
-            cpu = _si.setter(cpu)((ushort)(_si.getter(cpu) + delta));
-            return cpu;
-        });
-
-    // DF に従って SI/DI を size 分だけ増減する補助。
-    static State<Unit> AdvanceSiDi(bool w, bool si, bool di) =>
-        SetCpu(cpu =>
-        {
-            var delta = _df.getter(cpu) ? -(w ? 2 : 1) : (w ? 2 : 1);
-            if (si) cpu = _si.setter(cpu)((ushort)(_si.getter(cpu) + delta));
-            if (di) cpu = _di.setter(cpu)((ushort)(_di.getter(cpu) + delta));
-            return cpu;
+            int size = StrSize(cpu, w);
+            uint val = EnvReadN(env, StrSrc(cpu), size);
+            cpu = size == 1 ? _al.setter(cpu)((byte)val) : size == 2 ? _ax.setter(cpu)((ushort)val) : _eax.setter(cpu)(val);
+            return StrAdvance(cpu, size, si: true, di: false);
         });
 
     // CMPS: [DS:SI] - [ES:DI] でフラグを更新（結果は破棄）し、SI/DI を増減する。
     static public State<Unit> Cmps(bool w) =>
         from vals in GetDataFromEnvCpu((env, cpu) =>
         {
-            var src = GetMemoryAddr(_ds.getter(cpu), _si.getter(cpu)).addr;
-            var dst = GetMemoryAddr(_es.getter(cpu), _di.getter(cpu)).addr;
-            return w
-                ? (s: (uint)EnvGetMemoryData16(env, src), d: (uint)EnvGetMemoryData16(env, dst))
-                : (s: (uint)EnvGetMemoryData8(env, src), d: (uint)EnvGetMemoryData8(env, dst));
+            int size = StrSize(cpu, w);
+            return (size, s: EnvReadN(env, StrSrc(cpu), size), d: EnvReadN(env, StrDst(cpu), size));
         })
-        from _f in w ? update_eflags_sub((ushort)vals.s, (ushort)vals.d)
-                     : update_eflags_sub((byte)vals.s, (byte)vals.d)
-        from _adv in AdvanceSiDi(w, si: true, di: true)
+        from _f in vals.size == 1 ? update_eflags_sub((byte)vals.s, (byte)vals.d)
+                 : vals.size == 2 ? update_eflags_sub((ushort)vals.s, (ushort)vals.d)
+                 : update_eflags_sub(vals.s, vals.d)
+        from _adv in SetCpu(cpu => StrAdvance(cpu, StrSize(cpu, w), si: true, di: true))
         select Unit.unit;
 
     // BT系: r/m の bit 番目を CF にコピーし、op に応じて値を変更して書き戻す。
@@ -329,14 +329,14 @@ static public partial class Ext
     static public State<Unit> Scas(bool w) =>
         from vals in GetDataFromEnvCpu((env, cpu) =>
         {
-            var dst = GetMemoryAddr(_es.getter(cpu), _di.getter(cpu)).addr;
-            return w
-                ? (a: (uint)_ax.getter(cpu), m: (uint)EnvGetMemoryData16(env, dst))
-                : (a: (uint)_al.getter(cpu), m: (uint)EnvGetMemoryData8(env, dst));
+            int size = StrSize(cpu, w);
+            uint a = size == 1 ? cpu.al : size == 2 ? cpu.ax : cpu.eax;
+            return (size, a, m: EnvReadN(env, StrDst(cpu), size));
         })
-        from _f in w ? update_eflags_sub((ushort)vals.a, (ushort)vals.m)
-                     : update_eflags_sub((byte)vals.a, (byte)vals.m)
-        from _adv in AdvanceSiDi(w, si: false, di: true)
+        from _f in vals.size == 1 ? update_eflags_sub((byte)vals.a, (byte)vals.m)
+                 : vals.size == 2 ? update_eflags_sub((ushort)vals.a, (ushort)vals.m)
+                 : update_eflags_sub(vals.a, vals.m)
+        from _adv in SetCpu(cpu => StrAdvance(cpu, StrSize(cpu, w), si: false, di: true))
         select Unit.unit;
 
     // セグメントレジスタ(ES/CS/SS/DS/FS/GS)を reg 番号で読み出す。

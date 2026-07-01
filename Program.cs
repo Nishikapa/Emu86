@@ -137,12 +137,14 @@ static class Program
         var checkZf = repZf is bool && zfStringOps.Contains(op);
 
         var cpu = cpu2;
-        while (_cx.getter(cpu) != 0)
+        // 32ビットアドレスサイズでは ECX、そうでなければ CX でカウントする。
+        var a32 = cpu.code32 != cpu.address_size_prefix;
+        while ((a32 ? cpu.ecx : cpu.cx) != 0)
         {
             var (ok2, _, cpuN, _) = state(env, cpu, [op]);
             if (!ok2)
                 return (false, default, cpu1, log);
-            cpu = _cx.setter(cpuN)((ushort)(_cx.getter(cpuN) - 1));
+            cpu = a32 ? _ecx.setter(cpuN)(cpuN.ecx - 1) : _cx.setter(cpuN)((ushort)(cpuN.cx - 1));
 
             if (checkZf && _zf.getter(cpu) != repZf.Value)
                 break;
