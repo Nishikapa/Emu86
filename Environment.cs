@@ -293,21 +293,35 @@ static public partial class Ext
             return _al.setter(cpu)(EnvGetMemoryData8(env, addr));
         });
 
-    // MOV AL/AX, [moffs]: 直接アドレス DS:offset から読み、アキュムレータへ書く。
-    static public State<Unit> MovAccFromMoffs(bool w, ushort offset) =>
+    // moffs の物理アドレス。32ビットコードはフラットモデル(ベース0)で offset をそのまま使う。
+    static uint EnvMoffsAddr(CPU cpu, uint offset) =>
+        cpu.code32 ? offset : GetMemoryAddr(cpu.ds, (ushort)offset).addr;
+
+    // MOV AL/AX/EAX, [moffs]: 直接アドレス DS:offset から読み、アキュムレータへ書く。
+    static public State<Unit> MovAccFromMoffs(int type, uint offset) =>
         SetCpu((env, cpu) =>
         {
-            var addr = GetMemoryAddr(cpu.ds, offset).addr;
-            return w ? _ax.setter(cpu)(EnvGetMemoryData16(env, addr))
-                     : _al.setter(cpu)(EnvGetMemoryData8(env, addr));
+            var addr = EnvMoffsAddr(cpu, offset);
+            return type switch
+            {
+                0 => _al.setter(cpu)(EnvGetMemoryData8(env, addr)),
+                1 => _ax.setter(cpu)(EnvGetMemoryData16(env, addr)),
+                _ => _eax.setter(cpu)(EnvGetMemoryData32(env, addr)),
+            };
         });
 
-    // MOV [moffs], AL/AX: アキュムレータを直接アドレス DS:offset へ書く。
-    static public State<Unit> MovMoffsFromAcc(bool w, ushort offset) =>
+    // MOV [moffs], AL/AX/EAX: アキュムレータを直接アドレス DS:offset へ書く。
+    static public State<Unit> MovMoffsFromAcc(int type, uint offset) =>
         SetCpu((env, cpu) =>
         {
-            var addr = GetMemoryAddr(cpu.ds, offset).addr;
-            EnvSetMemoryDatas(env, addr, w ? _ax.getter(cpu).ToByteArray() : _al.getter(cpu).ToByteArray());
+            var addr = EnvMoffsAddr(cpu, offset);
+            var bytes = type switch
+            {
+                0 => _al.getter(cpu).ToByteArray(),
+                1 => _ax.getter(cpu).ToByteArray(),
+                _ => _eax.getter(cpu).ToByteArray(),
+            };
+            EnvSetMemoryDatas(env, addr, bytes);
             return cpu;
         });
 
@@ -461,21 +475,28 @@ static public partial class Ext
                         case 3: // DS:[EBX]
                             addr = segment_base + cpu.ebx;
                             break;
-                        case 4: //
+                        case 4: // SIB
                             {
-                                var sib = (int)(sbyte)disp.ElementAt(0);
+                                var sib = disp.ElementAt(0);
 
                                 var ss = (sib >> 6) & 0x3;
                                 var indexf = (sib >> 3) & 0x7;
                                 var basef = sib & 0x7;
 
-                                var base_ = EnvGetDataFromCPU(ArrayReg32)(basef)(cpu);
-
                                 var index_ = EnvGetIndexRegData32(cpu, indexf);
 
-                                addr = (uint)(base_ + (1 << ss) * index_);
-
-                                inc = 1;
+                                // base=5 かつ mod=0 は「ベースレジスタなし、SIB の後に disp32 が続く」特殊ケース
+                                if (basef == 5)
+                                {
+                                    addr = (uint)(segment_base + disp.Skip(1).ToUint32() + (1 << ss) * index_);
+                                    inc = 5; // SIB(1) + disp32(4)
+                                }
+                                else
+                                {
+                                    var base_ = EnvGetDataFromCPU(ArrayReg32)(basef)(cpu);
+                                    addr = (uint)(segment_base + base_ + (1 << ss) * index_);
+                                    inc = 1;
+                                }
                             }
                             break;
                         case 5: // DS:[d32]
