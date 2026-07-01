@@ -115,8 +115,22 @@ static class Program
         from _2 in Scas(w)
         select unit;
 
+    static State<Unit> Ins_6C_6D =>
+        from _1 in SetLog("Ins_6C_6D")
+        from opecode in Opecodes
+        let w = 0 != (opecode[0] & 0x01)
+        from _2 in Ins(w)
+        select unit;
+
+    static State<Unit> Outs_6E_6F =>
+        from _1 in SetLog("Outs_6E_6F")
+        from opecode in Opecodes
+        let w = 0 != (opecode[0] & 0x01)
+        from _2 in Outs(w)
+        select unit;
+
     // REP が前置できる文字列命令のオペコード集合。
-    static readonly HashSet<int> stringOps = [0xA4, 0xA5, 0xA6, 0xA7, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF];
+    static readonly HashSet<int> stringOps = [0x6C, 0x6D, 0x6E, 0x6F, 0xA4, 0xA5, 0xA6, 0xA7, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF];
     // ZF を見て継続判定する比較系（CMPS/SCAS）。それ以外は CX のみで判定する。
     static readonly HashSet<int> zfStringOps = [0xA6, 0xA7, 0xAE, 0xAF];
 
@@ -129,6 +143,10 @@ static class Program
         var (ok, op, cpu2, log) = GetMemoryDataIp8(env, cpu1, ope);
         if (!ok)
             return (false, default, cpu1, log);
+
+        // F3 90 = PAUSE(スピンループヒント)。実質 NOP として両バイトを消費する。
+        if (op == 0x90)
+            return (true, unit, cpu2, log);
 
         if (!stringOps.Contains(op) || !oneByte.TryGetValue(op, out var state))
             return (false, default, cpu1, log);
@@ -229,6 +247,108 @@ static class Program
         from data in GetRegData32(m.rm)
         from _3 in SetCrReg(m.reg, data)
         select unit;
+
+    // CPUID (0F A2): 入力 EAX=リーフ。最小限の機能のみ報告し、APIC 等の高度な
+    // (未エミュレートの MMIO を要する)経路に SeaBIOS が入らないようにする。
+    static State<Unit> Cpuid_0FA2 =>
+        from _1 in SetLog("Cpuid_0FA2")
+        from leaf in GetRegData32(0) // EAX
+        from _2 in SetCpu(cpu =>
+        {
+            uint a, b, c, d;
+            switch (leaf)
+            {
+                case 0: // 最大リーフ + ベンダ文字列 "GenuineIntel"
+                    a = 1;
+                    b = 0x756e6547; // "Genu"
+                    d = 0x49656e69; // "ineI"
+                    c = 0x6c65746e; // "ntel"
+                    break;
+                case 1: // バージョン情報と機能フラグ
+                    a = 0x00000600; // family 6
+                    b = 0;
+                    c = 0;          // 拡張機能なし
+                    d = 0x00000001; // FPU のみ(APIC/PAE/MSR 等は非対応として伏せる)
+                    break;
+                default:
+                    a = b = c = d = 0;
+                    break;
+            }
+            cpu.eax = a; cpu.ebx = b; cpu.ecx = c; cpu.edx = d;
+            return cpu;
+        })
+        select unit;
+
+    // IMUL r, r/m (0F AF): 2オペランド符号付き乗算 r = r * r/m。
+    static State<Unit> Imul_0FAF =>
+        from _1 in SetLog("Imul_0FAF")
+        from m in ModRegRm()
+        from src in GetMemOrRegData(m.mod, m.rm, true)
+        let type = src.data.type
+        from dst in GetRegData(m.reg, type)
+        let a = type == 1 ? (short)dst.dw : (int)dst.dd
+        let b = type == 1 ? (short)src.data.dw : (int)src.data.dd
+        let prod = (long)a * b
+        let of = type == 1 ? prod < short.MinValue || prod > short.MaxValue
+                           : prod < int.MinValue || prod > int.MaxValue
+        from _2 in type == 1 ? SetRegData16(m.reg, (ushort)prod) : SetRegData32(m.reg, (uint)prod)
+        from _3 in SetCpu((_cf, of), (_of, of))
+        select unit;
+
+    // SHLD/SHRD r/m, r, (imm8 | CL): ダブル精度シフト。
+    //   0F A4=SHLD imm8, 0F A5=SHLD CL, 0F AC=SHRD imm8, 0F AD=SHRD CL
+    static State<Unit> ShldShrd =>
+        from _1 in SetLog("ShldShrd")
+        from opecode in Opecodes
+        let left = (opecode[1] & 0x08) == 0   // A4/A5=SHLD(左), AC/AD=SHRD(右)
+        let useCl = (opecode[1] & 0x01) != 0  // A5/AD=CL, A4/AC=imm8
+        from m in ModRegRm()
+        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from dst in GetMemOrRegData(addr, true)
+        from src in GetRegData(m.reg, dst.type)
+        from cnt in useCl ? GetRegData(1, 0).Select(d => (int)d.db) : GetMemoryDataIp8.Select(b => (int)b)
+        let bits = dst.type == 1 ? 16 : 32
+        let dstv = dst.type == 1 ? (uint)dst.dw : dst.dd
+        let srcv = dst.type == 1 ? (uint)src.dw : src.dd
+        let count = cnt & 0x1F
+        from _2 in count == 0
+            ? unit.ToState()  // count==0 は結果・フラグとも不変
+            : ApplyDoubleShift(addr, dst.type, DoubleShift(dstv, srcv, count, bits, left), bits)
+        select unit;
+
+    static State<Unit> ApplyDoubleShift(
+        (bool isMem, uint addr) addr, int type, (uint result, bool cf, bool of) r, int bits) =>
+        from _w in SetMemOrRegData(addr, type == 1 ? ((ushort)r.result).ToTypeData() : r.result.ToTypeData())
+        from _f in SetCpu(
+            (_cf, r.cf),
+            (_of, r.of),
+            (_zf, (r.result & (bits == 16 ? 0xFFFFu : 0xFFFFFFFFu)) == 0),
+            (_sf, (r.result & (bits == 16 ? 0x8000u : 0x80000000u)) != 0)
+        )
+        select unit;
+
+    static (uint result, bool cf, bool of) DoubleShift(uint dst, uint src, int count, int bits, bool left)
+    {
+        uint mask = bits == 16 ? 0xFFFFu : 0xFFFFFFFFu;
+        uint msb = bits == 16 ? 0x8000u : 0x80000000u;
+        ulong d = dst & mask, s = src & mask;
+        int rest = bits - count; // 通常 1..bits-1(16bit で count>=16 は未定義。安全のため下でガード)
+        if (rest <= 0) rest = bits;
+        uint result;
+        bool cf;
+        if (left)
+        {
+            result = (uint)(((d << count) | (s >> rest)) & mask);
+            cf = ((dst >> rest) & 1) != 0;         // dst から押し出された最後のビット
+        }
+        else
+        {
+            result = (uint)(((d >> count) | (s << rest)) & mask);
+            cf = ((dst >> (count - 1)) & 1) != 0;
+        }
+        bool of = count == 1 && (((result & msb) != 0) != ((dst & msb) != 0));
+        return (result, cf, of);
+    }
 
     static State<Unit> Jcc_0F80_0F8F =>
         from _1 in SetLog("Jcc_0F80_0F8F")
@@ -808,16 +928,22 @@ static class Program
         from _2 in SetRegData(reg, value)
         select unit;
 
+    // PUSH imm16/imm32 (0x68): オペランドサイズで imm を読み、その幅で push する。
     static State<Unit> PushImm_68 =>
         from _1 in SetLog("PushImm_68")
-        from value in GetMemoryDataIp16
-        from _2 in Push16(value)
+        from type in OperandType(true)
+        from value in GetMemoryDataIp_(type)
+        from _2 in Push(value)
         select unit;
 
+    // PUSH imm8 (0x6A): imm8 を符号拡張し、オペランドサイズ幅で push する。
     static State<Unit> PushImm_6A =>
         from _1 in SetLog("PushImm_6A")
-        from value in GetMemoryDataIp8
-        from _2 in Push16((ushort)(sbyte)value)
+        from imm in GetMemoryDataIp8
+        from type in OperandType(true)
+        from _2 in Push(type == 2
+            ? ((uint)(sbyte)imm).ToTypeData()
+            : ((ushort)(sbyte)imm).ToTypeData())
         select unit;
 
     static State<Unit> Pushf_9C =>
@@ -1072,6 +1198,8 @@ static class Program
         (0x58, 8, Pop_58_5F),
         (0x60, 1, Pusha_60),
         (0x61, 1, Popa_61),
+        (0x6C, 2, Ins_6C_6D),
+        (0x6E, 2, Outs_6E_6F),
         (0x68, 1, PushImm_68),
         (0x69, 1, Imul_69_6B),
         (0x6A, 1, PushImm_6A),
@@ -1156,7 +1284,11 @@ static class Program
         (0x0F, 0xBB, 0x01, BitTest_reg),          // BTC r/m, r
         (0x0F, 0xB6, 0x02, MovzxMovsx_0FB6_BF),   // MOVZX r,r/m8 ; r,r/m16
         (0x0F, 0xBC, 0x02, BitScan_0FBC_BD),      // BSF/BSR r16, r/m16
-        (0x0F, 0xBE, 0x02, MovzxMovsx_0FB6_BF)    // MOVSX r,r/m8 ; r,r/m16
+        (0x0F, 0xBE, 0x02, MovzxMovsx_0FB6_BF),   // MOVSX r,r/m8 ; r,r/m16
+        (0x0F, 0xA2, 0x01, Cpuid_0FA2),           // CPUID
+        (0x0F, 0xA4, 0x02, ShldShrd),             // SHLD r/m,r,imm8 ; r/m,r,CL
+        (0x0F, 0xAC, 0x02, ShldShrd),             // SHRD r/m,r,imm8 ; r/m,r,CL
+        (0x0F, 0xAF, 0x01, Imul_0FAF)             // IMUL r, r/m
     ];
 
     static readonly Dictionary<int, State<Unit>> oneByte =
