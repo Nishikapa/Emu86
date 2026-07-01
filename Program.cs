@@ -949,8 +949,8 @@ static class Program
         from port in GetMemoryDataIp8
         from _2 in SetCpu((env, cpu) =>
         {
-            env.IoPort[port] = cpu.al;
-            if (w) { env.IoPort[port + 1] = cpu.ah; }
+            EnvOutPort(env, port, cpu.al);
+            if (w) { EnvOutPort(env, port + 1, cpu.ah); }
             return cpu;
         })
         select unit;
@@ -962,8 +962,8 @@ static class Program
         from port in GetMemoryDataIp8
         from _2 in SetCpu((env, cpu) =>
         {
-            if (w) { cpu.ax = (ushort)(env.IoPort[port] | (env.IoPort[port + 1] << 8)); }
-            else { cpu.al = env.IoPort[port]; }
+            if (w) { cpu.ax = (ushort)(EnvInPort(env, port) | (EnvInPort(env, port + 1) << 8)); }
+            else { cpu.al = EnvInPort(env, port); }
             return cpu;
         })
         select unit;
@@ -975,8 +975,8 @@ static class Program
         let w = 0 != (opecode[0] & 1)
         from _2 in SetCpu((env, cpu) =>
         {
-            if (w) { cpu.ax = (ushort)(env.IoPort[cpu.dx] | (env.IoPort[cpu.dx + 1] << 8)); }
-            else { cpu.al = env.IoPort[cpu.dx]; }
+            if (w) { cpu.ax = (ushort)(EnvInPort(env, cpu.dx) | (EnvInPort(env, cpu.dx + 1) << 8)); }
+            else { cpu.al = EnvInPort(env, cpu.dx); }
             return cpu;
         })
         select unit;
@@ -988,8 +988,8 @@ static class Program
         let w = 0 != (opecode[0] & 1)
         from _2 in SetCpu((env, cpu) =>
         {
-            env.IoPort[cpu.dx] = cpu.al;
-            if (w) { env.IoPort[cpu.dx + 1] = cpu.ah; }
+            EnvOutPort(env, cpu.dx, cpu.al);
+            if (w) { EnvOutPort(env, cpu.dx + 1, cpu.ah); }
             return cpu;
         })
         select unit;
