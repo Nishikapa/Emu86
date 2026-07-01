@@ -1414,10 +1414,19 @@ static class Program
         {
             while (true)
             {
-                var (ok, _, cpu2, log) = step(env, cpu, default);
-                if (!ok)
+                (bool ok, Unit _, CPU cpu2, string log) r;
+                try
+                {
+                    r = step(env, cpu, default);
+                }
+                catch (Exception ex)
+                {
+                    WriteLine($"EXCEPTION at {cpu.cs:x4}:{cpu.eip:x8}: {ex.GetType().Name}: {ex.Message}");
                     break;
-                cpu = cpu2;
+                }
+                if (!r.ok)
+                    break;
+                cpu = r.cpu2;
                 count++;
                 sw.WriteLine($"{cpu.cs:x4}:{cpu.eip:x8}");
                 if (5_000_000 <= count)

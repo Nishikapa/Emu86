@@ -753,8 +753,20 @@ static public partial class Ext
 
     /// I/O port ///////////////////////////////////
     // CMOS(0x70/0x71)を特別扱いする以外は IoPort 配列を素通しする。
-    static public byte EnvInPort(EmuEnvironment env, int port) =>
-        (port & 0xFFFF) == 0x71 ? env.Cmos[env.CmosIndex] : env.IoPort[port & 0xFFFF];
+    static public byte EnvInPort(EmuEnvironment env, int port)
+    {
+        switch (port & 0xFFFF)
+        {
+            case 0x71: // CMOS データ
+                return env.Cmos[env.CmosIndex];
+            case 0x40: // PIT チャネル0: ラッチ済み値を下位→上位の順に返す
+                byte b = (byte)(env.PitReadPhase == 0 ? env.PitLatched : env.PitLatched >> 8);
+                env.PitReadPhase ^= 1;
+                return b;
+            default:
+                return env.IoPort[port & 0xFFFF];
+        }
+    }
 
     static public void EnvOutPort(EmuEnvironment env, int port, byte val)
     {
@@ -765,6 +777,15 @@ static public partial class Ext
                 break;
             case 0x71: // 選択中の CMOS レジスタへ書き込み
                 env.Cmos[env.CmosIndex] = val;
+                break;
+            case 0x43: // PIT コントロール: ラッチ/リードバックでカウンタを捕捉し時刻を進める
+                bool latch = (val & 0x30) == 0 || (val & 0xC0) == 0xC0;
+                if (latch)
+                {
+                    env.PitLatched = env.PitCounter;
+                    env.PitReadPhase = 0;
+                    env.PitCounter -= 0x100; // 経過時間の代用として下向きに減算する
+                }
                 break;
             default:
                 env.IoPort[port & 0xFFFF] = val;
@@ -836,4 +857,11 @@ public class EmuEnvironment
     // CMOS/RTC: 0x70 でインデックス選択、0x71 でデータ read/write。
     public byte[] Cmos = new byte[128];
     public int CmosIndex;
+
+    // 仮想 8254 PIT(チャネル0)。実時間を持たないため、カウンタをラッチのたびに
+    // 減算して単調に時刻が進むようにする。SeaBIOS は下向きカウンタからラップを
+    // 検出して 32bit の単調時刻を作るので、これで遅延ループが完了する。
+    public ushort PitCounter = 0xFFFF;
+    public ushort PitLatched = 0xFFFF;
+    public int PitReadPhase; // 0=下位バイト, 1=上位バイト
 }
