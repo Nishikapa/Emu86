@@ -130,7 +130,7 @@ static public partial class Ext
     {
         switch (size)
         {
-            case 1: env.OneMegaMemory_[addr] = (byte)val; break;
+            case 1: EnvWriteByte(env, addr, (byte)val); break;
             case 2: EnvSetMemoryDatas(env, addr, ((ushort)val).ToByteArray()); break;
             default: EnvSetMemoryDatas(env, addr, val.ToByteArray()); break;
         }
@@ -187,6 +187,27 @@ static public partial class Ext
                  : update_eflags_sub(vals.s, vals.d)
         from _adv in SetCpu(cpu => StrAdvance(cpu, StrSize(cpu, w), si: true, di: true))
         select Unit.unit;
+
+    // INS: ポート DX から 1 要素読み、[ES:DI] へ格納し、DF に従って DI を増減する。
+    static public State<Unit> Ins(bool w) =>
+        SetCpu((env, cpu) =>
+        {
+            int size = StrSize(cpu, w);
+            uint val = 0;
+            for (int i = 0; i < size; i++) val |= (uint)EnvInPort(env, cpu.dx + i) << (8 * i);
+            EnvWriteN(env, StrDst(cpu), size, val);
+            return StrAdvance(cpu, size, si: false, di: true);
+        });
+
+    // OUTS: [DS:SI] から 1 要素読み、ポート DX へ出力し、DF に従って SI を増減する。
+    static public State<Unit> Outs(bool w) =>
+        SetCpu((env, cpu) =>
+        {
+            int size = StrSize(cpu, w);
+            uint val = EnvReadN(env, StrSrc(cpu), size);
+            for (int i = 0; i < size; i++) EnvOutPort(env, cpu.dx + i, (byte)(val >> (8 * i)));
+            return StrAdvance(cpu, size, si: true, di: false);
+        });
 
     // BT系: r/m の bit 番目を CF にコピーし、op に応じて値を変更して書き戻す。
     //   op: 0=BT(変更なし) 1=BTS(セット) 2=BTR(クリア) 3=BTC(反転)
@@ -586,8 +607,18 @@ static public partial class Ext
                         case 3: // DS:[EBX+d32]
                             addr = (uint)(segment_base + cpu.ebx + d32);
                             break;
-                        case 4: // SS:[ESP+d32]
-                            throw new NotImplementedException();
+                        case 4: // SIB + disp32
+                            {
+                                var sib = disp.ElementAt(0);
+                                var ss = (sib >> 6) & 0x3;
+                                var indexf = (sib >> 3) & 0x7;
+                                var basef = sib & 0x7;
+                                var base_ = EnvGetDataFromCPU(ArrayReg32)(basef)(cpu);
+                                var index_ = EnvGetIndexRegData32(cpu, indexf);
+                                var disp32 = disp.Skip(1).ToUint32();
+                                addr = (uint)(segment_base + base_ + (1 << ss) * index_ + disp32);
+                                return (true, addr, 5); // SIB(1) + disp32(4)
+                            }
                         case 5: // SS:[EBP+d32]
                             addr = (uint)(ss_base + cpu.ebp + d32);
                             break;
@@ -641,7 +672,7 @@ static public partial class Ext
         SetTypeData<Action<EmuEnvironment, uint>>
         (
             data,
-            db => (env, addr) => { env.OneMegaMemory_[addr] = db; },
+            db => (env, addr) => { EnvWriteByte(env, addr, db); },
             dw => (env, addr) => { EnvSetMemoryDatas(env, addr, dw.ToByteArray()); },
             dd => (env, addr) => { EnvSetMemoryDatas(env, addr, dd.ToByteArray()); }
         );
@@ -716,7 +747,7 @@ static public partial class Ext
     {
         for (int i = 0; i < data.Length; ++i)
         {
-            env.OneMegaMemory_[addr + i] = data[i];
+            EnvWriteByte(env, addr + (uint)i, data[i]);
         }
     }
 
@@ -741,9 +772,20 @@ static public partial class Ext
         }
     }
 
-    static private byte EnvGetMemoryData8(EmuEnvironment env, uint addr) => env.OneMegaMemory_[addr];
-    static private ushort EnvGetMemoryData16(EmuEnvironment env, uint addr) => BitConverter.ToUInt16(env.OneMegaMemory_, (int)addr);
-    static private uint EnvGetMemoryData32(EmuEnvironment env, uint addr) => BitConverter.ToUInt32(env.OneMegaMemory_, (int)addr);
+    // 搭載RAM(RamSize)外へのアクセスは未マップ領域として扱う:
+    //   読み出しは 0xFF(オープンバス)、書き込みは無視。MMIO 等をエミュレートしない代わりに
+    //   クラッシュを避ける。
+    static private void EnvWriteByte(EmuEnvironment env, uint addr, byte val)
+    {
+        if (addr < (uint)env.OneMegaMemory_.Length) env.OneMegaMemory_[addr] = val;
+    }
+
+    static private byte EnvGetMemoryData8(EmuEnvironment env, uint addr) =>
+        addr < (uint)env.OneMegaMemory_.Length ? env.OneMegaMemory_[addr] : (byte)0xFF;
+    static private ushort EnvGetMemoryData16(EmuEnvironment env, uint addr) =>
+        addr + 2 <= (uint)env.OneMegaMemory_.Length ? BitConverter.ToUInt16(env.OneMegaMemory_, (int)addr) : (ushort)0xFFFF;
+    static private uint EnvGetMemoryData32(EmuEnvironment env, uint addr) =>
+        addr + 4 <= (uint)env.OneMegaMemory_.Length ? BitConverter.ToUInt32(env.OneMegaMemory_, (int)addr) : 0xFFFFFFFF;
 }
 
 public class EmuEnvironment
