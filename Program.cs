@@ -179,22 +179,30 @@ static class Program
         from _2 in SetMemOrRegData(addr, imm)
         select unit;
 
-    // MOV AL/AX, [moffs] (0xA0/0xA1): 直接アドレス(DS:offset16)から読み込む。
+    // moffs のオフセットを実効アドレスサイズで読む(32ビットコードでは32ビット、0x67で反転)。
+    static State<uint> MoffsOffset =>
+        from a32 in GetDataFromCpu(cpu => cpu.code32 != cpu.address_size_prefix)
+        from off in a32 ? GetMemoryDataIp32 : GetMemoryDataIp16.Select(dw => (uint)dw)
+        select off;
+
+    // MOV AL/AX/EAX, [moffs] (0xA0/0xA1): 直接アドレス(DS:offset)から読み込む。
     static State<Unit> Mov_A0_A1 =>
         from _1 in SetLog("Mov_A0_A1")
         from opecode in Opecodes
         let w = 0 != (opecode[0] & 0x01)
-        from offset in GetMemoryDataIp16
-        from _2 in MovAccFromMoffs(w, offset)
+        from offset in MoffsOffset
+        from type in OperandType(w)
+        from _2 in MovAccFromMoffs(type, offset)
         select unit;
 
-    // MOV [moffs], AL/AX (0xA2/0xA3): アキュムレータを直接アドレス(DS:offset16)へ書き込む。
+    // MOV [moffs], AL/AX/EAX (0xA2/0xA3): アキュムレータを直接アドレス(DS:offset)へ書き込む。
     static State<Unit> Mov_A2_A3 =>
         from _1 in SetLog("Mov_A2_A3")
         from opecode in Opecodes
         let w = 0 != (opecode[0] & 0x01)
-        from offset in GetMemoryDataIp16
-        from _2 in MovMoffsFromAcc(w, offset)
+        from offset in MoffsOffset
+        from type in OperandType(w)
+        from _2 in MovMoffsFromAcc(type, offset)
         select unit;
 
     static State<Unit> Mov_8E =>
@@ -459,6 +467,27 @@ static class Program
             return c;
         })
         from _2 in SetCpu((_cf, of), (_of, of))
+        select unit;
+
+    // IMUL r, r/m, imm (0x69 imm16/32, 0x6B imm8符号拡張): 3オペランド符号付き乗算。
+    //   r = r/m * imm。結果が転送先サイズに収まらなければ CF=OF=1（SF/ZF等は未定義）。
+    static State<Unit> Imul_69_6B =>
+        from _1 in SetLog("Imul_69_6B")
+        from opecode in Opecodes
+        let imm8 = 0 != (opecode[0] & 0x02)   // 0x6B は imm8、0x69 は imm16/32
+        from m in ModRegRm()
+        from src in GetMemOrRegData(m.mod, m.rm, true)
+        let type = src.data.type              // w=true なので 1(16bit) か 2(32bit)
+        from imm in imm8
+            ? GetMemoryDataIp8.Select(b => (long)(sbyte)b)
+            : GetMemoryDataIp_(type).Select(d => type == 1 ? (long)(short)d.dw : (long)(int)d.dd)
+        let a = type == 1 ? (long)(short)src.data.dw : (long)(int)src.data.dd
+        let prod = a * imm
+        let of = type == 1
+            ? prod < short.MinValue || prod > short.MaxValue
+            : prod < int.MinValue || prod > int.MaxValue
+        from _2 in type == 1 ? SetRegData16(m.reg, (ushort)prod) : SetRegData32(m.reg, (uint)prod)
+        from _3 in SetCpu((_cf, of), (_of, of))
         select unit;
 
     // DIV r/m : 符号なし除算。商と剰余を AL/AH, AX/DX, EAX/EDX へ。
@@ -1042,7 +1071,9 @@ static class Program
         (0x60, 1, Pusha_60),
         (0x61, 1, Popa_61),
         (0x68, 1, PushImm_68),
+        (0x69, 1, Imul_69_6B),
         (0x6A, 1, PushImm_6A),
+        (0x6B, 1, Imul_69_6B),
         (0x70, 16, Jcc_70_7F),
         (0x80, 2, Group1_80_81),
         (0x83, 1, Group1_83),
