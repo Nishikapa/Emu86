@@ -15,7 +15,7 @@ static class Program
 {
     // JMP far ptr16:16 / ptr16:32 (0xEA)。
     // 実効オペランドサイズが32ビット(66プレフィックスまたは32ビットコード)なら offset は 32 ビット。
-    // プロテクトモード中は CS にセレクタをロードし、32ビットコードセグメント(D=1)へのジャンプとみなす。
+    // CS のロードは LoadSReg 経由(プロテクトモードでは GDT 記述子から基底/D ビットを反映)。
     static State<Unit> FarJump_EA =>
         from _1 in SetLog("FarJump_EA")
         from type in OperandType(true)
@@ -24,8 +24,7 @@ static class Program
             GetMemoryDataIp16.Select(dw => (uint)dw)
         from segment in GetMemoryDataIp16
         from _2 in _eip.Set(offset)
-        from _3 in _cs.Set(segment)
-        from _4 in SetCpu(cpu => { cpu.code32 = cpu.pe; return cpu; })
+        from _3 in LoadSReg(1, segment)
         select unit;
 
     // rel16/rel32 相対オフセットを実効オペランドサイズで読む(rel16 は符号拡張)。
@@ -55,7 +54,7 @@ static class Program
         from ip in GetDataFromCpu(cpu => cpu.ip)
         from _3 in Push16(ip)
         from _4 in _ip.Set(offset)
-        from _5 in _cs.Set(segment)
+        from _5 in LoadSReg(1, segment)
         select unit;
 
     // RETF (0xCB): IP, CS を pop して far 復帰する。
@@ -64,7 +63,7 @@ static class Program
         from ip in Pop16
         from _2 in _ip.Set(ip)
         from cs in Pop16
-        from _3 in _cs.Set(cs)
+        from _3 in LoadSReg(1, cs)
         select unit;
 
     // RETF imm16 (0xCA): IP, CS を pop して復帰後、SP += imm16。
@@ -74,7 +73,7 @@ static class Program
         from ip in Pop16
         from _2 in _ip.Set(ip)
         from cs in Pop16
-        from _3 in _cs.Set(cs)
+        from _3 in LoadSReg(1, cs)
         from _4 in SetCpu(cpu => { cpu.sp += imm; return cpu; })
         select unit;
 
@@ -742,12 +741,15 @@ static class Program
         from _2 in Iret
         select unit;
 
+    // CLI/STI: 割り込み許可フラグ(IF、この実装では jf)を操作する。
     static State<Unit> Cli_FA =>
-        from _ in SetLog("Cli_FA")
+        from _1 in SetLog("Cli_FA")
+        from _2 in _jf.Set(false)
         select unit;
 
     static State<Unit> Sti_FB =>
-        from _ in SetLog("Sti_FB")
+        from _1 in SetLog("Sti_FB")
+        from _2 in _jf.Set(true)
         select unit;
 
     static State<Unit> Cld_FC =>
@@ -879,6 +881,24 @@ static class Program
         from _3 in SetRegData16(5, val) // BP <- [SP]
         select unit;
 
+    // PUSH Sreg (06/0E/16/1E): opcode>>3 が ES/CS/SS/DS の順のセグメント番号になる。
+    static State<Unit> PushSreg =>
+        from _1 in SetLog("PushSreg")
+        from opecode in Opecodes
+        let reg = opecode[0] >> 3
+        from v in GetSRegData(reg)
+        from _2 in Push16(v)
+        select unit;
+
+    // POP Sreg (07/17/1F)。プロテクトモードでは記述子を再ロードする。
+    static State<Unit> PopSreg =>
+        from _1 in SetLog("PopSreg")
+        from opecode in Opecodes
+        let reg = opecode[0] >> 3
+        from v in Pop16
+        from _2 in LoadSReg(reg, v)
+        select unit;
+
     static State<Unit> Push_50_57 =>
         from _1 in SetLog("Push_50_57")
         from opecode in Opecodes
@@ -898,6 +918,17 @@ static class Program
         select unit;
 
     // PUSH imm16/imm32 (0x68): オペランドサイズで imm を読み、その幅で push する。
+    // POP r/m (0x8F /0)
+    static State<Unit> Pop_8F =>
+        from _1 in SetLog("Pop_8F")
+        from m in ModRegRm()
+        from _2 in SetResult(0 == m.reg)
+        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from type in OperandType(true)
+        from data in Pop(type)
+        from _3 in SetMemOrRegData(addr, data)
+        select unit;
+
     static State<Unit> PushImm_68 =>
         from _1 in SetLog("PushImm_68")
         from type in OperandType(true)
@@ -1091,18 +1122,25 @@ static class Program
         })
         select unit;
 
-    static State<Unit> Lgdt(int mod, int rm) =>
+    // SGDT/SIDT (0F 01 /0, /1): limit(16bit) + base(32bit) をメモリへ書き出す。
+    static State<Unit> Sgdt(int mod, int rm, bool idt) =>
         from addr in GetMemOrRegAddr(mod, rm)
-        from dw in GetMemOrRegData16(addr)
-        from dd in GetMemOrRegData32((addr.isMem, addr.addr + 2))
-        from _ in SetCpu(cpu => { cpu.gdt_base = dd; cpu.gdt_limit = dw; return cpu; })
+        from cpu in GetCpu
+        from _1 in SetMemOrRegData(addr, (idt ? cpu.idt_limit : cpu.gdt_limit).ToTypeData())
+        from _2 in SetMemOrRegData((addr.isMem, addr.addr + 2), (idt ? cpu.idt_base : cpu.gdt_base).ToTypeData())
         select unit;
 
-    static State<Unit> Lidt(int mod, int rm) =>
+    // LGDT/LIDT (0F 01 /2, /3): メモリから limit(16bit) + base(32bit) を読み込む。
+    static State<Unit> Lgdt(int mod, int rm, bool idt) =>
         from addr in GetMemOrRegAddr(mod, rm)
         from dw in GetMemOrRegData16(addr)
         from dd in GetMemOrRegData32((addr.isMem, addr.addr + 2))
-        from _ in SetCpu(cpu => { cpu.idt_base = dd; cpu.idt_limit = dw; return cpu; })
+        from _ in SetCpu(cpu =>
+        {
+            if (idt) { cpu.idt_base = dd; cpu.idt_limit = dw; }
+            else { cpu.gdt_base = dd; cpu.gdt_limit = dw; }
+            return cpu;
+        })
         select unit;
 
     static State<Unit> Group7_0F01 =>
@@ -1110,8 +1148,10 @@ static class Program
         from m in ModRegRm()
         from _ in Choice(
             m.reg,
-            (2, Lgdt(m.mod, m.rm)),
-            (3, Lidt(m.mod, m.rm))
+            (0, Sgdt(m.mod, m.rm, idt: false)),
+            (1, Sgdt(m.mod, m.rm, idt: true)),
+            (2, Lgdt(m.mod, m.rm, idt: false)),
+            (3, Lgdt(m.mod, m.rm, idt: true))
         )
         select unit;
 
@@ -1129,8 +1169,10 @@ static class Program
     static Dictionary<int, Accessor<CPU, bool>> PrefixStates =>
         new()
         {
-            { 0x2E, _cs_prefix },
             { 0x26, _es_prefix },
+            { 0x2E, _cs_prefix },
+            { 0x36, _ss_prefix },
+            { 0x3E, _ds_prefix },
             { 0x64, _fs_prefix },
             { 0x65, _gs_prefix },
             { 0x66, _operand_size_prefix },
@@ -1154,9 +1196,16 @@ static class Program
     static (byte ope, int len, State<Unit> state)[] OneByteStates =>
     [
         (0x00, 6, Arithmetic),
+        (0x06, 1, PushSreg),   // PUSH ES
+        (0x07, 1, PopSreg),    // POP ES
         (0x08, 6, Arithmetic),
+        (0x0E, 1, PushSreg),   // PUSH CS
         (0x10, 6, Arithmetic),
+        (0x16, 1, PushSreg),   // PUSH SS
+        (0x17, 1, PopSreg),    // POP SS
         (0x18, 6, Arithmetic),
+        (0x1E, 1, PushSreg),   // PUSH DS
+        (0x1F, 1, PopSreg),    // POP DS
         (0x20, 6, Arithmetic),
         (0x28, 6, Arithmetic),
         (0x30, 6, Arithmetic),
@@ -1181,6 +1230,7 @@ static class Program
         (0x8C, 1, Mov_8C),
         (0x8D, 1, Lea_8D),
         (0x8E, 1, Mov_8E),
+        (0x8F, 1, Pop_8F),
         (0x90, 1, Nop_90),
         (0x91, 7, Xchg_91_97),
         (0x9A, 1, CallFar_9A),
@@ -1366,6 +1416,9 @@ static class Program
         from _3 in ClearPrefixes
         select unit;
 
+    // 仮想タイマ割り込み(IRQ0)の注入間隔(命令数)。
+    const long IrqPeriod = 10_000;
+
     static void Main(string[] args)
     {
         var init_cpu1 = new CPU();
@@ -1378,11 +1431,23 @@ static class Program
         // 未実装オペコードで停止したら、その地点とオペコードを表示する。
         var cpu = init_cpu3;
         var step = Execute2;
+        var timerIrq = Interrupt(8);
         long count = 0;
+        long nextIrq = IrqPeriod;
         using (var sw = new StreamWriter("trace.log"))
         {
             while (true)
             {
+                // 仮想タイマ割り込み(IRQ0): 一定命令数ごとに、リアルモードかつ IF=1 のとき
+                // INT 08h を注入する。SeaBIOS の handle_08 が BDA のティックカウンタを進める。
+                if (count >= nextIrq && !cpu.pe && cpu.jf)
+                {
+                    nextIrq = count + IrqPeriod;
+                    var irq = timerIrq(env, cpu, default);
+                    if (irq.IsSuccess)
+                        cpu = irq.cpu;
+                }
+
                 (bool ok, Unit _, CPU cpu2, string log) r;
                 try
                 {
@@ -1398,7 +1463,7 @@ static class Program
                 cpu = r.cpu2;
                 count++;
                 sw.WriteLine($"{cpu.cs:x4}:{cpu.eip:x8}");
-                if (5_000_000 <= count)
+                if (50_000_000 <= count)
                 {
                     WriteLine("instruction limit reached");
                     break;
