@@ -9,14 +9,14 @@ static public partial class Ext
 {
     static int[] arrLen = [1, 2, 4];
 
-    static public State<((int type, byte db, ushort dw, uint dd) data, (bool isMem, uint addr) input)> GetMemoryDataIp(bool w) =>
+    static public State<(Data data, MemAddr input)> GetMemoryDataIp(bool w) =>
         from cpu in GetCpu
         let addr = GetCodeAddr(cpu)
         from data in GetMemOrRegData(addr, w)
         from _ in IpInc(arrLen[data.type])
         select (data, (addr.isMem, addr.addr));
 
-    static public State<(int type, byte db, ushort dw, uint dd)> GetMemoryDataIp_(int type) =>
+    static public State<Data> GetMemoryDataIp_(int type) =>
         from data in GetMemoryDataIp(arrLen[type])
         select ToTypeData(data, type);
 
@@ -27,7 +27,7 @@ static public partial class Ext
         let rm = value & 0x7
         select (mod, reg, rm);
 
-    static public State<(int type, byte db, ushort dw, uint dd)> Choice(
+    static public State<Data> Choice(
         int index, State<byte> dbState, State<ushort> dwState, State<uint> ddState) =>
         Choice_(
             index,
@@ -36,12 +36,12 @@ static public partial class Ext
             ddState.Select(ToTypeData)
         );
 
-    static public Func<T, (int type, byte db, ushort dw, uint dd)> GetTypeData_<T>(
+    static public Func<T, Data> GetTypeData_<T>(
         int index,
         Func<T, byte> func_db,
         Func<T, ushort> func_dw,
         Func<T, uint> func_dd) =>
-        Choice_<Func<T, (int type, byte db, ushort dw, uint dd)>>(
+        Choice_<Func<T, Data>>(
             index,
             t => func_db(t).ToTypeData(),
             t => func_dw(t).ToTypeData(),
@@ -49,7 +49,7 @@ static public partial class Ext
         );
 
     static T SetTypeData<T>(
-        (int type, byte db, ushort dw, uint dd) data,
+        Data data,
         Func<byte, T> func_db,
         Func<ushort, T> func_dw,
         Func<uint, T> func_dd) =>
@@ -60,115 +60,39 @@ static public partial class Ext
             func_dd(data.dd)
         );
 
-    static public State<(int type, byte db, ushort dw, uint dd)> Calc(
-        int type, byte db1, ushort dw1, uint dd1, byte db2, ushort dw2, uint dd2, int kind) =>
-        Choice_(
-            kind,
-            Choice( // ADD
-                type,
-                from _ in update_eflags_add(db1, db2)
-                select (byte)(db1 + db2),
-                from _ in update_eflags_add(dw1, dw2)
-                select (ushort)(dw1 + dw2),
-                from _ in update_eflags_add(dd1, dd2)
-                select dd1 + dd2
-            ),
-            Choice( // OR
-                type,
-                from _db in ((byte)(db1 | db2)).ToState()
-                from _ in update_eflags(_db)
-                select _db,
-                from _dw in ((ushort)(dw1 | dw2)).ToState()
-                from _ in update_eflags(_dw)
-                select _dw,
-                from _dd in (dd1 | dd2).ToState()
-                from _ in update_eflags(_dd)
-                select _dd
-            ),
-            Choice( // ADC
-                type,
-                from cf in Get(_cf)
-                let _data2 = (byte)(db2 + (cf ? 1 : 0))
-                from _ in update_eflags_add(db1, _data2)
-                select (byte)(db1 + _data2),
-                from cf in Get(_cf)
-                let _data2 = (ushort)(dw2 + (cf ? 1 : 0))
-                from _ in update_eflags_add(dw1, _data2)
-                select (ushort)(dw1 + _data2),
-                from cf in Get(_cf)
-                let _data2 = (uint)(dd2 + (cf ? 1 : 0))
-                from _ in update_eflags_add(dd1, _data2)
-                select dd1 + _data2
-            ),
-            Choice( // SBB
-                type,
-                from cf in Get(_cf)
-                let _data2 = (byte)(db2 + (cf ? 1 : 0))
-                from _ in update_eflags_sub(db1, _data2)
-                select (byte)(db1 - _data2),
-                from cf in Get(_cf)
-                let _data2 = (ushort)(dw2 + (cf ? 1 : 0))
-                from _ in update_eflags_sub(dw1, _data2)
-                select (ushort)(dw1 - _data2),
-                from cf in Get(_cf)
-                let _data2 = (uint)(dd2 + (cf ? 1 : 0))
-                from _ in update_eflags_sub(dd1, _data2)
-                select dd1 - _data2
-            ),
-            Choice( // AND
-                type,
-                from _db in ((byte)(db1 & db2)).ToState()
-                from _ in update_eflags(_db)
-                select _db,
-                from _dw in ((ushort)(dw1 & dw2)).ToState()
-                from _ in update_eflags(_dw)
-                select _dw,
-                from _dd in (dd1 & dd2).ToState()
-                from _ in update_eflags(_dd)
-                select _dd
-            ),
-            Choice( // SUB
-                type,
-                from _ in update_eflags_sub(db1, db2)
-                select (byte)(db1 - db2),
-                from _ in update_eflags_sub(dw1, dw2)
-                select (ushort)(dw1 - dw2),
-                from _ in update_eflags_sub(dd1, dd2)
-                select dd1 - dd2
-            ),
-            Choice( // XOR
-                type,
-                from _db in ((byte)(db1 ^ db2)).ToState()
-                from _ in update_eflags(_db)
-                select _db,
-                from _dw in ((ushort)(dw1 ^ dw2)).ToState()
-                from _ in update_eflags(_dw)
-                select _dw,
-                from _dd in (dd1 ^ dd2).ToState()
-                from _ in update_eflags(_dd)
-                select _dd
-            ),
-            Choice( // CMP
-                type,
-                from _ in update_eflags_sub(db1, db2)
-                select db1,
-                from _ in update_eflags_sub(dw1, dw2)
-                select dw1,
-                from _ in update_eflags_sub(dd1, dd2)
-                select dd1
-            )
-        );
-
-    static public State<(int type, byte db, ushort dw, uint dd)> Calc(
-        (int type, byte db, ushort dw, uint dd) data1,
-        (int type, byte db, ushort dw, uint dd) data2,
-        int kind)
+    // 算術/論理グループを uint 上で幅共通に計算する。
+    // kind: 0=ADD 1=OR 2=ADC 3=SBB 4=AND 5=SUB 6=XOR 7=CMP
+    static public State<Data> Calc(Data d1, Data d2, int kind)
     {
-        var (type1, db1, dw1, dd1) = data1;
-        var (type2, db2, dw2, dd2) = data2;
-        if (type1 != type2)
+        if (d1.type != d2.type)
             throw new Exception();
-        return Calc(type1, db1, dw1, dd1, db2, dw2, dd2, kind);
+        return
+            from cf0 in Get(_cf)
+            let mask = Mask(d1.type)
+            let msb = Msb(d1.type)
+            let a = d1.Value()
+            // ADC/SBB は b に CF を加えてから ADD/SUB と同じ計算をする
+            let b = (d2.Value() + (kind is 2 or 3 && cf0 ? 1u : 0u)) & mask
+            let r = kind switch
+            {
+                0 or 2 => (a + b) & mask,   // ADD/ADC
+                1 => a | b,                 // OR
+                3 or 5 => (a - b) & mask,   // SBB/SUB
+                4 => a & b,                 // AND
+                6 => a ^ b,                 // XOR
+                _ => a,                     // CMP は結果を捨てて a を返す
+            }
+            let isAdd = kind is 0 or 2
+            let isSub = kind is 3 or 5 or 7
+            let fr = isSub ? (a - b) & mask : r  // フラグ計算の対象(CMP は減算結果)
+            from _ in SetCpu(
+                (_cf, isAdd ? (ulong)a + b > mask : isSub && a < b),
+                (_zf, fr == 0),
+                (_sf, (fr & msb) != 0),
+                (_of, isAdd ? ((a ^ b) & msb) == 0 && ((a ^ fr) & msb) != 0
+                    : isSub && ((a ^ b) & msb) != 0 && ((a ^ fr) & msb) != 0)
+            )
+            select r.ToTypeData(d1.type);
     }
 
     // Group2 シフト/ローテートを 1bit ずつ count 回適用する。
@@ -239,24 +163,18 @@ static public partial class Ext
     }
 
     // Group2 を実行し、フラグを更新して結果を type タプルで返す。
-    static public State<(int type, byte db, ushort dw, uint dd)> Group2(
-        (int type, byte db, ushort dw, uint dd) data, int count, int kind) =>
+    static public State<Data> Group2(
+        Data data, int count, int kind) =>
         from cf0 in Get(_cf)
         let cnt = count & 0x1F   // 80386 はシフト量を 5bit にマスクする
-        let bits = data.type == 0 ? 8 : data.type == 1 ? 16 : 32
-        let v = data.type == 0 ? (uint)data.db : data.type == 1 ? data.dw : data.dd
-        let res = ComputeShift(v, cnt, kind, bits, cf0)
-        let isShift = kind >= 4
-        let msb = 1u << (bits - 1)
-        // count==0 のときはフラグを変更しない。
+        let res = ComputeShift(data.Value(), cnt, kind, Bits(data.type), cf0)
+        // count==0 のときはフラグを変更しない。シフト系(kind>=4)は ZF/SF も更新する。
         from _f in cnt == 0
             ? unit.ToState()
-            : isShift
-                ? SetCpu((_cf, res.cf), (_of, res.of), (_zf, res.result == 0), (_sf, (res.result & msb) != 0))
+            : kind >= 4
+                ? SetCpu((_cf, res.cf), (_of, res.of), (_zf, res.result == 0), (_sf, (res.result & Msb(data.type)) != 0))
                 : SetCpu((_cf, res.cf), (_of, res.of))
-        select data.type == 0 ? ((byte)res.result).ToTypeData()
-             : data.type == 1 ? ((ushort)res.result).ToTypeData()
-             : res.result.ToTypeData();
+        select res.result.ToTypeData(data.type);
 
     static public State<bool> Not(State<bool> s) =>
         s.Select(b => !b);
@@ -362,10 +280,10 @@ static public partial class Ext
         );
 
     // type(0=byte,1=word,2=dword) に応じて幅ごとの update_eflags を呼ぶ。
-    static public State<Unit> update_eflags(int type, byte db, ushort dw, uint dd) =>
-        type == 0 ? update_eflags(db)
-      : type == 1 ? update_eflags(dw)
-      : update_eflags(dd);
+    static public State<Unit> update_eflags(Data d) =>
+        d.type == 0 ? update_eflags(d.db)
+      : d.type == 1 ? update_eflags(d.dw)
+      : update_eflags(d.dd);
 
     static public State<Unit> update_eflags_sub(byte v1, byte v2) =>
         SetCpu(
@@ -391,72 +309,21 @@ static public partial class Ext
             (_of, (TopBit(v1) != TopBit(v2)) && (TopBit(v1) != TopBit((ushort)(v1 - v2))))
         );
 
-    static public State<Unit> update_eflags_add(byte v1, byte v2) =>
-        SetCpu(
-            (_cf, 0xFF < (v1 + v2)),
-            (_zf, 0 == (byte)(v1 + v2)),
-            (_sf, TopBit((byte)(v1 + v2))),
-            (_of, (TopBit(v1) == TopBit(v2)) && (TopBit(v1) != TopBit((byte)(v1 + v2))))
-        );
-
-    static public State<Unit> update_eflags_add(ushort v1, ushort v2) =>
-        SetCpu(
-            (_cf, 0xFFFF < (v1 + v2)),
-            (_zf, 0 == (ushort)(v1 + v2)),
-            (_sf, TopBit((ushort)(v1 + v2))),
-            (_of, (TopBit(v1) == TopBit(v2)) && (TopBit(v1) != TopBit((ushort)(v1 + v2))))
-        );
-
-    static public State<Unit> update_eflags_add(uint v1, uint v2) =>
-        SetCpu(
-            (_cf, (v1 + v2) < v1),
-            (_zf, 0 == (v1 + v2)),
-            (_sf, TopBit(v1 + v2)),
-            (_of, (TopBit(v1) == TopBit(v2)) && (TopBit(v1) != TopBit(v1 + v2)))
-        );
-
     // INC/DEC は CF を変更しない（ZF/SF/OF のみ更新）。
-    static public State<Unit> update_eflags_inc(byte v) =>
-        SetCpu(
-            (_zf, 0 == (byte)(v + 1)),
-            (_sf, TopBit((byte)(v + 1))),
-            (_of, v == 0x7F)
-        );
+    static public State<Unit> update_eflags_inc(Data d) => update_eflags_incdec(d, +1);
+    static public State<Unit> update_eflags_dec(Data d) => update_eflags_incdec(d, -1);
 
-    static public State<Unit> update_eflags_dec(byte v) =>
-        SetCpu(
-            (_zf, 0 == (byte)(v - 1)),
-            (_sf, TopBit((byte)(v - 1))),
-            (_of, v == 0x80)
+    static State<Unit> update_eflags_incdec(Data d, int delta)
+    {
+        var msb = Msb(d.type);
+        var v = d.Value();
+        var r = (uint)(v + delta) & Mask(d.type);
+        return SetCpu(
+            (_zf, r == 0),
+            (_sf, (r & msb) != 0),
+            (_of, v == (delta > 0 ? msb - 1 : msb))
         );
-
-    static public State<Unit> update_eflags_inc(ushort v) =>
-        SetCpu(
-            (_zf, 0 == (ushort)(v + 1)),
-            (_sf, TopBit((ushort)(v + 1))),
-            (_of, v == 0x7FFF)
-        );
-
-    static public State<Unit> update_eflags_dec(ushort v) =>
-        SetCpu(
-            (_zf, 0 == (ushort)(v - 1)),
-            (_sf, TopBit((ushort)(v - 1))),
-            (_of, v == 0x8000)
-        );
-
-    static public State<Unit> update_eflags_inc(uint v) =>
-        SetCpu(
-            (_zf, 0 == (v + 1)),
-            (_sf, TopBit(v + 1)),
-            (_of, v == 0x7FFFFFFF)
-        );
-
-    static public State<Unit> update_eflags_dec(uint v) =>
-        SetCpu(
-            (_zf, 0 == (v - 1)),
-            (_sf, TopBit(v - 1)),
-            (_of, v == 0x80000000)
-        );
+    }
 
     static public State<CPU> GetCpu => GetDataFromEnvCpu((env, cpu) => cpu);
 
@@ -478,12 +345,12 @@ public class Accessor<O, P>(Func<O, P> g, Func<O, Func<P, O>> s)
 
 public struct CPU
 {
-    static public Accessor<CPU, ushort> _cs => new(c => c.cs, c => v => { c.cs = v; return c; });
-    static public Accessor<CPU, ushort> _ds => new(c => c.ds, c => v => { c.ds = v; return c; });
-    static public Accessor<CPU, ushort> _es => new(c => c.es, c => v => { c.es = v; return c; });
-    static public Accessor<CPU, ushort> _ss => new(c => c.ss, c => v => { c.ss = v; return c; });
-    static public Accessor<CPU, ushort> _fs => new(c => c.fs, c => v => { c.fs = v; return c; });
-    static public Accessor<CPU, ushort> _gs => new(c => c.gs, c => v => { c.gs = v; return c; });
+    static public readonly Accessor<CPU, ushort> _cs = new(c => c.cs, c => v => { c.cs = v; return c; });
+    static public readonly Accessor<CPU, ushort> _ds = new(c => c.ds, c => v => { c.ds = v; return c; });
+    static public readonly Accessor<CPU, ushort> _es = new(c => c.es, c => v => { c.es = v; return c; });
+    static public readonly Accessor<CPU, ushort> _ss = new(c => c.ss, c => v => { c.ss = v; return c; });
+    static public readonly Accessor<CPU, ushort> _fs = new(c => c.fs, c => v => { c.fs = v; return c; });
+    static public readonly Accessor<CPU, ushort> _gs = new(c => c.gs, c => v => { c.gs = v; return c; });
 
     public ushort cs { get; private set; }
     public ushort ds { get; private set; }
@@ -492,17 +359,9 @@ public struct CPU
     private ushort fs { get; set; }
     private ushort gs { get; set; }
 
-    static public Accessor<CPU, ushort> _ip => new(
-        c => c.ip,
-        c => v =>
-        {
-            c.ip = v;
-            //WriteLine(v.ToString("x"));
-            return c;
-        }
-    );
+    static public readonly Accessor<CPU, ushort> _ip = new(c => c.ip, c => v => { c.ip = v; return c; });
 
-    static public Accessor<CPU, uint> _eip => new(c => c.eip, c => v => { c.eip = v; return c; });
+    static public readonly Accessor<CPU, uint> _eip = new(c => c.eip, c => v => { c.eip = v; return c; });
 
     public uint eip { get; private set; }
     public ushort ip { get { return (ushort)(this.eip & 0xFFFF); } private set { this.eip = (this.eip & 0xFFFF0000) + value; } }
@@ -516,22 +375,22 @@ public struct CPU
     public ushort gdt_limit { get; set; }
     public uint gdt_base { get; set; }
 
-    static public Accessor<CPU, uint> _cr0 => new(c => c.cr0, c => v => { c.cr0 = v; return c; });
-    static public Accessor<CPU, uint> _cr2 => new(c => c.cr2, c => v => { c.cr2 = v; return c; });
-    static public Accessor<CPU, uint> _cr3 => new(c => c.cr3, c => v => { c.cr3 = v; return c; });
+    static public readonly Accessor<CPU, uint> _cr0 = new(c => c.cr0, c => v => { c.cr0 = v; return c; });
+    static public readonly Accessor<CPU, uint> _cr2 = new(c => c.cr2, c => v => { c.cr2 = v; return c; });
+    static public readonly Accessor<CPU, uint> _cr3 = new(c => c.cr3, c => v => { c.cr3 = v; return c; });
 
     private uint cr0 { get; set; }
     private uint cr2 { get; set; }
     private uint cr3 { get; set; }
 
-    static public Accessor<CPU, ushort> _sp => new(c => c.sp, c => v => { c.sp = v; return c; });
-    static public Accessor<CPU, ushort> _bp => new(c => c.bp, c => v => { c.bp = v; return c; });
+    static public readonly Accessor<CPU, ushort> _sp = new(c => c.sp, c => v => { c.sp = v; return c; });
+    static public readonly Accessor<CPU, ushort> _bp = new(c => c.bp, c => v => { c.bp = v; return c; });
 
     public ushort bp { get { return (ushort)(this.ebp & 0xFFFF); } set { this.ebp = (this.ebp & 0xFFFF0000) + value; } }
     public ushort sp { get { return (ushort)(this.esp & 0xFFFF); } set { this.esp = (this.esp & 0xFFFF0000) + value; } }
 
-    static public Accessor<CPU, uint> _esp => new(c => c.esp, c => v => { c.esp = v; return c; });
-    static public Accessor<CPU, uint> _ebp => new(c => c.ebp, c => v => { c.ebp = v; return c; });
+    static public readonly Accessor<CPU, uint> _esp = new(c => c.esp, c => v => { c.esp = v; return c; });
+    static public readonly Accessor<CPU, uint> _ebp = new(c => c.ebp, c => v => { c.ebp = v; return c; });
 
     public uint ebp { get; set; }
     public uint esp { get; set; }
@@ -564,12 +423,12 @@ public struct CPU
     public bool gs_prefix;
     public bool operand_size_prefix;
     public bool address_size_prefix;
-    static public Accessor<CPU, bool> _cs_prefix => new(c => c.cs_prefix, c => v => { c.cs_prefix = v; return c; });
-    static public Accessor<CPU, bool> _es_prefix => new(c => c.es_prefix, c => v => { c.es_prefix = v; return c; });
-    static public Accessor<CPU, bool> _fs_prefix => new(c => c.fs_prefix, c => v => { c.fs_prefix = v; return c; });
-    static public Accessor<CPU, bool> _gs_prefix => new(c => c.gs_prefix, c => v => { c.gs_prefix = v; return c; });
-    static public Accessor<CPU, bool> _operand_size_prefix => new(c => c.operand_size_prefix, c => v => { c.operand_size_prefix = v; return c; });
-    static public Accessor<CPU, bool> _address_size_prefix => new(c => c.address_size_prefix, c => v => { c.address_size_prefix = v; return c; });
+    static public readonly Accessor<CPU, bool> _cs_prefix = new(c => c.cs_prefix, c => v => { c.cs_prefix = v; return c; });
+    static public readonly Accessor<CPU, bool> _es_prefix = new(c => c.es_prefix, c => v => { c.es_prefix = v; return c; });
+    static public readonly Accessor<CPU, bool> _fs_prefix = new(c => c.fs_prefix, c => v => { c.fs_prefix = v; return c; });
+    static public readonly Accessor<CPU, bool> _gs_prefix = new(c => c.gs_prefix, c => v => { c.gs_prefix = v; return c; });
+    static public readonly Accessor<CPU, bool> _operand_size_prefix = new(c => c.operand_size_prefix, c => v => { c.operand_size_prefix = v; return c; });
+    static public readonly Accessor<CPU, bool> _address_size_prefix = new(c => c.address_size_prefix, c => v => { c.address_size_prefix = v; return c; });
 
     public bool cf { get { return GetEflags(CF); } set { UpdateEflags(CF, value); } }
     public bool pf { get { return GetEflags(PF); } set { UpdateEflags(PF, value); } }
@@ -582,65 +441,65 @@ public struct CPU
     public bool of { get { return GetEflags(OF); } set { UpdateEflags(OF, value); } }
     public bool nt { get { return GetEflags(NT); } set { UpdateEflags(NT, value); } }
 
-    static public Accessor<CPU, bool> _cf => new(c => c.cf, c => v => { c.cf = v; return c; });
-    static public Accessor<CPU, bool> _pf => new(c => c.pf, c => v => { c.pf = v; return c; });
-    static public Accessor<CPU, bool> _af => new(c => c.af, c => v => { c.af = v; return c; });
-    static public Accessor<CPU, bool> _zf => new(c => c.zf, c => v => { c.zf = v; return c; });
-    static public Accessor<CPU, bool> _sf => new(c => c.sf, c => v => { c.sf = v; return c; });
-    static public Accessor<CPU, bool> _tf => new(c => c.tf, c => v => { c.tf = v; return c; });
-    static public Accessor<CPU, bool> _jf => new(c => c.jf, c => v => { c.jf = v; return c; });
-    static public Accessor<CPU, bool> _df => new(c => c.df, c => v => { c.df = v; return c; });
-    static public Accessor<CPU, bool> _of => new(c => c.of, c => v => { c.of = v; return c; });
-    static public Accessor<CPU, bool> _nt => new(c => c.nt, c => v => { c.nt = v; return c; });
+    static public readonly Accessor<CPU, bool> _cf = new(c => c.cf, c => v => { c.cf = v; return c; });
+    static public readonly Accessor<CPU, bool> _pf = new(c => c.pf, c => v => { c.pf = v; return c; });
+    static public readonly Accessor<CPU, bool> _af = new(c => c.af, c => v => { c.af = v; return c; });
+    static public readonly Accessor<CPU, bool> _zf = new(c => c.zf, c => v => { c.zf = v; return c; });
+    static public readonly Accessor<CPU, bool> _sf = new(c => c.sf, c => v => { c.sf = v; return c; });
+    static public readonly Accessor<CPU, bool> _tf = new(c => c.tf, c => v => { c.tf = v; return c; });
+    static public readonly Accessor<CPU, bool> _jf = new(c => c.jf, c => v => { c.jf = v; return c; });
+    static public readonly Accessor<CPU, bool> _df = new(c => c.df, c => v => { c.df = v; return c; });
+    static public readonly Accessor<CPU, bool> _of = new(c => c.of, c => v => { c.of = v; return c; });
+    static public readonly Accessor<CPU, bool> _nt = new(c => c.nt, c => v => { c.nt = v; return c; });
 
-    static public Accessor<CPU, byte> _al => new(c => c.al, c => v => { c.al = v; return c; });
-    static public Accessor<CPU, byte> _bl => new(c => c.bl, c => v => { c.bl = v; return c; });
-    static public Accessor<CPU, byte> _cl => new(c => c.cl, c => v => { c.cl = v; return c; });
-    static public Accessor<CPU, byte> _dl => new(c => c.dl, c => v => { c.dl = v; return c; });
+    static public readonly Accessor<CPU, byte> _al = new(c => c.al, c => v => { c.al = v; return c; });
+    static public readonly Accessor<CPU, byte> _bl = new(c => c.bl, c => v => { c.bl = v; return c; });
+    static public readonly Accessor<CPU, byte> _cl = new(c => c.cl, c => v => { c.cl = v; return c; });
+    static public readonly Accessor<CPU, byte> _dl = new(c => c.dl, c => v => { c.dl = v; return c; });
 
     public byte al { get { return (byte)(this.eax & 0xFF); } set { this.eax = (this.eax & 0xFFFFFF00) + value; } }
     public byte bl { get { return (byte)(this.ebx & 0xFF); } set { this.ebx = (this.ebx & 0xFFFFFF00) + value; } }
     public byte cl { get { return (byte)(this.ecx & 0xFF); } set { this.ecx = (this.ecx & 0xFFFFFF00) + value; } }
     public byte dl { get { return (byte)(this.edx & 0xFF); } set { this.edx = (this.edx & 0xFFFFFF00) + value; } }
 
-    static public Accessor<CPU, byte> _ah => new(c => c.ah, c => v => { c.ah = v; return c; });
-    static public Accessor<CPU, byte> _bh => new(c => c.bh, c => v => { c.bh = v; return c; });
-    static public Accessor<CPU, byte> _ch => new(c => c.ch, c => v => { c.ch = v; return c; });
-    static public Accessor<CPU, byte> _dh => new(c => c.dh, c => v => { c.dh = v; return c; });
+    static public readonly Accessor<CPU, byte> _ah = new(c => c.ah, c => v => { c.ah = v; return c; });
+    static public readonly Accessor<CPU, byte> _bh = new(c => c.bh, c => v => { c.bh = v; return c; });
+    static public readonly Accessor<CPU, byte> _ch = new(c => c.ch, c => v => { c.ch = v; return c; });
+    static public readonly Accessor<CPU, byte> _dh = new(c => c.dh, c => v => { c.dh = v; return c; });
 
     public byte ah { get { return (byte)((this.eax >> 8) & 0xFF); } set { this.eax = (this.eax & 0xFFFF00FF) + ((uint)value << 8); } }
     public byte bh { get { return (byte)((this.ebx >> 8) & 0xFF); } set { this.ebx = (this.ebx & 0xFFFF00FF) + ((uint)value << 8); } }
     public byte ch { get { return (byte)((this.ecx >> 8) & 0xFF); } set { this.ecx = (this.ecx & 0xFFFF00FF) + ((uint)value << 8); } }
     public byte dh { get { return (byte)((this.edx >> 8) & 0xFF); } set { this.edx = (this.edx & 0xFFFF00FF) + ((uint)value << 8); } }
 
-    static public Accessor<CPU, ushort> _ax => new(c => c.ax, c => v => { c.ax = v; return c; });
-    static public Accessor<CPU, ushort> _bx => new(c => c.bx, c => v => { c.bx = v; return c; });
-    static public Accessor<CPU, ushort> _cx => new(c => c.cx, c => v => { c.cx = v; return c; });
-    static public Accessor<CPU, ushort> _dx => new(c => c.dx, c => v => { c.dx = v; return c; });
+    static public readonly Accessor<CPU, ushort> _ax = new(c => c.ax, c => v => { c.ax = v; return c; });
+    static public readonly Accessor<CPU, ushort> _bx = new(c => c.bx, c => v => { c.bx = v; return c; });
+    static public readonly Accessor<CPU, ushort> _cx = new(c => c.cx, c => v => { c.cx = v; return c; });
+    static public readonly Accessor<CPU, ushort> _dx = new(c => c.dx, c => v => { c.dx = v; return c; });
 
     public ushort ax { get { return (ushort)(this.eax & 0xFFFF); } set { this.eax = (this.eax & 0xFFFF0000) + value; } }
     public ushort bx { get { return (ushort)(this.ebx & 0xFFFF); } set { this.ebx = (this.ebx & 0xFFFF0000) + value; } }
     public ushort cx { get { return (ushort)(this.ecx & 0xFFFF); } set { this.ecx = (this.ecx & 0xFFFF0000) + value; } }
     public ushort dx { get { return (ushort)(this.edx & 0xFFFF); } set { this.edx = (this.edx & 0xFFFF0000) + value; } }
 
-    static public Accessor<CPU, uint> _eax => new(c => c.eax, c => v => { c.eax = v; return c; });
-    static public Accessor<CPU, uint> _ebx => new(c => c.ebx, c => v => { c.ebx = v; return c; });
-    static public Accessor<CPU, uint> _ecx => new(c => c.ecx, c => v => { c.ecx = v; return c; });
-    static public Accessor<CPU, uint> _edx => new(c => c.edx, c => v => { c.edx = v; return c; });
+    static public readonly Accessor<CPU, uint> _eax = new(c => c.eax, c => v => { c.eax = v; return c; });
+    static public readonly Accessor<CPU, uint> _ebx = new(c => c.ebx, c => v => { c.ebx = v; return c; });
+    static public readonly Accessor<CPU, uint> _ecx = new(c => c.ecx, c => v => { c.ecx = v; return c; });
+    static public readonly Accessor<CPU, uint> _edx = new(c => c.edx, c => v => { c.edx = v; return c; });
 
     public uint eax { get; set; }
     public uint ebx { get; set; }
     public uint ecx { get; set; }
     public uint edx { get; set; }
 
-    static public Accessor<CPU, ushort> _si => new(c => c.si, c => v => { c.si = v; return c; });
-    static public Accessor<CPU, ushort> _di => new(c => c.di, c => v => { c.di = v; return c; });
+    static public readonly Accessor<CPU, ushort> _si = new(c => c.si, c => v => { c.si = v; return c; });
+    static public readonly Accessor<CPU, ushort> _di = new(c => c.di, c => v => { c.di = v; return c; });
 
     public ushort si { get { return (ushort)(this.esi & 0xFFFF); } set { this.esi = (this.esi & 0xFFFF0000) + value; } }
     public ushort di { get { return (ushort)(this.edi & 0xFFFF); } set { this.edi = (this.edi & 0xFFFF0000) + value; } }
 
-    static public Accessor<CPU, uint> _esi => new(c => c.esi, c => v => { c.esi = v; return c; });
-    static public Accessor<CPU, uint> _edi => new(c => c.edi, c => v => { c.edi = v; return c; });
+    static public readonly Accessor<CPU, uint> _esi = new(c => c.esi, c => v => { c.esi = v; return c; });
+    static public readonly Accessor<CPU, uint> _edi = new(c => c.edi, c => v => { c.edi = v; return c; });
 
     public uint esi { get; set; }
     public uint edi { get; set; }
