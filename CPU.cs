@@ -345,12 +345,14 @@ public class Accessor<O, P>(Func<O, P> g, Func<O, Func<P, O>> s)
 
 public struct CPU
 {
-    static public readonly Accessor<CPU, ushort> _cs = new(c => c.cs, c => v => { c.cs = v; return c; });
-    static public readonly Accessor<CPU, ushort> _ds = new(c => c.ds, c => v => { c.ds = v; return c; });
-    static public readonly Accessor<CPU, ushort> _es = new(c => c.es, c => v => { c.es = v; return c; });
-    static public readonly Accessor<CPU, ushort> _ss = new(c => c.ss, c => v => { c.ss = v; return c; });
-    static public readonly Accessor<CPU, ushort> _fs = new(c => c.fs, c => v => { c.fs = v; return c; });
-    static public readonly Accessor<CPU, ushort> _gs = new(c => c.gs, c => v => { c.gs = v; return c; });
+    // セグメントレジスタのセッタは、リアルモードの基底(セレクタ*16)もあわせて更新する。
+    // プロテクトモードでは LoadSReg が GDT 記述子から読んだ基底で上書きする(記述子キャッシュ相当)。
+    static public readonly Accessor<CPU, ushort> _cs = new(c => c.cs, c => v => { c.cs = v; c.cs_base = (uint)v << 4; return c; });
+    static public readonly Accessor<CPU, ushort> _ds = new(c => c.ds, c => v => { c.ds = v; c.ds_base = (uint)v << 4; return c; });
+    static public readonly Accessor<CPU, ushort> _es = new(c => c.es, c => v => { c.es = v; c.es_base = (uint)v << 4; return c; });
+    static public readonly Accessor<CPU, ushort> _ss = new(c => c.ss, c => v => { c.ss = v; c.ss_base = (uint)v << 4; return c; });
+    static public readonly Accessor<CPU, ushort> _fs = new(c => c.fs, c => v => { c.fs = v; c.fs_base = (uint)v << 4; return c; });
+    static public readonly Accessor<CPU, ushort> _gs = new(c => c.gs, c => v => { c.gs = v; c.gs_base = (uint)v << 4; return c; });
 
     public ushort cs { get; private set; }
     public ushort ds { get; private set; }
@@ -358,6 +360,16 @@ public struct CPU
     public ushort ss { get; private set; }
     private ushort fs { get; set; }
     private ushort gs { get; set; }
+
+    // 各セグメントの基底物理アドレス(記述子キャッシュ)。
+    public uint cs_base, ds_base, es_base, ss_base, fs_base, gs_base;
+
+    static public readonly Accessor<CPU, uint> _cs_base = new(c => c.cs_base, c => v => { c.cs_base = v; return c; });
+    static public readonly Accessor<CPU, uint> _ds_base = new(c => c.ds_base, c => v => { c.ds_base = v; return c; });
+    static public readonly Accessor<CPU, uint> _es_base = new(c => c.es_base, c => v => { c.es_base = v; return c; });
+    static public readonly Accessor<CPU, uint> _ss_base = new(c => c.ss_base, c => v => { c.ss_base = v; return c; });
+    static public readonly Accessor<CPU, uint> _fs_base = new(c => c.fs_base, c => v => { c.fs_base = v; return c; });
+    static public readonly Accessor<CPU, uint> _gs_base = new(c => c.gs_base, c => v => { c.gs_base = v; return c; });
 
     static public readonly Accessor<CPU, ushort> _ip = new(c => c.ip, c => v => { c.ip = v; return c; });
 
@@ -419,12 +431,16 @@ public struct CPU
 
     public bool cs_prefix;
     public bool es_prefix;
+    public bool ss_prefix;
+    public bool ds_prefix;
     public bool fs_prefix;
     public bool gs_prefix;
     public bool operand_size_prefix;
     public bool address_size_prefix;
     static public readonly Accessor<CPU, bool> _cs_prefix = new(c => c.cs_prefix, c => v => { c.cs_prefix = v; return c; });
     static public readonly Accessor<CPU, bool> _es_prefix = new(c => c.es_prefix, c => v => { c.es_prefix = v; return c; });
+    static public readonly Accessor<CPU, bool> _ss_prefix = new(c => c.ss_prefix, c => v => { c.ss_prefix = v; return c; });
+    static public readonly Accessor<CPU, bool> _ds_prefix = new(c => c.ds_prefix, c => v => { c.ds_prefix = v; return c; });
     static public readonly Accessor<CPU, bool> _fs_prefix = new(c => c.fs_prefix, c => v => { c.fs_prefix = v; return c; });
     static public readonly Accessor<CPU, bool> _gs_prefix = new(c => c.gs_prefix, c => v => { c.gs_prefix = v; return c; });
     static public readonly Accessor<CPU, bool> _operand_size_prefix = new(c => c.operand_size_prefix, c => v => { c.operand_size_prefix = v; return c; });
