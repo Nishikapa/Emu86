@@ -608,6 +608,9 @@ static public partial class Ext
                     env.PitCounter -= 0x100; // 経過時間の代用として下向きに減算する
                 }
                 break;
+            case 0x402:
+                System.Console.Error.Write((char)val);
+                break;
             default:
                 env.IoPort[port & 0xFFFF] = val;
                 break;
