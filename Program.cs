@@ -28,12 +28,20 @@ static class Program
         from _4 in SetCpu(cpu => { cpu.code32 = cpu.pe; return cpu; })
         select unit;
 
+    // rel16/rel32 相対オフセットを実効オペランドサイズで読む(rel16 は符号拡張)。
+    static State<int> JumpRel(int type) =>
+        2 == type
+            ? GetMemoryDataIp32.Select(dd => (int)dd)
+            : GetMemoryDataIp16.Select(dw => (int)(short)dw);
+
+    // 近傍ジャンプ先の設定(type に応じて IP / EIP)。
+    static State<Unit> JmpTo(Data target) =>
+        2 == target.type ? _eip.Set(target.dd) : _ip.Set(target.dw);
+
     static State<Unit> Jump_E9 =>
         from _1 in SetLog("Jump_E9")
         from type in OperandType(true)
-        from inc in (2 == type) ?
-            GetMemoryDataIp32.Select(dd => (int)dd) :
-            GetMemoryDataIp16.Select(dw => (int)(short)dw)
+        from inc in JumpRel(type)
         from _2 in IpInc(inc)
         select unit;
 
@@ -70,13 +78,14 @@ static class Program
         from _4 in SetCpu(cpu => { cpu.sp += imm; return cpu; })
         select unit;
 
+    // Group1 (0x83): r/m op imm8(符号拡張)
     static State<Unit> Group1_83 =>
         from _ in SetLog("Group1_83")
         from d1 in ModRegRm()
         from d2 in GetMemOrRegAddr(d1.mod, d1.rm)
         from d3 in GetMemoryDataIp8
         from d4 in GetMemOrRegData(d2, true)
-        from d5 in Calc(d4.type, d4.db, d4.dw, d4.dd, d3, (ushort)(sbyte)d3, (uint)(sbyte)d3, d1.reg)
+        from d5 in Calc(d4, ((uint)(sbyte)d3).ToTypeData(d4.type), d1.reg)
         from d6 in SetMemOrRegData(d2, d5)
         select d6;
 
@@ -182,9 +191,7 @@ static class Program
         // GetMemOrRegAddr は物理アドレスを返すため、フラットモデル(code32)では実効アドレスと一致する。
         from addr in GetMemOrRegAddr(m.mod, m.rm)
         from type in OperandType(true)
-        from _2 in (2 == type) ?
-            SetRegData32(m.reg, addr.addr) :
-            SetRegData16(m.reg, (ushort)addr.addr)
+        from _2 in SetRegData(m.reg, addr.addr.ToTypeData(type))
         select unit;
 
     // MOV r/m, imm (0xC6/0xC7)
@@ -291,7 +298,7 @@ static class Program
         let prod = (long)a * b
         let of = type == 1 ? prod < short.MinValue || prod > short.MaxValue
                            : prod < int.MinValue || prod > int.MaxValue
-        from _2 in type == 1 ? SetRegData16(m.reg, (ushort)prod) : SetRegData32(m.reg, (uint)prod)
+        from _2 in SetRegData(m.reg, ((uint)prod).ToTypeData(type))
         from _3 in SetCpu((_cf, of), (_of, of))
         select unit;
 
@@ -307,23 +314,20 @@ static class Program
         from dst in GetMemOrRegData(addr, true)
         from src in GetRegData(m.reg, dst.type)
         from cnt in useCl ? GetRegData(1, 0).Select(d => (int)d.db) : GetMemoryDataIp8.Select(b => (int)b)
-        let bits = dst.type == 1 ? 16 : 32
-        let dstv = dst.type == 1 ? (uint)dst.dw : dst.dd
-        let srcv = dst.type == 1 ? (uint)src.dw : src.dd
         let count = cnt & 0x1F
         from _2 in count == 0
             ? unit.ToState()  // count==0 は結果・フラグとも不変
-            : ApplyDoubleShift(addr, dst.type, DoubleShift(dstv, srcv, count, bits, left), bits)
+            : ApplyDoubleShift(addr, dst.type, DoubleShift(dst.Value(), src.Value(), count, Bits(dst.type), left))
         select unit;
 
     static State<Unit> ApplyDoubleShift(
-        (bool isMem, uint addr) addr, int type, (uint result, bool cf, bool of) r, int bits) =>
-        from _w in SetMemOrRegData(addr, type == 1 ? ((ushort)r.result).ToTypeData() : r.result.ToTypeData())
+        MemAddr addr, int type, (uint result, bool cf, bool of) r) =>
+        from _w in SetMemOrRegData(addr, r.result.ToTypeData(type))
         from _f in SetCpu(
             (_cf, r.cf),
             (_of, r.of),
-            (_zf, (r.result & (bits == 16 ? 0xFFFFu : 0xFFFFFFFFu)) == 0),
-            (_sf, (r.result & (bits == 16 ? 0x8000u : 0x80000000u)) != 0)
+            (_zf, (r.result & Mask(type)) == 0),
+            (_sf, (r.result & Msb(type)) != 0)
         )
         select unit;
 
@@ -356,9 +360,7 @@ static class Program
         let cond = opecode[1] & 0xF
         from f in Jcc(cond)
         from type in OperandType(true)
-        from offset in (2 == type) ?
-            GetMemoryDataIp32.Select(dd => (int)dd) :
-            GetMemoryDataIp16.Select(dw => (int)(short)dw)
+        from offset in JumpRel(type)
         let inc = f ? offset : 0
         from _2 in IpInc(inc)
         select unit;
@@ -422,9 +424,7 @@ static class Program
             ? GetMemOrRegData16(addr).Select(dw => signed ? (uint)(int)(short)dw : dw)
             : GetMemOrRegData8(addr).Select(db => signed ? (uint)(int)(sbyte)db : db)
         from type in OperandType(true)
-        from _2 in (2 == type) ?
-            SetRegData32(m.reg, value) :
-            SetRegData16(m.reg, (ushort)value)
+        from _2 in SetRegData(m.reg, value.ToTypeData(type))
         select unit;
 
     static State<Unit> Mov_B0_BF =>
@@ -538,17 +538,17 @@ static class Program
         select unit;
 
     // TEST r/m, imm : AND の結果を捨ててフラグ(CF=OF=0, ZF/SF)だけ更新する。
-    static State<Unit> Group3_Test((int type, byte db, ushort dw, uint dd) data) =>
+    static State<Unit> Group3_Test(Data data) =>
         from imm in GetMemoryDataIp_(data.type)
-        from _ in update_eflags(data.type, (byte)(data.db & imm.db), (ushort)(data.dw & imm.dw), data.dd & imm.dd)
+        from _ in update_eflags((data.Value() & imm.Value()).ToTypeData(data.type))
         select unit;
 
     // NOT r/m : ビット反転（フラグ変化なし）。
-    static State<Unit> Group3_Not((bool isMem, uint addr) addr, (int type, byte db, ushort dw, uint dd) data) =>
+    static State<Unit> Group3_Not(MemAddr addr, Data data) =>
         SetMemOrRegData(addr, data.MapType(b => (byte)~b, w => (ushort)~w, d => ~d));
 
     // NEG r/m : 0 - r/m。フラグは SUB と同じ。
-    static State<Unit> Group3_Neg((bool isMem, uint addr) addr, (int type, byte db, ushort dw, uint dd) data) =>
+    static State<Unit> Group3_Neg(MemAddr addr, Data data) =>
         from _f in data.type == 0 ? update_eflags_sub((byte)0, data.db)
                  : data.type == 1 ? update_eflags_sub((ushort)0, data.dw)
                  : update_eflags_sub(0u, data.dd) // 注: byte/ushort の (byte)0/(ushort)0 はオーバーロード解決を明示するため残す
@@ -556,7 +556,7 @@ static class Program
         select unit;
 
     // MUL r/m : 符号なし乗算。AL*r/m8->AX, AX*r/m16->DX:AX, EAX*r/m32->EDX:EAX。
-    static State<Unit> Group3_Mul((int type, byte db, ushort dw, uint dd) data) =>
+    static State<Unit> Group3_Mul(Data data) =>
         from cpu in GetCpu
         let upper =
             data.type == 0 ? (uint)((cpu.al * data.db) >> 8) & 0xFF :
@@ -573,7 +573,7 @@ static class Program
         select unit;
 
     // IMUL r/m : 符号付き乗算。
-    static State<Unit> Group3_Imul((int type, byte db, ushort dw, uint dd) data) =>
+    static State<Unit> Group3_Imul(Data data) =>
         from cpu in GetCpu
         let prod = data.type == 0 ? (sbyte)cpu.al * (sbyte)data.db
                  : data.type == 1 ? (short)cpu.ax * (short)data.dw
@@ -608,12 +608,12 @@ static class Program
         let of = type == 1
             ? prod < short.MinValue || prod > short.MaxValue
             : prod < int.MinValue || prod > int.MaxValue
-        from _2 in type == 1 ? SetRegData16(m.reg, (ushort)prod) : SetRegData32(m.reg, (uint)prod)
+        from _2 in SetRegData(m.reg, ((uint)prod).ToTypeData(type))
         from _3 in SetCpu((_cf, of), (_of, of))
         select unit;
 
     // DIV r/m : 符号なし除算。商と剰余を AL/AH, AX/DX, EAX/EDX へ。
-    static State<Unit> Group3_Div((int type, byte db, ushort dw, uint dd) data) =>
+    static State<Unit> Group3_Div(Data data) =>
         SetCpu(c =>
         {
             if (data.type == 0)
@@ -641,7 +641,7 @@ static class Program
         });
 
     // IDIV r/m : 符号付き除算。
-    static State<Unit> Group3_Idiv((int type, byte db, ushort dw, uint dd) data) =>
+    static State<Unit> Group3_Idiv(Data data) =>
         SetCpu(c =>
         {
             if (data.type == 0)
@@ -669,19 +669,15 @@ static class Program
         });
 
     // INC r/m: type に応じて +1 し、フラグ(CF以外)を更新して書き戻す。
-    static State<Unit> IncData((bool isMem, uint addr) addr, (int type, byte db, ushort dw, uint dd) data) =>
-        from _f in data.type == 0 ? update_eflags_inc(data.db)
-                 : data.type == 1 ? update_eflags_inc(data.dw)
-                 : update_eflags_inc(data.dd)
-        from _w in SetMemOrRegData(addr, data.MapType(b => (byte)(b + 1), w => (ushort)(w + 1), d => d + 1))
+    static State<Unit> IncData(MemAddr addr, Data data) =>
+        from _f in update_eflags_inc(data)
+        from _w in SetMemOrRegData(addr, (data.Value() + 1).ToTypeData(data.type))
         select unit;
 
     // DEC r/m: type に応じて -1 し、フラグ(CF以外)を更新して書き戻す。
-    static State<Unit> DecData((bool isMem, uint addr) addr, (int type, byte db, ushort dw, uint dd) data) =>
-        from _f in data.type == 0 ? update_eflags_dec(data.db)
-                 : data.type == 1 ? update_eflags_dec(data.dw)
-                 : update_eflags_dec(data.dd)
-        from _w in SetMemOrRegData(addr, data.MapType(b => (byte)(b - 1), w => (ushort)(w - 1), d => d - 1))
+    static State<Unit> DecData(MemAddr addr, Data data) =>
+        from _f in update_eflags_dec(data)
+        from _w in SetMemOrRegData(addr, (data.Value() - 1).ToTypeData(data.type))
         select unit;
 
     // Group4 (0xFE): reg=0 INC r/m8, reg=1 DEC r/m8
@@ -708,19 +704,16 @@ static class Program
             (0, IncData(addr, data)),
             (1, DecData(addr, data)),
             (2, Call_rm(data)),         // 近傍間接 CALL
-            (4, Jmp_rm(data)),          // 近傍間接 JMP
+            (4, JmpTo(data)),           // 近傍間接 JMP
             (6, Push(data))             // PUSH r/m
         )
         select unit;
 
-    static State<Unit> Jmp_rm((int type, byte db, ushort dw, uint dd) target) =>
-        (2 == target.type) ? _eip.Set(target.dd) : _ip.Set(target.dw);
-
     // 近傍間接 CALL: 戻り番地(現在のIP/EIP)を push してから IP/EIP を target に設定する。
-    static State<Unit> Call_rm((int type, byte db, ushort dw, uint dd) target) =>
+    static State<Unit> Call_rm(Data target) =>
         from cpu in GetCpu
         from _1 in Push((2 == target.type) ? cpu.eip.ToTypeData() : cpu.ip.ToTypeData())
-        from _2 in Jmp_rm(target)
+        from _2 in JmpTo(target)
         select unit;
 
     // INT imm8 (0xCD): 指定ベクタへソフトウェア割り込み。
@@ -775,8 +768,7 @@ static class Program
         from rmData in GetMemOrRegData(m.mod, m.rm, w)
         from regData in GetRegData(m.reg, rmData.data.type)
         // TEST は AND の結果を捨ててフラグ(CF=OF=0, ZF/SF)だけ更新する。
-        from _2 in update_eflags(rmData.data.type,
-            (byte)(rmData.data.db & regData.db), (ushort)(rmData.data.dw & regData.dw), rmData.data.dd & regData.dd)
+        from _2 in update_eflags((rmData.data.Value() & regData.Value()).ToTypeData(rmData.data.type))
         select unit;
 
     static State<Unit> Test_A8_A9 =>
@@ -786,7 +778,7 @@ static class Program
         from type in OperandType(w)
         from acc in GetRegData(0, type) // 0=AL/AX/EAX
         from imm in GetMemoryDataIp_(type)
-        from _2 in update_eflags(type, (byte)(acc.db & imm.db), (ushort)(acc.dw & imm.dw), acc.dd & imm.dd)
+        from _2 in update_eflags((acc.Value() & imm.Value()).ToTypeData(type))
         select unit;
 
     static State<Unit> Xchg_91_97 =>
@@ -806,10 +798,7 @@ static class Program
         let reg = opecode[0] & 0x07
         from type in OperandType(true)
         from v in GetRegData(reg, type)
-        from _2 in (2 == type) ? update_eflags_inc(v.dd) : update_eflags_inc(v.dw)
-        from _3 in (2 == type) ?
-            SetRegData32(reg, v.dd + 1) :
-            SetRegData16(reg, (ushort)(v.dw + 1))
+        from _2 in IncData((false, (uint)reg), v)
         select unit;
 
     static State<Unit> Dec_48_4F =>
@@ -818,18 +807,13 @@ static class Program
         let reg = opecode[0] & 0x07
         from type in OperandType(true)
         from v in GetRegData(reg, type)
-        from _2 in (2 == type) ? update_eflags_dec(v.dd) : update_eflags_dec(v.dw)
-        from _3 in (2 == type) ?
-            SetRegData32(reg, v.dd - 1) :
-            SetRegData16(reg, (ushort)(v.dw - 1))
+        from _2 in DecData((false, (uint)reg), v)
         select unit;
 
     static State<Unit> Call_E8 =>
         from _1 in SetLog("Call_E8")
         from type in OperandType(true)
-        from offset in (2 == type) ?
-            GetMemoryDataIp32.Select(dd => (int)dd) :
-            GetMemoryDataIp16.Select(dw => (int)(short)dw)
+        from offset in JumpRel(type)
         // rel 読み取り後の IP/EIP（＝次命令アドレス）を戻り番地として push する。
         from cpu in GetCpu
         from _2 in Push((2 == type) ? cpu.eip.ToTypeData() : cpu.ip.ToTypeData())
@@ -840,7 +824,7 @@ static class Program
         from _1 in SetLog("Ret_C3")
         from type in OperandType(true)
         from ret in Pop(type)
-        from _2 in (2 == type) ? _eip.Set(ret.dd) : _ip.Set(ret.dw)
+        from _2 in JmpTo(ret)
         select unit;
 
     static State<Unit> Ret_C2 =>
@@ -848,49 +832,34 @@ static class Program
         from imm in GetMemoryDataIp16
         from type in OperandType(true)
         from ret in Pop(type)
-        from _2 in (2 == type) ? _eip.Set(ret.dd) : _ip.Set(ret.dw)
+        from _2 in JmpTo(ret)
         from _3 in SetCpu(cpu => { if (cpu.code32) { cpu.esp += imm; } else { cpu.sp += imm; } return cpu; })
         select unit;
 
     // PUSHA (0x60): AX,CX,DX,BX,(開始時SP),BP,SI,DI をこの順で push する。
     static State<Unit> Pusha_60 =>
         from _1 in SetLog("Pusha_60")
-        from sp0 in GetRegData16(4) // 開始時点の SP を退避
-        from _ax in GetRegData16(0)
-        from p0 in Push16(_ax)
-        from _cx in GetRegData16(1)
-        from p1 in Push16(_cx)
-        from _dx in GetRegData16(2)
-        from p2 in Push16(_dx)
-        from _bx in GetRegData16(3)
-        from p3 in Push16(_bx)
-        from p4 in Push16(sp0)
-        from _bp in GetRegData16(5)
-        from p5 in Push16(_bp)
-        from _si in GetRegData16(6)
-        from p6 in Push16(_si)
-        from _di in GetRegData16(7)
-        from p7 in Push16(_di)
+        from sp0 in GetRegData16(4) // 開始時点の SP を退避(reg=4 はこの値を push する)
+        from _2 in Enumerable.Range(0, 8)
+            .Select(reg =>
+                from v in reg == 4 ? sp0.ToState() : GetRegData16(reg)
+                from p in Push16(v)
+                select unit)
+            .Sequence()
+            .Ignore()
         select unit;
 
     // POPA (0x61): DI,SI,BP,(SP読み飛ばし),BX,DX,CX,AX の順で pop する。SP は破棄。
     static State<Unit> Popa_61 =>
         from _1 in SetLog("Popa_61")
-        from di in Pop16
-        from _2 in SetRegData16(7, di)
-        from si in Pop16
-        from _3 in SetRegData16(6, si)
-        from bp in Pop16
-        from _4 in SetRegData16(5, bp)
-        from skip in Pop16            // 元 SP は読み飛ばす
-        from bx in Pop16
-        from _5 in SetRegData16(3, bx)
-        from dx in Pop16
-        from _6 in SetRegData16(2, dx)
-        from cx in Pop16
-        from _7 in SetRegData16(1, cx)
-        from ax in Pop16
-        from _8 in SetRegData16(0, ax)
+        from _2 in new[] { 7, 6, 5, 4, 3, 2, 1, 0 }
+            .Select(reg =>
+                from v in Pop16
+                // reg=4(元 SP)は読み飛ばして破棄する
+                from _ in reg == 4 ? unit.ToState() : SetRegData16(reg, v)
+                select unit)
+            .Sequence()
+            .Ignore()
         select unit;
 
     // ENTER imm16, imm8 (0xC8): スタックフレームを構築する。

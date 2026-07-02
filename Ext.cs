@@ -7,19 +7,29 @@ public class Unit
 
 static public partial class Ext
 {
-    static private Func<byte[], (int type, byte db, ushort dw, uint dd)>[] funcArray =
+    static private Func<byte[], Data>[] funcArray =
     [
         data => data[0].ToTypeData(),
         data => BitConverter.ToUInt16(data, 0).ToTypeData(),
         data => BitConverter.ToUInt32(data, 0).ToTypeData()
     ];
 
-    static public (int type, byte db, ushort dw, uint dd) ToTypeData(this IEnumerable<byte> data, int type)
+    static public Data ToTypeData(this IEnumerable<byte> data, int type)
         => funcArray[type](data.ToArray());
 
-    static public (int type, byte db, ushort dw, uint dd) ToTypeData(this byte _db) => (0, db: _db, dw: default, dd: default);
-    static public (int type, byte db, ushort dw, uint dd) ToTypeData(this ushort _dw) => (1, db: default, dw: _dw, dd: default);
-    static public (int type, byte db, ushort dw, uint dd) ToTypeData(this uint _dd) => (2, db: default, dw: default, dd: _dd);
+    static public Data ToTypeData(this byte _db) => (0, db: _db, dw: default, dd: default);
+    static public Data ToTypeData(this ushort _dw) => (1, db: default, dw: _dw, dd: default);
+    static public Data ToTypeData(this uint _dd) => (2, db: default, dw: default, dd: _dd);
+
+    // Data の実値を uint として取り出す / uint を type の幅に丸めて Data にする。
+    static public uint Value(this Data d) => d.type == 0 ? d.db : d.type == 1 ? d.dw : d.dd;
+    static public Data ToTypeData(this uint v, int type) =>
+        type == 0 ? ((byte)v).ToTypeData() : type == 1 ? ((ushort)v).ToTypeData() : v.ToTypeData();
+
+    // type ごとのビット幅・マスク・最上位ビット。
+    static public int Bits(int type) => type == 0 ? 8 : type == 1 ? 16 : 32;
+    static public uint Mask(int type) => type == 2 ? 0xFFFFFFFF : (1u << Bits(type)) - 1;
+    static public uint Msb(int type) => 1u << (Bits(type) - 1);
 
     static bool TopBit(uint data) => (0 != (data & 0x80000000));
     static bool TopBit(ushort data) => (0 != (data & 0x8000));
@@ -37,8 +47,8 @@ static public partial class Ext
 
     // type(0=byte,1=word,2=dword) に応じて幅ごとの関数を適用し、結果を TypeData にまとめる。
     // NOT/NEG/INC/DEC など「型別の値計算 → 書き戻し用 TypeData」を 1 行で書くための共通化。
-    static public (int type, byte db, ushort dw, uint dd) MapType(
-        this (int type, byte db, ushort dw, uint dd) d,
+    static public Data MapType(
+        this Data d,
         Func<byte, byte> fb, Func<ushort, ushort> fw, Func<uint, uint> fd) =>
         d.type == 0 ? fb(d.db).ToTypeData()
       : d.type == 1 ? fw(d.dw).ToTypeData()
