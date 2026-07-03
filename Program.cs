@@ -186,9 +186,8 @@ static class Program
     static State<Unit> Lea_8D =>
         from _1 in SetLog("Lea_8D")
         from m in ModRegRm()
-        // LEA はメモリを読まず、実効アドレス(オフセット)そのものを reg へ書く。
-        // GetMemOrRegAddr は物理アドレスを返すため、フラットモデル(code32)では実効アドレスと一致する。
-        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        // LEA はメモリを読まず、実効オフセット(セグメントベース非加算)を reg へ書く。
+        from addr in GetMemOrRegOffset(m.mod, m.rm)
         from type in OperandType(true)
         from _2 in SetRegData(m.reg, addr.addr.ToTypeData(type))
         select unit;
@@ -783,6 +782,18 @@ static class Program
         from _2 in update_eflags((acc.Value() & imm.Value()).ToTypeData(type))
         select unit;
 
+    // XCHG r/m, r (0x86/0x87)
+    static State<Unit> Xchg_86_87 =>
+        from _1 in SetLog("Xchg_86_87")
+        from opecode in Opecodes
+        let w = 0 != (opecode[0] & 0x01)
+        from m in ModRegRm()
+        from rmData in GetMemOrRegData(m.mod, m.rm, w)
+        from regData in GetRegData(m.reg, rmData.data.type)
+        from _2 in SetMemOrRegData(rmData.input, regData)
+        from _3 in SetRegData(m.reg, rmData.data)
+        select unit;
+
     static State<Unit> Xchg_91_97 =>
         from _1 in SetLog("Xchg_91_97")
         from opecode in Opecodes
@@ -1077,8 +1088,7 @@ static class Program
         from port in GetMemoryDataIp8
         from _2 in SetCpu((env, cpu) =>
         {
-            EnvOutPort(env, port, cpu.al);
-            if (w) { EnvOutPort(env, port + 1, cpu.ah); }
+            EnvOutPortN(env, port, w ? 2 : 1, w ? cpu.ax : cpu.al);
             return cpu;
         })
         select unit;
@@ -1090,34 +1100,37 @@ static class Program
         from port in GetMemoryDataIp8
         from _2 in SetCpu((env, cpu) =>
         {
-            if (w) { cpu.ax = (ushort)(EnvInPort(env, port) | (EnvInPort(env, port + 1) << 8)); }
-            else { cpu.al = EnvInPort(env, port); }
+            if (w) { cpu.ax = (ushort)EnvInPortN(env, port, 2); }
+            else { cpu.al = (byte)EnvInPortN(env, port, 1); }
             return cpu;
         })
         select unit;
 
-    // IN AL/AX, DX (0xEC/0xED)
+    // IN AL/AX/EAX, DX (0xEC/0xED)
     static State<Unit> In_EC_ED =>
         from _1 in SetLog("In_EC_ED")
         from opecode in Opecodes
         let w = 0 != (opecode[0] & 1)
+        from type in OperandType(w)
         from _2 in SetCpu((env, cpu) =>
         {
-            if (w) { cpu.ax = (ushort)(EnvInPort(env, cpu.dx) | (EnvInPort(env, cpu.dx + 1) << 8)); }
-            else { cpu.al = EnvInPort(env, cpu.dx); }
+            var v = EnvInPortN(env, cpu.dx, Bits(type) / 8);
+            if (type == 0) { cpu.al = (byte)v; }
+            else if (type == 1) { cpu.ax = (ushort)v; }
+            else { cpu.eax = v; }
             return cpu;
         })
         select unit;
 
-    // OUT DX, AL/AX (0xEE/0xEF)
+    // OUT DX, AL/AX/EAX (0xEE/0xEF)
     static State<Unit> Out_EE_EF =>
         from _1 in SetLog("Out_EE_EF")
         from opecode in Opecodes
         let w = 0 != (opecode[0] & 1)
+        from type in OperandType(w)
         from _2 in SetCpu((env, cpu) =>
         {
-            EnvOutPort(env, cpu.dx, cpu.al);
-            if (w) { EnvOutPort(env, cpu.dx + 1, cpu.ah); }
+            EnvOutPortN(env, cpu.dx, Bits(type) / 8, type == 0 ? cpu.al : type == 1 ? cpu.ax : cpu.eax);
             return cpu;
         })
         select unit;
@@ -1226,6 +1239,7 @@ static class Program
         (0x80, 2, Group1_80_81),
         (0x83, 1, Group1_83),
         (0x84, 2, Test_84_85),
+        (0x86, 2, Xchg_86_87),
         (0x88, 4, Mov_88_8B),
         (0x8C, 1, Mov_8C),
         (0x8D, 1, Lea_8D),

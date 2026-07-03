@@ -197,9 +197,7 @@ static public partial class Ext
         SetCpu((env, cpu) =>
         {
             int size = StrSize(cpu, w);
-            uint val = 0;
-            for (int i = 0; i < size; i++) val |= (uint)EnvInPort(env, cpu.dx + i) << (8 * i);
-            EnvWriteN(env, StrDst(cpu), size, val);
+            EnvWriteN(env, StrDst(cpu), size, EnvInPortN(env, cpu.dx, size));
             return StrAdvance(cpu, size, si: false, di: true);
         });
 
@@ -208,8 +206,7 @@ static public partial class Ext
         SetCpu((env, cpu) =>
         {
             int size = StrSize(cpu, w);
-            uint val = EnvReadN(env, StrSrc(cpu), size);
-            for (int i = 0; i < size; i++) EnvOutPort(env, cpu.dx + i, (byte)(val >> (8 * i)));
+            EnvOutPortN(env, cpu.dx, size, EnvReadN(env, StrSrc(cpu), size));
             return StrAdvance(cpu, size, si: true, di: false);
         });
 
@@ -435,16 +432,16 @@ static public partial class Ext
         return (ovr ?? cpu.ds_base, ovr ?? cpu.ss_base);
     }
 
-    // ModRM 16ビットアドレッシング。実効アドレスと追加で消費した disp バイト数を返す。
-    static private (bool isMem, uint addr, int inc) EnvGetMemOrRegAddr16_(CPU cpu, int mod, int rm, IEnumerable<byte> disp)
+    // ModRM 16ビットアドレッシング。実効オフセット・セグメントベース・消費した disp バイト数を返す。
+    static private (bool isMem, uint offset, uint segBase, int inc) EnvGetMemOrRegAddr16_(CPU cpu, int mod, int rm, IEnumerable<byte> disp)
     {
         if (mod == 3)
-            return (false, (uint)rm, 0);
+            return (false, (uint)rm, 0, 0);
 
         var (segment_base, ss_base) = EnvSegBases(cpu);
 
         if (mod == 0 && rm == 6) // [d16]
-            return (true, segment_base + disp.ToUint16(), 2);
+            return (true, disp.ToUint16(), segment_base, 2);
 
         // rm ごとのレジスタ組み合わせ(BP を含む形は既定セグメントが SS)
         uint[] regsum =
@@ -452,20 +449,20 @@ static public partial class Ext
             (uint)(cpu.bx + cpu.si), (uint)(cpu.bx + cpu.di), (uint)(cpu.bp + cpu.si), (uint)(cpu.bp + cpu.di),
             cpu.si, cpu.di, cpu.bp, cpu.bx
         ];
-        var base_ = (rm is 2 or 3 or 6 ? ss_base : segment_base) + regsum[rm];
+        var segBase = rm is 2 or 3 or 6 ? ss_base : segment_base;
 
         return mod switch
         {
-            0 => (true, base_, 0),
-            1 => (true, (uint)(base_ + (sbyte)disp.ElementAt(0)), 1),
-            _ => (true, base_ + disp.ToUint16(), 2),
+            0 => (true, regsum[rm], segBase, 0),
+            1 => (true, (uint)(regsum[rm] + (sbyte)disp.ElementAt(0)), segBase, 1),
+            _ => (true, regsum[rm] + disp.ToUint16(), segBase, 2),
         };
     }
-    // ModRM 32ビットアドレッシング(SIB 対応)。実効アドレスと追加で消費した disp バイト数を返す。
-    static private (bool isMem, uint addr, int inc) EnvGetMemOrRegAddr32_(CPU cpu, int mod, int rm, IEnumerable<byte> disp)
+    // ModRM 32ビットアドレッシング(SIB 対応)。実効オフセット・セグメントベース・消費 disp バイト数を返す。
+    static private (bool isMem, uint offset, uint segBase, int inc) EnvGetMemOrRegAddr32_(CPU cpu, int mod, int rm, IEnumerable<byte> disp)
     {
         if (mod == 3)
-            return (false, (uint)rm, 0);
+            return (false, (uint)rm, 0, 0);
 
         var (segment_base, ss_base) = EnvSegBases(cpu);
 
@@ -479,36 +476,44 @@ static public partial class Ext
             var sb = basef is 4 or 5 ? ss_base : segment_base;
             return (mod, basef) switch
             {
-                (0, 5) => (true, segment_base + scaled + disp.Skip(1).ToUint32(), 5),
-                (0, _) => (true, sb + scaled + EnvGetReg32(cpu, basef), 1),
-                (1, _) => (true, (uint)(sb + scaled + EnvGetReg32(cpu, basef) + (sbyte)disp.ElementAt(1)), 2),
-                _ => (true, sb + scaled + EnvGetReg32(cpu, basef) + disp.Skip(1).ToUint32(), 5),
+                (0, 5) => (true, scaled + disp.Skip(1).ToUint32(), segment_base, 5),
+                (0, _) => (true, scaled + EnvGetReg32(cpu, basef), sb, 1),
+                (1, _) => (true, (uint)(scaled + EnvGetReg32(cpu, basef) + (sbyte)disp.ElementAt(1)), sb, 2),
+                _ => (true, scaled + EnvGetReg32(cpu, basef) + disp.Skip(1).ToUint32(), sb, 5),
             };
         }
 
         if (mod == 0 && rm == 5) // [d32]
-            return (true, segment_base + disp.ToUint32(), 4);
+            return (true, disp.ToUint32(), segment_base, 4);
 
         // ベースレジスタ(EBP ベースは SS)
-        var base_ = (rm == 5 ? ss_base : segment_base) + EnvGetReg32(cpu, rm);
+        var segBase = rm == 5 ? ss_base : segment_base;
+        var reg = EnvGetReg32(cpu, rm);
         return mod switch
         {
-            0 => (true, base_, 0),
-            1 => (true, (uint)(base_ + (sbyte)disp.ElementAt(0)), 1),
-            _ => (true, base_ + disp.ToUint32(), 4),
+            0 => (true, reg, segBase, 0),
+            1 => (true, (uint)(reg + (sbyte)disp.ElementAt(0)), segBase, 1),
+            _ => (true, reg + disp.ToUint32(), segBase, 4),
         };
     }
 
+    static private (bool isMem, uint offset, uint segBase, int inc) EnvGetMemOrRegAddr_(EmuEnvironment env, CPU cpu, int mod, int rm) =>
+        // 32ビットコードではデフォルトが32ビットModRMになり、address_size_prefix(0x67)で反転する
+        (cpu.code32 != cpu.address_size_prefix) ?
+        EnvGetMemOrRegAddr32_(cpu, mod, rm, EnvGetMemoryDatas(env, GetCodeAddr(cpu).addr)) :
+        EnvGetMemOrRegAddr16_(cpu, mod, rm, EnvGetMemoryDatas(env, GetCodeAddr(cpu).addr));
+
+    // 物理アドレス(セグメントベース + 実効オフセット)を返す通常版。
     static public State<MemAddr> GetMemOrRegAddr(int mod, int rm) =>
-        from data in GetDataFromEnvCpu(
-            (env, cpu) =>
-            // 32ビットコードではデフォルトが32ビットModRMになり、address_size_prefix(0x67)で反転する
-            (cpu.code32 != cpu.address_size_prefix) ?
-            EnvGetMemOrRegAddr32_(cpu, mod, rm, EnvGetMemoryDatas(env, GetCodeAddr(cpu).addr)) :
-            EnvGetMemOrRegAddr16_(cpu, mod, rm, EnvGetMemoryDatas(env, GetCodeAddr(cpu).addr))
-        )
+        from data in GetDataFromEnvCpu((env, cpu) => EnvGetMemOrRegAddr_(env, cpu, mod, rm))
         from _ in IpInc(data.inc)
-        select (data.isMem, data.addr);
+        select (data.isMem, data.offset + data.segBase);
+
+    // 実効オフセットのみを返す版(LEA 用: セグメントベースを加算しない)。
+    static public State<MemAddr> GetMemOrRegOffset(int mod, int rm) =>
+        from data in GetDataFromEnvCpu((env, cpu) => EnvGetMemOrRegAddr_(env, cpu, mod, rm))
+        from _ in IpInc(data.inc)
+        select (data.isMem, data.offset);
 
     static public State<byte> GetMemOrRegData8(MemAddr t) =>
         GetDataFromEnvCpu((env, cpu) => t.isMem ? EnvGetMemoryData8(env, t.addr) : EnvGetDataFromCPU(ArrayReg8)((int)t.addr)(cpu));
@@ -607,7 +612,8 @@ static public partial class Ext
     }
 
     /// I/O port ///////////////////////////////////
-    // CMOS(0x70/0x71)を特別扱いする以外は IoPort 配列を素通しする。
+    // CMOS(0x70/0x71)・PIT(0x40/0x43)・ATA(0x1F0-0x1F7, 0x3F6)を
+    // 特別扱いする以外は IoPort 配列を素通しする。
     static public byte EnvInPort(EmuEnvironment env, int port)
     {
         switch (port & 0xFFFF)
@@ -618,9 +624,36 @@ static public partial class Ext
                 byte b = (byte)(env.PitReadPhase == 0 ? env.PitLatched : env.PitLatched >> 8);
                 env.PitReadPhase ^= 1;
                 return b;
+            case 0x1F0 when env.Ata != null:
+                return (byte)env.Ata.ReadData(1);
+            case (>= 0x1F1 and <= 0x1F7) or 0x3F6 when env.Ata != null:
+                return env.Ata.ReadReg(port & 0xFFFF);
             default:
                 return env.IoPort[port & 0xFFFF];
         }
+    }
+
+    // 幅付きポート入出力。ATA データポート(0x1F0)は 16/32 ビットアクセスで
+    // デバイスバッファから連続バイトを転送する(隣接ポートへは波及しない)。
+    static public uint EnvInPortN(EmuEnvironment env, int port, int size)
+    {
+        if ((port & 0xFFFF) == 0x1F0 && env.Ata != null)
+            return env.Ata.ReadData(size);
+        uint v = 0;
+        for (int i = 0; i < size; i++)
+            v |= (uint)EnvInPort(env, port + i) << (8 * i);
+        return v;
+    }
+
+    static public void EnvOutPortN(EmuEnvironment env, int port, int size, uint val)
+    {
+        if ((port & 0xFFFF) == 0x1F0 && env.Ata != null)
+        {
+            env.Ata.WriteData(size, val);
+            return;
+        }
+        for (int i = 0; i < size; i++)
+            EnvOutPort(env, port + i, (byte)(val >> (8 * i)));
     }
 
     static public void EnvOutPort(EmuEnvironment env, int port, byte val)
@@ -644,6 +677,12 @@ static public partial class Ext
                 break;
             case 0x402:
                 System.Console.Error.Write((char)val);
+                break;
+            case 0x1F0 when env.Ata != null:
+                env.Ata.WriteData(1, val);
+                break;
+            case (>= 0x1F1 and <= 0x1F7) or 0x3F6 when env.Ata != null:
+                env.Ata.WriteReg(port & 0xFFFF, val);
                 break;
             default:
                 env.IoPort[port & 0xFFFF] = val;
@@ -689,7 +728,15 @@ public class EmuEnvironment
         }
 
         InitCmos();
+
+        // ディスク: sample.vhd があればプライマリ ATA マスタとして接続する。
+        // 書き込みは sample.vhd.diff に蓄積され、sample.vhd 自体は変更されない。
+        if (File.Exists("sample.vhd"))
+            Ata = new AtaDevice(new DiskImage("sample.vhd", "sample.vhd.diff"));
     }
+
+    // プライマリ ATA チャネルのマスタドライブ(未接続なら null)。
+    public AtaDevice Ata;
 
     // SeaBIOS が CMOS(RTC)経由でメモリ量を検出できるよう、メモリサイズレジスタを設定する。
     //   0x15/0x16: ベースメモリ(KB)          … 640KB
