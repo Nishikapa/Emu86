@@ -7,7 +7,7 @@ public class Unit
 
 static public partial class Ext
 {
-    static private Func<byte[], Data>[] funcArray =
+    private static readonly Func<byte[], Data>[] funcArray =
     [
         data => data[0].ToTypeData(),
         data => BitConverter.ToUInt16(data, 0).ToTypeData(),
