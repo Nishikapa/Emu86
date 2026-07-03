@@ -4,7 +4,11 @@ namespace Emu86;
 
 // ベースイメージ(VHD、読み取り専用)+ 差分ファイルによる Copy-on-Write ディスク。
 // 書き込みはすべて差分ファイルへ蓄積し、読み込みは差分にあるセクタを優先、
-// 無いセクタはベースイメージから読む。ベースイメージは一切変更しない。
+// 無いセクタはベースイメージから読む。ベースイメージ(と親VHD)は一切変更しない。
+//
+// VHD は 固定(2)/可変長(3)/差分(4) に対応。差分VHDは各ブロックのセクタビットマップ
+// (MSBファースト: bit7 が先頭セクタ)を見て、ビット0のセクタは親VHDへ委譲する。
+// 親は動的ヘッダの親ロケータ(同一フォルダ→絶対パスの順)で解決する。
 //
 // 差分ファイルはジャーナル形式: [LBA(8バイト、リトルエンディアン)][セクタデータ(512バイト)] の繰り返し。
 // 起動時に全レコードを読み込み(後勝ち)、書き込み時は末尾に追記する。
@@ -12,19 +16,26 @@ public class DiskImage
 {
     public const int SectorSize = 512;
 
+    const uint BatUnallocated = 0xFFFFFFFF;
+    const int DiskTypeDifferencing = 4;
+
     readonly FileStream baseImage;
     readonly FileStream diffFile;
     readonly Dictionary<long, byte[]> diff = [];
 
     public long TotalSectors { get; }
 
-    // Dynamic VHD (可変長)対応: BAT(Block Allocation Table)でブロック位置を解決する。
+    // Dynamic/Differencing VHD: BAT(Block Allocation Table)でブロック位置を解決する。
     readonly bool dynamic;
+    readonly int diskType;
     readonly uint[] bat = [];
     readonly int sectorsPerBlock;
     readonly int bitmapSectors;
+    readonly DiskImage parent;                       // 差分VHDの親(見つからなければ null)
+    readonly Dictionary<long, byte[]> bitmapCache = [];
 
-    public DiskImage(string basePath, string diffPath)
+    // diffPath=null は親VHDとして開く場合(差分ジャーナルなし、読み取り専用)。
+    public DiskImage(string basePath, string diffPath = null)
     {
         baseImage = new FileStream(basePath, FileMode.Open, FileAccess.Read, FileShare.Read);
 
@@ -32,9 +43,10 @@ public class DiskImage
         baseImage.ReadExactly(hdr);
         if (hdr.AsSpan(0, 8).SequenceEqual("conectix"u8))
         {
-            // Dynamic VHD: 先頭にフッタのコピー、その直後に動的ヘッダ(cxsparse)、BAT が続く。
+            // Dynamic/Differencing VHD: 先頭にフッタのコピー、その直後に動的ヘッダ(cxsparse)、BAT が続く。
             // フッタの値はビッグエンディアン。current size(offset 0x30)が仮想ディスクサイズ。
             dynamic = true;
+            diskType = (int)BinaryPrimitives.ReadUInt32BigEndian(hdr.AsSpan(0x3C));
             TotalSectors = (long)BinaryPrimitives.ReadUInt64BigEndian(hdr.AsSpan(0x30)) / SectorSize;
 
             var dyn = new byte[1024];
@@ -51,6 +63,9 @@ public class DiskImage
             baseImage.ReadExactly(raw);
             for (int i = 0; i < maxEntries; i++)
                 bat[i] = BinaryPrimitives.ReadUInt32BigEndian(raw.AsSpan(i * 4));
+
+            if (diskType == DiskTypeDifferencing)
+                parent = OpenParent(basePath, dyn);
         }
         else
         {
@@ -58,15 +73,65 @@ public class DiskImage
             TotalSectors = baseImage.Length / SectorSize;
         }
 
-        // 差分ファイルを読み込む(存在しなければ新規作成)
-        diffFile = new FileStream(diffPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
-        var rec = new byte[8 + SectorSize];
-        while (diffFile.Read(rec, 0, rec.Length) == rec.Length)
-            diff[BitConverter.ToInt64(rec, 0)] = rec[8..];
-        diffFile.Seek(0, SeekOrigin.End);
+        if (diffPath != null)
+        {
+            // 差分ファイルを読み込む(存在しなければ新規作成)
+            diffFile = new FileStream(diffPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
+            var rec = new byte[8 + SectorSize];
+            while (diffFile.Read(rec, 0, rec.Length) == rec.Length)
+                diff[BitConverter.ToInt64(rec, 0)] = rec[8..];
+            diffFile.Seek(0, SeekOrigin.End);
+        }
     }
 
-    // 読み込み: 差分にあればそれを、無ければベースイメージから。
+    // 差分VHDの親を開く。候補: 子と同じフォルダの親ファイル名 → ロケータの絶対パス。
+    static DiskImage OpenParent(string childPath, byte[] dyn)
+    {
+        var candidates = new List<string>();
+
+        // 動的ヘッダの親名(UTF-16BE)からファイル名を取り、子と同じフォルダを探す
+        var parentName = System.Text.Encoding.BigEndianUnicode.GetString(dyn, 0x40, 0x200).TrimEnd('\0');
+        if (parentName.Length > 0)
+            candidates.Add(Path.Combine(Path.GetDirectoryName(Path.GetFullPath(childPath)) ?? ".", Path.GetFileName(parentName)));
+
+        // 親ロケータ W2ku(絶対パス、UTF-16LE)
+        for (int i = 0; i < 8; i++)
+        {
+            var e = dyn.AsSpan(0x240 + i * 24, 24);
+            if (!e[..4].SequenceEqual("W2ku"u8))
+                continue;
+            var len = (int)BinaryPrimitives.ReadUInt32BigEndian(e[8..12]);
+            var off = (long)BinaryPrimitives.ReadUInt64BigEndian(e[16..24]);
+            using var f = new FileStream(childPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            var buf = new byte[len];
+            f.Seek(off, SeekOrigin.Begin);
+            f.ReadExactly(buf);
+            candidates.Add(System.Text.Encoding.Unicode.GetString(buf).TrimEnd('\0'));
+        }
+
+        foreach (var path in candidates.Where(File.Exists))
+        {
+            Console.Error.WriteLine($"[disk] parent VHD: {path}");
+            return new DiskImage(path);
+        }
+
+        Console.Error.WriteLine($"[disk] WARNING: parent VHD not found: {string.Join(" / ", candidates)} (missing sectors read as zero)");
+        return null;
+    }
+
+    // ブロックのセクタビットマップ(キャッシュ付き)。
+    byte[] BlockBitmap(long block, uint entry)
+    {
+        if (bitmapCache.TryGetValue(block, out var b))
+            return b;
+        b = new byte[bitmapSectors * SectorSize];
+        baseImage.Seek((long)entry * SectorSize, SeekOrigin.Begin);
+        baseImage.ReadExactly(b);
+        bitmapCache[block] = b;
+        return b;
+    }
+
+    // 読み込み: 差分にあればそれを、無ければベースイメージ(と親)から。
     public void ReadSector(long lba, byte[] buf, int offset)
     {
         if (diff.TryGetValue(lba, out var d))
@@ -74,32 +139,44 @@ public class DiskImage
             d.CopyTo(buf, offset);
             return;
         }
+        ReadBase(lba, buf, offset);
+    }
 
+    // ベースイメージからの読み込み(差分VHDのビットマップ・親チェーン解決込み)。
+    void ReadBase(long lba, byte[] buf, int offset)
+    {
         if (lba < 0 || lba >= TotalSectors)
         {
             Array.Clear(buf, offset, SectorSize);
             return;
         }
 
-        if (dynamic)
-        {
-            var block = lba / sectorsPerBlock;
-            var entry = bat[block];
-            if (entry == 0xFFFFFFFF)
-            {
-                // 未割り当てブロックはゼロとして読める
-                Array.Clear(buf, offset, SectorSize);
-                return;
-            }
-            var fileOffset = ((long)entry + bitmapSectors + lba % sectorsPerBlock) * SectorSize;
-            baseImage.Seek(fileOffset, SeekOrigin.Begin);
-            baseImage.ReadExactly(buf, offset, SectorSize);
-        }
-        else
+        if (!dynamic)
         {
             baseImage.Seek(lba * SectorSize, SeekOrigin.Begin);
             baseImage.ReadExactly(buf, offset, SectorSize);
+            return;
         }
+
+        var block = lba / sectorsPerBlock;
+        var sector = (int)(lba % sectorsPerBlock);
+        var entry = bat[block];
+
+        // 未割り当てブロック、または差分VHDでビットが0のセクタは親から読む(親が無ければゼロ)
+        var fromParent = entry == BatUnallocated ||
+            (diskType == DiskTypeDifferencing &&
+             (BlockBitmap(block, entry)[sector / 8] >> (7 - sector % 8) & 1) == 0);
+        if (fromParent)
+        {
+            if (parent != null)
+                parent.ReadBase(lba, buf, offset);
+            else
+                Array.Clear(buf, offset, SectorSize);
+            return;
+        }
+
+        baseImage.Seek(((long)entry + bitmapSectors + sector) * SectorSize, SeekOrigin.Begin);
+        baseImage.ReadExactly(buf, offset, SectorSize);
     }
 
     // 書き込み: ベースイメージには触れず、差分(メモリ+ジャーナル追記)にのみ書く。
