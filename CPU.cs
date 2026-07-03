@@ -1,13 +1,12 @@
 using static Emu86.CPU;
 using static Emu86.Unit;
 using static Emu86.Ext;
-using static System.Console;
 
 namespace Emu86;
 
 static public partial class Ext
 {
-    static int[] arrLen = [1, 2, 4];
+    static readonly int[] arrLen = [1, 2, 4];
 
     static public State<(Data data, MemAddr input)> GetMemoryDataIp(bool w) =>
         from cpu in GetCpu
