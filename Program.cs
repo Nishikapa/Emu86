@@ -1495,17 +1495,25 @@ static class Program
             count = 0;
         }
 
-        // 1命令ずつ実行し、trace.log に CS:EIP を記録する。
-        // 未実装オペコードで停止したら、その地点とオペコードを表示する。
+        // 実行トレースの粒度:
+        //   既定       … 分岐(制御転送)が起きたときだけ CS:EIP を記録(命令ごとより桁違いに軽い)
+        //   --trace-all … 全命令を記録(詳細デバッグ用、重い)
+        //   --notrace  … 記録しない(最速。重い計算フェーズを通過させたいとき)
+        var traceAll = args.Contains("--trace-all");
+        var trace = traceAll || !args.Contains("--notrace");
+        var swatch = System.Diagnostics.Stopwatch.StartNew();
+        long lastReport = count;
         var step = Execute2;
         var timerIrq = Interrupt(8);
         long nextIrq = count + IrqPeriod;
         long nextSnapshot = count + SnapshotInterval;
-        using (var sw = new StreamWriter("trace.log", append: count > 0))
+        // 大きめのバッファでトレースの I/O 負荷を抑える。
+        StreamWriter sw = trace
+            ? new StreamWriter(new FileStream("trace.log", count > 0 ? FileMode.Append : FileMode.Create, FileAccess.Write, FileShare.Read, 1 << 20))
+            : null;
+        try
         {
-            // 強制終了で trace.log の末尾行が改行されないまま残っている場合に備え、
-            // 追記前に改行と再開マーカーを入れて前回分と混ざらないようにする。
-            if (count > 0)
+            if (trace && count > 0)
                 sw.WriteLine($"\n--- resumed at instruction {count} ---");
             while (true)
             {
@@ -1519,6 +1527,8 @@ static class Program
                         cpu = irq.cpu;
                 }
 
+                var beforeCs = cpu.cs;
+                var beforeEip = cpu.eip;
                 (bool ok, Unit _, CPU cpu2, string log) r;
                 try
                 {
@@ -1533,7 +1543,21 @@ static class Program
                     break;
                 cpu = r.cpu2;
                 count++;
-                sw.WriteLine($"{cpu.cs:x4}:{cpu.eip:x8}");
+                if (trace)
+                {
+                    // 制御転送(分岐/ジャンプ/CALL/RET/割り込み)が起きた命令だけ記録する。
+                    // 順次進行なら EIP は開始位置 +1〜+15。それを外れた/CS が変わった = 分岐。
+                    var seq = cpu.cs == beforeCs && cpu.eip > beforeEip && cpu.eip <= beforeEip + 15;
+                    if (traceAll || !seq)
+                        sw.WriteLine($"{cpu.cs:x4}:{cpu.eip:x8}");
+                }
+                if (swatch.ElapsedMilliseconds >= 5000)
+                {
+                    var rate = (count - lastReport) * 1000.0 / swatch.ElapsedMilliseconds;
+                    Error.WriteLine($"[progress] {count:N0} instr, {rate / 1e6:F2}M/s, cs={cpu.cs:x4} eip={cpu.eip:x8}");
+                    lastReport = count;
+                    swatch.Restart();
+                }
                 if (count >= nextSnapshot)
                 {
                     SaveSnapshot(count, cpu, env);
@@ -1545,6 +1569,10 @@ static class Program
                     break;
                 }
             }
+        }
+        finally
+        {
+            sw?.Dispose();
         }
 
         SaveSnapshot(count, cpu, env);
