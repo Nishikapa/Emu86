@@ -380,7 +380,8 @@ public class CPU
 
     static public readonly Accessor<CPU, uint> _eip = new(c => c.eip, c => v => { c.eip = v; return c; });
 
-    public uint eip { get; private set; }
+    // FastStep(高速コア)が直接書き込むため、セッターは公開している。
+    public uint eip { get; set; }
     public ushort ip { get { return (ushort)(this.eip & 0xFFFF); } private set { this.eip = (this.eip & 0xFFFF0000) + value; } }
 
     // プロテクトモードで32ビットコードセグメント(D=1)を実行中かどうか。
