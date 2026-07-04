@@ -367,7 +367,7 @@ static public partial class Ext
         GetDataFromCpu(GetSReg3(reg));
 
     static public State<Data> GetRegData(int reg, int type) =>
-        GetDataFromCpu(GetTypeData_<CPU>(
+        GetDataFromCpu(GetTypeData_(
             type,
             EnvGetDataFromCPU(ArrayReg8)(reg),
             EnvGetDataFromCPU(ArrayReg16)(reg),
@@ -525,7 +525,7 @@ static public partial class Ext
         GetDataFromEnvCpu((env, cpu) => t.isMem ? EnvGetMemoryData32(env, t.addr) : EnvGetDataFromCPU(ArrayReg32)((int)t.addr)(cpu));
 
     static Func<int, Func<CPU, CPU>> EnvSetRegData(Data data) =>
-        SetTypeData<Func<int, Func<CPU, CPU>>>
+        SetTypeData
         (
             data,
             EnvSetRegData8,
@@ -731,7 +731,7 @@ public class EmuEnvironment
 
         // ディスク: sample.vhdx / sample.vhd があればプライマリ ATA マスタとして接続する(vhdx 優先)。
         // 書き込みは差分 VHDX(sample.avhdx)へ蓄積され、ベースイメージ自体は変更されない。
-        var diskImage = new[] { "sample.vhdx", "sample.vhd" }.FirstOrDefault(File.Exists);
+        var diskImage = sourceArray.FirstOrDefault(File.Exists);
         if (diskImage != null)
         {
             var overlay = Path.ChangeExtension(diskImage, ".avhdx");
@@ -774,6 +774,7 @@ public class EmuEnvironment
     public ushort PitCounter = 0xFFFF;
     public ushort PitLatched = 0xFFFF;
     public int PitReadPhase; // 0=下位バイト, 1=上位バイト
+    private static readonly string[] sourceArray = ["sample.vhdx", "sample.vhd"];
 
     // スナップショット保存/復元。ディスクの中身(DiskImage)は書き込みのたびに
     // ファイルへ反映済みなので、ここでは RAM/IOポート/CMOS/PIT/ATA レジスタのみを扱う。

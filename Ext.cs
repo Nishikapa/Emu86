@@ -15,7 +15,7 @@ static public partial class Ext
     ];
 
     static public Data ToTypeData(this IEnumerable<byte> data, int type)
-        => funcArray[type](data.ToArray());
+        => funcArray[type]([.. data]);
 
     static public Data ToTypeData(this byte _db) => (0, db: _db, dw: default, dd: default);
     static public Data ToTypeData(this ushort _dw) => (1, db: default, dw: _dw, dd: default);
@@ -35,8 +35,8 @@ static public partial class Ext
     static bool TopBit(ushort data) => (0 != (data & 0x8000));
     static bool TopBit(byte data) => (0 != (data & 0x80));
 
-    static public uint ToUint32(this IEnumerable<byte> data) => BitConverter.ToUInt32(data.Take(4).ToArray(), 0);
-    static public ushort ToUint16(this IEnumerable<byte> data) => BitConverter.ToUInt16(data.Take(4).ToArray(), 0);
+    static public uint ToUint32(this IEnumerable<byte> data) => BitConverter.ToUInt32([.. data.Take(4)], 0);
+    static public ushort ToUint16(this IEnumerable<byte> data) => BitConverter.ToUInt16([.. data.Take(4)], 0);
 
     static public byte[] ToByteArray(this byte db) => [db];
     static public byte[] ToByteArray(this ushort dw) => BitConverter.GetBytes(dw);
