@@ -430,17 +430,47 @@ public class DiskImage
 
     // ============ AVHDX の新規作成 ============
 
+    // この実装が作る AVHDX を識別する Creator 印。書き込みフォーマットを変えたら
+    // 版数を上げると、古い版で作られた overlay は自動的に作り直される。
+    const string OverlayCreator = "Emu86-avhdx-1";
+
     // overlayPath が無ければ、basePath を親とする差分 VHDX(AVHDX)を作成する。
+    // 既存 overlay がこの実装の版と一致しなければ退避して作り直す
+    // (開発途中の古い形式で書かれた overlay が壊れて読めない事故を防ぐ)。
     static public void EnsureOverlay(string overlayPath, string basePath)
     {
         if (File.Exists(overlayPath))
-            return;
+        {
+            if (OverlayIsCurrent(overlayPath))
+                return;
+            var stale = overlayPath + ".old";
+            File.Delete(stale);
+            File.Move(overlayPath, stale);
+            Console.Error.WriteLine($"[disk] overlay {overlayPath} is from an older format; moved to {stale} and recreating");
+        }
 
         var p = new DiskImage(basePath);
         var blockSize = p.vhdx || p.vhd ? p.sectorsPerBlock * SectorSize : 0x200000;
         CreateAvhdx(overlayPath, basePath, p.TotalSectors * SectorSize, blockSize, p.dataWriteGuid);
         p.Close();
         Console.Error.WriteLine($"[disk] created overlay: {overlayPath} (parent: {basePath})");
+    }
+
+    // overlay の File Identifier に埋めた Creator 印が現行版と一致するか。
+    static bool OverlayIsCurrent(string overlayPath)
+    {
+        try
+        {
+            using var f = new FileStream(overlayPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            var id = new byte[8 + OverlayCreator.Length * 2];
+            f.ReadExactly(id);
+            return id.AsSpan(0, 8).SequenceEqual("vhdxfile"u8)
+                && System.Text.Encoding.Unicode.GetString(id, 8, OverlayCreator.Length * 2) == OverlayCreator;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     // 差分 VHDX を生成する。構造: FileID / Header x2 / RegionTable x2 / Log(1MB) / Metadata(1MB) / BAT。
@@ -454,9 +484,9 @@ public class DiskImage
         var image = new byte[0x300000 + batLength];
         var w = image.AsSpan();
 
-        // File Identifier
+        // File Identifier(Creator にフォーマット版数を埋め、旧版 overlay を判別できるようにする)
         "vhdxfile"u8.CopyTo(w);
-        System.Text.Encoding.Unicode.GetBytes("Emu86").CopyTo(w[8..]);
+        System.Text.Encoding.Unicode.GetBytes(OverlayCreator).CopyTo(w[8..]);
 
         // Header x2 (0x10000, 0x20000)
         for (int i = 0; i < 2; i++)
