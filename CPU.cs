@@ -518,4 +518,51 @@ public struct CPU
 
     public uint esi { get; set; }
     public uint edi { get; set; }
+
+    // スナップショット保存/復元。導出プロパティ(ip/bp/sp/al/ah 等)は元の
+    // 32bit レジスタから再計算されるため、ここでは書き出さない。
+    public readonly void WriteTo(BinaryWriter w)
+    {
+        w.Write(cs); w.Write(ds); w.Write(es); w.Write(ss); w.Write(fs); w.Write(gs);
+        w.Write(cs_base); w.Write(ds_base); w.Write(es_base); w.Write(ss_base); w.Write(fs_base); w.Write(gs_base);
+        w.Write(eip);
+        w.Write(code32);
+        w.Write(idt_limit); w.Write(idt_base); w.Write(gdt_limit); w.Write(gdt_base);
+        w.Write(cr0); w.Write(cr2); w.Write(cr3);
+        w.Write(ebp); w.Write(esp);
+        w.Write(eflags);
+        w.Write(cs_prefix); w.Write(es_prefix); w.Write(ss_prefix); w.Write(ds_prefix);
+        w.Write(fs_prefix); w.Write(gs_prefix); w.Write(operand_size_prefix); w.Write(address_size_prefix);
+        w.Write(eax); w.Write(ebx); w.Write(ecx); w.Write(edx);
+        w.Write(esi); w.Write(edi);
+    }
+
+    public static CPU ReadFrom(BinaryReader r)
+    {
+        var c = new CPU
+        {
+            cs = r.ReadUInt16(),
+            ds = r.ReadUInt16(),
+            es = r.ReadUInt16(),
+            ss = r.ReadUInt16(),
+            fs = r.ReadUInt16(),
+            gs = r.ReadUInt16(),
+        };
+        c.cs_base = r.ReadUInt32(); c.ds_base = r.ReadUInt32(); c.es_base = r.ReadUInt32();
+        c.ss_base = r.ReadUInt32(); c.fs_base = r.ReadUInt32(); c.gs_base = r.ReadUInt32();
+        c.eip = r.ReadUInt32();
+        c.code32 = r.ReadBoolean();
+        c.idt_limit = r.ReadUInt16(); c.idt_base = r.ReadUInt32();
+        c.gdt_limit = r.ReadUInt16(); c.gdt_base = r.ReadUInt32();
+        c.cr0 = r.ReadUInt32(); c.cr2 = r.ReadUInt32(); c.cr3 = r.ReadUInt32();
+        c.ebp = r.ReadUInt32(); c.esp = r.ReadUInt32();
+        c.eflags = r.ReadUInt32();
+        c.cs_prefix = r.ReadBoolean(); c.es_prefix = r.ReadBoolean();
+        c.ss_prefix = r.ReadBoolean(); c.ds_prefix = r.ReadBoolean();
+        c.fs_prefix = r.ReadBoolean(); c.gs_prefix = r.ReadBoolean();
+        c.operand_size_prefix = r.ReadBoolean(); c.address_size_prefix = r.ReadBoolean();
+        c.eax = r.ReadUInt32(); c.ebx = r.ReadUInt32(); c.ecx = r.ReadUInt32(); c.edx = r.ReadUInt32();
+        c.esi = r.ReadUInt32(); c.edi = r.ReadUInt32();
+        return c;
+    }
 }

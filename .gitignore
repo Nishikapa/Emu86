@@ -23,3 +23,7 @@ trace.log
 sample.vhd
 sample.vhdx
 *.avhdx
+
+# Emulator execution snapshots (CPU + memory + I/O state)
+snapshot.bin
+snapshot.bin.tmp
