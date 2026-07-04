@@ -1437,23 +1437,76 @@ static class Program
     // インタプリタ実行では数億命令規模になりうるため、余裕を持たせている。
     const long InstructionLimit = 500_000_000;
 
+    // スナップショット(CPU + メモリ + I/O 状態)の保存先と自動保存間隔(命令数)。
+    // 1命令ずつ解釈実行するため長時間のブートは避けられないので、
+    // "--resume" で前回の続きから再開できるようにする。
+    const string SnapshotPath = "snapshot.bin";
+    const long SnapshotInterval = 10_000_000;
+    const string SnapshotMagic = "EMU86SNP";
+    const int SnapshotVersion = 1;
+
+    static void SaveSnapshot(long count, CPU cpu, EmuEnvironment env)
+    {
+        // 書き込み中のプロセス強制終了で壊れたファイルが残らないよう、
+        // 一時ファイルへ書いてから置き換える。
+        var tmp = SnapshotPath + ".tmp";
+        using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write))
+        using (var w = new BinaryWriter(fs))
+        {
+            w.Write(System.Text.Encoding.ASCII.GetBytes(SnapshotMagic));
+            w.Write(SnapshotVersion);
+            w.Write(count);
+            cpu.WriteTo(w);
+            env.SaveState(w);
+        }
+        File.Move(tmp, SnapshotPath, overwrite: true);
+    }
+
+    static (long count, CPU cpu) LoadSnapshot(EmuEnvironment env)
+    {
+        using var fs = new FileStream(SnapshotPath, FileMode.Open, FileAccess.Read);
+        using var r = new BinaryReader(fs);
+        if (System.Text.Encoding.ASCII.GetString(r.ReadBytes(SnapshotMagic.Length)) != SnapshotMagic)
+            throw new InvalidDataException($"{SnapshotPath} is not a valid Emu86 snapshot");
+        if (r.ReadInt32() != SnapshotVersion)
+            throw new InvalidDataException($"{SnapshotPath} has an unsupported snapshot version");
+        var count = r.ReadInt64();
+        var cpu = CPU.ReadFrom(r);
+        env.LoadState(r);
+        return (count, cpu);
+    }
+
     static void Main(string[] args)
     {
-        var init_cpu1 = new CPU();
-        var init_cpu2 = _ip.setter(init_cpu1)(0xFFF0);
-        var init_cpu3 = _cs.setter(init_cpu2)(0xF000);
-
         var env = new EmuEnvironment();
+
+        long count;
+        CPU cpu;
+        if (args.Contains("--resume"))
+        {
+            (count, cpu) = LoadSnapshot(env);
+            WriteLine($"[snapshot] resumed from {SnapshotPath} at instruction {count}");
+        }
+        else
+        {
+            var init_cpu1 = new CPU();
+            var init_cpu2 = _ip.setter(init_cpu1)(0xFFF0);
+            cpu = _cs.setter(init_cpu2)(0xF000);
+            count = 0;
+        }
 
         // 1命令ずつ実行し、trace.log に CS:EIP を記録する。
         // 未実装オペコードで停止したら、その地点とオペコードを表示する。
-        var cpu = init_cpu3;
         var step = Execute2;
         var timerIrq = Interrupt(8);
-        long count = 0;
-        long nextIrq = IrqPeriod;
-        using (var sw = new StreamWriter("trace.log"))
+        long nextIrq = count + IrqPeriod;
+        long nextSnapshot = count + SnapshotInterval;
+        using (var sw = new StreamWriter("trace.log", append: count > 0))
         {
+            // 強制終了で trace.log の末尾行が改行されないまま残っている場合に備え、
+            // 追記前に改行と再開マーカーを入れて前回分と混ざらないようにする。
+            if (count > 0)
+                sw.WriteLine($"\n--- resumed at instruction {count} ---");
             while (true)
             {
                 // 仮想タイマ割り込み(IRQ0): 一定命令数ごとに、リアルモードかつ IF=1 のとき
@@ -1481,6 +1534,11 @@ static class Program
                 cpu = r.cpu2;
                 count++;
                 sw.WriteLine($"{cpu.cs:x4}:{cpu.eip:x8}");
+                if (count >= nextSnapshot)
+                {
+                    SaveSnapshot(count, cpu, env);
+                    nextSnapshot = count + SnapshotInterval;
+                }
                 if (InstructionLimit <= count)
                 {
                     WriteLine("instruction limit reached");
@@ -1488,6 +1546,8 @@ static class Program
                 }
             }
         }
+
+        SaveSnapshot(count, cpu, env);
 
         var addr = GetCodeAddr(cpu).addr;
         WriteLine($"STOP at {cpu.cs:x4}:{cpu.eip:x8} after {count} instructions, opcode: " +

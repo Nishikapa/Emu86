@@ -774,4 +774,32 @@ public class EmuEnvironment
     public ushort PitCounter = 0xFFFF;
     public ushort PitLatched = 0xFFFF;
     public int PitReadPhase; // 0=下位バイト, 1=上位バイト
+
+    // スナップショット保存/復元。ディスクの中身(DiskImage)は書き込みのたびに
+    // ファイルへ反映済みなので、ここでは RAM/IOポート/CMOS/PIT/ATA レジスタのみを扱う。
+    public void SaveState(BinaryWriter w)
+    {
+        w.Write(OneMegaMemory_);
+        w.Write(IoPort);
+        w.Write(Cmos);
+        w.Write(CmosIndex);
+        w.Write(PitCounter);
+        w.Write(PitLatched);
+        w.Write(PitReadPhase);
+        w.Write(Ata != null);
+        Ata?.SaveState(w);
+    }
+
+    public void LoadState(BinaryReader r)
+    {
+        r.BaseStream.ReadExactly(OneMegaMemory_);
+        r.BaseStream.ReadExactly(IoPort);
+        r.BaseStream.ReadExactly(Cmos);
+        CmosIndex = r.ReadInt32();
+        PitCounter = r.ReadUInt16();
+        PitLatched = r.ReadUInt16();
+        PitReadPhase = r.ReadInt32();
+        if (r.ReadBoolean() && Ata != null)
+            Ata.LoadState(r);
+    }
 }

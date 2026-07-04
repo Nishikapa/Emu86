@@ -623,6 +623,32 @@ public class AtaDevice(DiskImage disk)
 
     bool SlaveSelected => (drive & 0x10) != 0;
 
+    // スナップショット保存/復元。接続先の DiskImage 自体は書き込みのたびに
+    // ファイルへ反映済みのため、ここでは PIO レジスタとバッファのみを扱う。
+    public void SaveState(BinaryWriter w)
+    {
+        w.Write(feature); w.Write(sectorCount); w.Write(lbaLow); w.Write(lbaMid); w.Write(lbaHigh); w.Write(drive);
+        w.Write(status); w.Write(error);
+        w.Write(buf.Length);
+        w.Write(buf);
+        w.Write(bufPos);
+        w.Write(pendingWrite);
+        w.Write(writeLba);
+        w.Write(writeSectorsLeft);
+    }
+
+    public void LoadState(BinaryReader r)
+    {
+        feature = r.ReadByte(); sectorCount = r.ReadByte(); lbaLow = r.ReadByte();
+        lbaMid = r.ReadByte(); lbaHigh = r.ReadByte(); drive = r.ReadByte();
+        status = r.ReadByte(); error = r.ReadByte();
+        buf = r.ReadBytes(r.ReadInt32());
+        bufPos = r.ReadInt32();
+        pendingWrite = r.ReadBoolean();
+        writeLba = r.ReadInt64();
+        writeSectorsLeft = r.ReadInt32();
+    }
+
     public byte ReadReg(int port) =>
         port switch
         {
