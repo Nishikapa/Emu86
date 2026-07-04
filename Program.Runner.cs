@@ -37,14 +37,17 @@ static partial class Program
         //   --trace-all … 全命令を記録(詳細デバッグ用、重い)
         //   --notrace  … 記録しない(最速。重い計算フェーズを通過させたいとき)
         // --limit N   … N 命令で停止する(回帰比較などで決定的に打ち切るため)
+        // --slow      … 高速コア(FastStep)を使わず全命令をモナド版で実行する(回帰比較の基準用)
         var traceAll = args.Contains("--trace-all");
         var trace = traceAll || !args.Contains("--notrace");
+        var slow = args.Contains("--slow");
         var limit = InstructionLimit;
         var limitIdx = Array.IndexOf(args, "--limit");
         if (limitIdx >= 0 && limitIdx + 1 < args.Length)
             limit = long.Parse(args[limitIdx + 1]);
         var swatch = System.Diagnostics.Stopwatch.StartNew();
         long lastReport = count;
+        long fastCount = 0;
         var step = Execute2;
         var timerIrq = Interrupt(8);
         long nextIrq = count + IrqPeriod;
@@ -71,19 +74,26 @@ static partial class Program
 
                 var beforeCs = cpu.cs;
                 var beforeEip = cpu.eip;
-                (bool ok, Unit _, CPU cpu2, string log) r;
                 try
                 {
-                    r = step(env, cpu, default);
+                    // まず高速コアで 1 命令実行し、未対応の命令だけモナド版へフォールバックする。
+                    if (!slow && FastStep(env, cpu))
+                    {
+                        fastCount++;
+                    }
+                    else
+                    {
+                        var r = step(env, cpu, default);
+                        if (!r.IsSuccess)
+                            break;
+                        cpu = r.cpu;
+                    }
                 }
                 catch (Exception ex)
                 {
                     WriteLine($"EXCEPTION at {cpu.cs:x4}:{cpu.eip:x8}: {ex.GetType().Name}: {ex.Message}");
                     break;
                 }
-                if (!r.ok)
-                    break;
-                cpu = r.cpu2;
                 count++;
                 if (trace)
                 {
@@ -119,6 +129,8 @@ static partial class Program
 
         SaveSnapshot(count, cpu, env);
 
+        if (!slow && count > 0)
+            WriteLine($"fast-path coverage: {fastCount:N0}/{count:N0} ({100.0 * fastCount / count:F2}%)");
         var addr = GetCodeAddr(cpu).addr;
         WriteLine($"STOP at {cpu.cs:x4}:{cpu.eip:x8} after {count} instructions, opcode: " +
             string.Join(" ", env.OneMegaMemory_.Skip((int)addr).Take(6).Select(b => b.ToString("x2"))));
