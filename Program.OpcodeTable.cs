@@ -189,12 +189,12 @@ static partial class Program
                 oneByte.TryGetValue(index, out var state) ? new OpecodeDic() { state = state } :
                 twoBytes.TryGetValue(index, out var _dic) ? new OpecodeDic()
                 {
-                    next = Enumerable.Range(0, 256).Select(
+                    next = [.. Enumerable.Range(0, 256).Select(
                         index2 =>
                             _dic.TryGetValue(index2, out var state2) ?
                                 new OpecodeDic() { state = state2 } :
                                 default
-                    ).ToArray()
+                    )]
                 } : default
         )];
 
