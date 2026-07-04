@@ -1433,6 +1433,10 @@ static class Program
     // 仮想タイマ割り込み(IRQ0)の注入間隔(命令数)。
     const long IrqPeriod = 10_000;
 
+    // 実行する命令数の上限。ブートローダーの展開処理などは1命令ずつの
+    // インタプリタ実行では数億命令規模になりうるため、余裕を持たせている。
+    const long InstructionLimit = 500_000_000;
+
     static void Main(string[] args)
     {
         var init_cpu1 = new CPU();
@@ -1477,7 +1481,7 @@ static class Program
                 cpu = r.cpu2;
                 count++;
                 sw.WriteLine($"{cpu.cs:x4}:{cpu.eip:x8}");
-                if (50_000_000 <= count)
+                if (InstructionLimit <= count)
                 {
                     WriteLine("instruction limit reached");
                     break;
