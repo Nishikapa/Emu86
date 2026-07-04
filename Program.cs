@@ -1384,7 +1384,17 @@ static class Program
         return (false, default, cpu1, log1);
     };
 
-    static public State<Unit> CheckPrefixes => CheckPrefix.Many0().Ignore();
+    // プレフィックスを 0 個以上消費する。Many0 のリスト確保を避けた軽量版。
+    static public State<Unit> CheckPrefixes => (env, cpu, ope) =>
+    {
+        while (true)
+        {
+            var (ok, _, cpu2, _) = CheckPrefix(env, cpu, ope);
+            if (!ok)
+                return (true, unit, cpu, string.Empty);
+            cpu = cpu2;
+        }
+    };
 
     static public State<Unit> Execute => (env, cpu1, ope) =>
     {

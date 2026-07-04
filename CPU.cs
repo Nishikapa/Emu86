@@ -239,17 +239,19 @@ static public partial class Ext
         from _ in IpInc(data.Count())
         select data;
 
-    static public State<byte> GetMemoryDataIp8 =>
+    // ホットパスで毎命令アクセスされるため、プロパティではなくキャッシュ済みフィールドにする
+    // (プロパティだと参照のたびに SelectMany のデリゲート鎖を再構築してしまう)。
+    static public readonly State<byte> GetMemoryDataIp8 =
         from data in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryData8(env, GetCodeAddr(cpu).addr))
         from _ in IpInc(1)
         select data;
 
-    static public State<ushort> GetMemoryDataIp16 =>
+    static public readonly State<ushort> GetMemoryDataIp16 =
         from data in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryData16(env, GetCodeAddr(cpu).addr))
         from _ in IpInc(2)
         select data;
 
-    static public State<uint> GetMemoryDataIp32 =>
+    static public readonly State<uint> GetMemoryDataIp32 =
         from data in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryData32(env, GetCodeAddr(cpu).addr))
         from _ in IpInc(4)
         select data;
@@ -324,7 +326,7 @@ static public partial class Ext
         );
     }
 
-    static public State<CPU> GetCpu => GetDataFromEnvCpu((env, cpu) => cpu);
+    static public readonly State<CPU> GetCpu = GetDataFromEnvCpu((env, cpu) => cpu);
 
     /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     static public State<T> GetDataFromEnvCpu<T>(Func<EmuEnvironment, CPU, T> func) =>                              //無理
@@ -333,7 +335,7 @@ static public partial class Ext
     static public State<Unit> SetCpu(CPU new_cpu) => (env, cpu, ope) => (true, unit, new_cpu, string.Empty); //無理
     static public State<Unit> SetResult(bool f) => (env, cpu, ope) => (f, unit, cpu, string.Empty);          //無理
     static public State<Unit> SetLog(string log) => (env, cpu, ope) => (true, unit, cpu, log);               //無理
-    static public State<byte[]> Opecodes => (env, cpu, ope) => (true, ope, cpu, string.Empty);               //無理
+    static public readonly State<byte[]> Opecodes = (env, cpu, ope) => (true, ope, cpu, string.Empty);       //無理
 }
 
 public class Accessor<O, P>(Func<O, P> g, Func<O, Func<P, O>> s)

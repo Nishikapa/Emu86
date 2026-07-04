@@ -33,7 +33,9 @@ static public partial class Ext
             if (isSuccess1)
             {
                 var (isSuccess2, valueB, cpu3, log2) = selector(valueA)(env, cpu2, ope);
-                return (isSuccess2, isSuccess2 ? projector(valueA, valueB) : default, isSuccess2 ? cpu3 : cpu1, log1 + "\r\n" + log2);
+                // ログは捨てられることが多いので、片方が空なら連結を省いてアロケーションを避ける。
+                var log = log1.Length == 0 ? log2 : log2.Length == 0 ? log1 : log1 + "\r\n" + log2;
+                return (isSuccess2, isSuccess2 ? projector(valueA, valueB) : default, isSuccess2 ? cpu3 : cpu1, log);
             }
             else
             {
