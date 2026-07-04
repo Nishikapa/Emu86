@@ -36,8 +36,13 @@ static partial class Program
         //   既定       … 分岐(制御転送)が起きたときだけ CS:EIP を記録(命令ごとより桁違いに軽い)
         //   --trace-all … 全命令を記録(詳細デバッグ用、重い)
         //   --notrace  … 記録しない(最速。重い計算フェーズを通過させたいとき)
+        // --limit N   … N 命令で停止する(回帰比較などで決定的に打ち切るため)
         var traceAll = args.Contains("--trace-all");
         var trace = traceAll || !args.Contains("--notrace");
+        var limit = InstructionLimit;
+        var limitIdx = Array.IndexOf(args, "--limit");
+        if (limitIdx >= 0 && limitIdx + 1 < args.Length)
+            limit = long.Parse(args[limitIdx + 1]);
         var swatch = System.Diagnostics.Stopwatch.StartNew();
         long lastReport = count;
         var step = Execute2;
@@ -100,7 +105,7 @@ static partial class Program
                     SaveSnapshot(count, cpu, env);
                     nextSnapshot = count + SnapshotInterval;
                 }
-                if (InstructionLimit <= count)
+                if (limit <= count)
                 {
                     WriteLine("instruction limit reached");
                     break;

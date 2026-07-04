@@ -698,7 +698,7 @@ static public partial class Ext
         if (addr < (uint)env.OneMegaMemory_.Length) env.OneMegaMemory_[addr] = val;
     }
 
-    static private byte EnvGetMemoryData8(EmuEnvironment env, uint addr) =>
+    static public byte EnvGetMemoryData8(EmuEnvironment env, uint addr) =>
         addr < (uint)env.OneMegaMemory_.Length ? env.OneMegaMemory_[addr] : (byte)0xFF;
     static private ushort EnvGetMemoryData16(EmuEnvironment env, uint addr) =>
         addr + 2 <= (uint)env.OneMegaMemory_.Length ? BitConverter.ToUInt16(env.OneMegaMemory_, (int)addr) : (ushort)0xFFFF;

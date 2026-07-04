@@ -344,7 +344,11 @@ public class Accessor<O, P>(Func<O, P> g, Func<O, Func<P, O>> s)
     public Func<O, Func<P, O>> setter { get; set; } = s;
 }
 
-public struct CPU
+// CPU 状態。参照型(class)であることに意味がある:
+// State モナドの各バインドを CPU の実体コピーではなく参照の受け渡しで通すことで、
+// 1命令あたり数十回発生していた大きな構造体コピーをなくしている。
+// アクセサの setter は同一インスタンスをその場で書き換えて返す。
+public class CPU
 {
     // セグメントレジスタのセッタは、リアルモードの基底(セレクタ*16)もあわせて更新する。
     // プロテクトモードでは LoadSReg が GDT 記述子から読んだ基底で上書きする(記述子キャッシュ相当)。
@@ -523,7 +527,7 @@ public struct CPU
 
     // スナップショット保存/復元。導出プロパティ(ip/bp/sp/al/ah 等)は元の
     // 32bit レジスタから再計算されるため、ここでは書き出さない。
-    public readonly void WriteTo(BinaryWriter w)
+    public void WriteTo(BinaryWriter w)
     {
         w.Write(cs); w.Write(ds); w.Write(es); w.Write(ss); w.Write(fs); w.Write(gs);
         w.Write(cs_base); w.Write(ds_base); w.Write(es_base); w.Write(ss_base); w.Write(fs_base); w.Write(gs_base);

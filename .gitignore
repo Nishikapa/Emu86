@@ -27,3 +27,6 @@ sample.vhdx
 # Emulator execution snapshots (CPU + memory + I/O state)
 snapshot.bin
 snapshot.bin.tmp
+
+# Visual Studio local cache
+.vs/
