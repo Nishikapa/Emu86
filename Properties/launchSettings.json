@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "Emu86": {
+      "commandName": "Project",
+      "workingDirectory": "$(ProjectDir)"
+    }
+  }
+}
