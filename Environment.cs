@@ -729,10 +729,15 @@ public class EmuEnvironment
 
         InitCmos();
 
-        // ディスク: sample.vhd があればプライマリ ATA マスタとして接続する。
-        // 書き込みは sample.vhd.diff に蓄積され、sample.vhd 自体は変更されない。
-        if (File.Exists("sample.vhd"))
-            Ata = new AtaDevice(new DiskImage("sample.vhd", "sample.vhd.diff"));
+        // ディスク: sample.vhdx / sample.vhd があればプライマリ ATA マスタとして接続する(vhdx 優先)。
+        // 書き込みは差分 VHDX(sample.avhdx)へ蓄積され、ベースイメージ自体は変更されない。
+        var diskImage = new[] { "sample.vhdx", "sample.vhd" }.FirstOrDefault(File.Exists);
+        if (diskImage != null)
+        {
+            var overlay = Path.ChangeExtension(diskImage, ".avhdx");
+            DiskImage.EnsureOverlay(overlay, diskImage);
+            Ata = new AtaDevice(new DiskImage(overlay, writable: true));
+        }
     }
 
     // プライマリ ATA チャネルのマスタドライブ(未接続なら null)。

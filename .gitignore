@@ -19,6 +19,7 @@ trace.log
 # Claude Code local settings
 .claude/
 
-# Disk image and its copy-on-write overlay
+# Disk images and their copy-on-write overlays
 sample.vhd
-sample.vhd.diff
+sample.vhdx
+*.avhdx
