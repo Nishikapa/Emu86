@@ -198,74 +198,71 @@ static partial class Program
                 } : default
         )];
 
-    static public State<Unit> CheckPrefix => (env, cpu1, ope) =>
-    {
-        var (IsSuccess1, op1, cpu2, log1) = GetMemoryDataIp8(env, cpu1, ope);
-
-        if (!IsSuccess1)
-        {
-            return (false, default, cpu1, log1);
-        }
-
-        var data1 = dicPrefixes[op1];
-
-        if (default != data1.state)
-        {
-            return data1.state(env, cpu2, [(byte)op1]);
-        }
-
-        return (false, default, cpu1, log1);
-    };
-
-    // プレフィックスを 0 個以上消費する。Many0 のリスト確保を避けた軽量版。
+    // プレフィックスを 0 個以上消費する。
+    // CPU が参照型なので「読み進めてから巻き戻す」ことはできない。
+    // 先に覗き見(peek)して、プレフィックスと分かったときだけ 1 バイト消費する。
     static public State<Unit> CheckPrefixes => (env, cpu, ope) =>
     {
         while (true)
         {
-            var (ok, _, cpu2, _) = CheckPrefix(env, cpu, ope);
-            if (!ok)
+            var op1 = EnvGetMemoryData8(env, GetCodeAddr(cpu).addr);
+            var data1 = dicPrefixes[op1];
+            if (default == data1.state)
                 return (true, unit, cpu, string.Empty);
+
+            cpu = _eip.setter(cpu)(cpu.eip + 1);
+            var (ok, _, cpu2, _) = data1.state(env, cpu, [op1]);
+            if (!ok)
+                return (false, default, cpu2, string.Empty);
             cpu = cpu2;
         }
     };
 
     static public State<Unit> Execute => (env, cpu1, ope) =>
     {
+        // 未実装オペコードで失敗したとき STOP 診断が正しい位置を指すよう、
+        // フェッチ前の EIP を覚えておき、失敗時に戻す(CPU は参照型なので明示的に戻す)。
+        var startEip = cpu1.eip;
+
         var (IsSuccess1, op1, cpu2, log1) = GetMemoryDataIp8(env, cpu1, ope);
 
         if (!IsSuccess1)
         {
-            return (false, default, cpu1, log1);
+            return (false, default, Rewind(cpu1, startEip), log1);
         }
 
         var data1 = dic[op1];
 
         if (default != data1.state)
         {
-            return data1.state(env, cpu2, [(byte)op1]);
+            var ret = data1.state(env, cpu2, [(byte)op1]);
+            return ret.IsSuccess ? ret : (false, default, Rewind(ret.cpu, startEip), ret.log);
         }
 
         if (default == data1.next)
         {
-            return (false, default, cpu1, log1);
+            return (false, default, Rewind(cpu2, startEip), log1);
         }
 
         var (IsSuccess2, op2, cpu3, log2) = GetMemoryDataIp8(env, cpu2, ope);
 
         if (!IsSuccess2)
         {
-            return (false, default, cpu1, log1);
+            return (false, default, Rewind(cpu2, startEip), log1);
         }
 
         var data2 = data1.next[op2];
 
         if (default != data2.state)
         {
-            return data2.state(env, cpu3, [(byte)op1, (byte)op2]);
+            var ret = data2.state(env, cpu3, [(byte)op1, (byte)op2]);
+            return ret.IsSuccess ? ret : (false, default, Rewind(ret.cpu, startEip), ret.log);
         }
 
-        return (false, default, cpu1, log1 + log2);
+        return (false, default, Rewind(cpu3, startEip), log1 + log2);
     };
+
+    static CPU Rewind(CPU cpu, uint eip) => _eip.setter(cpu)(eip);
 
     static public State<Unit> Execute2 =>
         from _1 in CheckPrefixes
