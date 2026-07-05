@@ -149,6 +149,17 @@ static partial class Program
         if (op == 0x90)
             return (true, unit, cpu2, log);
 
+        // F3/F2 0F xx: TZCNT/LZCNT 等の新命令エンコーディング。この CPU 世代では
+        // REP プレフィックスは無視され、素の 2 バイト命令(BSF/BSR 等)として実行される
+        // (Linux の __ffs は互換性のため意図的に "rep; bsf" を使う)。
+        if (op == 0x0F)
+        {
+            var (okB, op2, cpuB, logB) = GetMemoryDataIp8(env, cpu2, ope);
+            if (!okB || dic[0x0F].next[op2].state == default)
+                return (false, default, cpu1, log);
+            return dic[0x0F].next[op2].state(env, cpuB, [0x0F, op2]);
+        }
+
         if (!stringOps.Contains(op) || !oneByte.TryGetValue(op, out var state))
             return (false, default, cpu1, log);
 
@@ -238,6 +249,23 @@ static partial class Program
         from _3 in SetRegData32(m.rm, data)
         select unit;
 
+    // MOV r32, DRx (0F 21) / MOV DRx, r32 (0F 23): デバッグレジスタ。
+    // ハードウェアブレークポイントは未実装のため、値を保持するだけの汎用ストア。
+    static State<Unit> Mov_0F21 =>
+        from _1 in SetLog("Mov_0F21")
+        from m in ModRegRm()
+        from _2 in SetResult(3 == m.mod)
+        from _3 in SetCpu((env, cpu) => EnvSetRegData32(env.Dr[m.reg])(m.rm)(cpu))
+        select unit;
+
+    static State<Unit> Mov_0F23 =>
+        from _1 in SetLog("Mov_0F23")
+        from m in ModRegRm()
+        from _2 in SetResult(3 == m.mod)
+        from data in GetRegData32(m.rm)
+        from _3 in SetCpu((env, cpu) => { env.Dr[m.reg] = data; return cpu; })
+        select unit;
+
     static State<Unit> Mov_0F22 =>
         from _1 in SetLog("Mov_0F22")
         from m in ModRegRm()
@@ -266,7 +294,11 @@ static partial class Program
                     a = 0x00000600; // family 6
                     b = 0;
                     c = 0;          // 拡張機能なし
-                    d = 0x00000001; // FPU のみ(APIC/PAE/MSR 等は非対応として伏せる)
+                    // エミュレートできる機能のみ立てる:
+                    //   FPU(0x1) PSE(0x8) TSC(0x10) MSR(0x20) PAE(0x40) CX8(0x100) CMOV(0x8000)
+                    // 686-pae カーネルはここで PAE を確認して CR4.PAE を設定する。
+                    // APIC/SEP/FXSR/MMX 等は未実装のため伏せる。
+                    d = 0x00008179;
                     break;
                 default:
                     a = b = c = d = 0;
@@ -275,6 +307,101 @@ static partial class Program
             cpu.eax = a; cpu.ebx = b; cpu.ecx = c; cpu.edx = d;
             return cpu;
         })
+        select unit;
+
+    // RDTSC (0F 31): EDX:EAX <- タイムスタンプカウンタ。実行済み命令数を代用する
+    // (Runner が毎命令 env.Tsc を更新する)。
+    static State<Unit> Rdtsc_0F31 =>
+        from _1 in SetLog("Rdtsc_0F31")
+        from _2 in SetCpu((env, cpu) =>
+        {
+            cpu.eax = (uint)env.Tsc;
+            cpu.edx = (uint)(env.Tsc >> 32);
+            return cpu;
+        })
+        select unit;
+
+    // RDMSR (0F 32) / WRMSR (0F 30): ECX で選択した MSR を EDX:EAX で読み書きする。
+    // 実際の機能は持たない汎用ストア(未書き込みの MSR は 0 を返す)。
+    static State<Unit> Rdmsr_0F32 =>
+        from _1 in SetLog("Rdmsr_0F32")
+        from _2 in SetCpu((env, cpu) =>
+        {
+            var v = env.Msrs.GetValueOrDefault(cpu.ecx);
+            cpu.eax = (uint)v;
+            cpu.edx = (uint)(v >> 32);
+            return cpu;
+        })
+        select unit;
+
+    static State<Unit> Wrmsr_0F30 =>
+        from _1 in SetLog("Wrmsr_0F30")
+        from _2 in SetCpu((env, cpu) =>
+        {
+            env.Msrs[cpu.ecx] = ((ulong)cpu.edx << 32) | cpu.eax;
+            return cpu;
+        })
+        select unit;
+
+    // CMPXCHG r/m, r (0F B0/B1): acc(AL/AX/EAX) と r/m を比較し、
+    // 一致なら r/m <- reg、不一致なら acc <- r/m。フラグは CMP(acc, r/m) と同じ。
+    static State<Unit> Cmpxchg_0FB0_B1 =>
+        from _1 in SetLog("Cmpxchg_0FB0_B1")
+        from opecode in Opecodes
+        let w = 0 != (opecode[1] & 0x01)
+        from m in ModRegRm()
+        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from dst in GetMemOrRegData(addr, w)
+        from acc in GetRegData(0, dst.type)
+        from _f in Calc(acc, dst, 7) // CMP acc, r/m のフラグ
+        from _2 in acc.Value() == dst.Value()
+            ? from src in GetRegData(m.reg, dst.type)
+              from _w in SetMemOrRegData(addr, src)
+              select unit
+            : SetRegData(0, dst)
+        select unit;
+
+    // XADD r/m, r (0F C0/C1): temp = r/m + reg(フラグは ADD)、reg <- r/m 旧値、r/m <- temp。
+    static State<Unit> Xadd_0FC0_C1 =>
+        from _1 in SetLog("Xadd_0FC0_C1")
+        from opecode in Opecodes
+        let w = 0 != (opecode[1] & 0x01)
+        from m in ModRegRm()
+        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from dst in GetMemOrRegData(addr, w)
+        from src in GetRegData(m.reg, dst.type)
+        from sum in Calc(dst, src, 0)
+        from _2 in SetRegData(m.reg, dst)
+        from _3 in SetMemOrRegData(addr, sum)
+        select unit;
+
+    // BSWAP r32 (0F C8+r): 32 ビットレジスタのバイト順を反転する(ModRM なし)。
+    static State<Unit> Bswap_0FC8_CF =>
+        from _1 in SetLog("Bswap_0FC8_CF")
+        from opecode in Opecodes
+        let reg = opecode[1] & 0x07
+        from v in GetRegData32(reg)
+        from _2 in SetRegData32(reg, ((v & 0xFF) << 24) | ((v & 0xFF00) << 8) | ((v >> 8) & 0xFF00) | (v >> 24))
+        select unit;
+
+    // Group9 (0F C7): /1 = CMPXCHG8B m64。EDX:EAX と m64 を比較し、
+    // 一致なら m64 <- ECX:EBX, ZF=1、不一致なら EDX:EAX <- m64, ZF=0。
+    static State<Unit> Group9_0FC7 =>
+        from _1 in SetLog("Group9_0FC7")
+        from m in ModRegRm()
+        from _2 in SetResult(m.reg == 1 && m.mod != 3)
+        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from lo in GetMemOrRegData32(addr)
+        from hi in GetMemOrRegData32((addr.isMem, addr.addr + 4))
+        from cpu in GetCpu
+        from _3 in cpu.eax == lo && cpu.edx == hi
+            ? from _w1 in SetMemOrRegData(addr, cpu.ebx.ToTypeData())
+              from _w2 in SetMemOrRegData((addr.isMem, addr.addr + 4), cpu.ecx.ToTypeData())
+              from _z in _zf.Set(true)
+              select unit
+            : from _r in SetCpu(c => { c.eax = lo; c.edx = hi; return c; })
+              from _z in _zf.Set(false)
+              select unit
         select unit;
 
     // IMUL r, r/m (0F AF): 2オペランド符号付き乗算 r = r * r/m。
@@ -358,15 +485,23 @@ static partial class Program
 
     // BT/BTS/BTR/BTC r/m, r (0F A3/AB/B3/BB): ビット番号はレジスタ reg。
     //   ope2 の bit3-4 で op を選ぶ: A3->BT(0) AB->BTS(1) B3->BTR(2) BB->BTC(3)
+    // メモリオペランドでは「ビット列アドレッシング」: ビット番号(符号付き)を
+    // ワード単位でアドレスへ繰り込む(基底 + (bit>>5)*4)。Linux の set_bit/test_bit が
+    // 32 を超えるビット番号で多用するため、これがないとビットマップ操作が全て壊れる。
     static State<Unit> BitTest_reg =>
         from _1 in SetLog("BitTest_reg")
         from opecode in Opecodes
         let op = (opecode[1] >> 3) & 0x3
         from m in ModRegRm()
-        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from addr0 in GetMemOrRegAddr(m.mod, m.rm)
+        from type in OperandType(true)
+        from bitData in GetRegData(m.reg, type)
+        let bitRaw = type == 1 ? (short)bitData.dw : (int)bitData.dd
+        let addr = addr0.isMem
+            ? (true, (uint)(addr0.addr + (bitRaw >> (type == 1 ? 4 : 5)) * (type == 1 ? 2 : 4)))
+            : addr0
         from data in GetMemOrRegData(addr, true)
-        from bit in GetRegData16(m.reg)
-        from _2 in BitTest(addr, data, bit, op)
+        from _2 in BitTest(addr, data, bitRaw & (type == 1 ? 15 : 31), op)
         select unit;
 
     // Group8 (0F BA): BT/BTS/BTR/BTC r/m, imm8。reg=4..7 で op を選ぶ。
@@ -946,6 +1081,23 @@ static partial class Program
         from _3 in type == 2 ? _ebp.Set(val.dd) : _bp.Set(val.dw)
         select unit;
 
+    // PUSH/POP FS/GS (0F A0/A1/A8/A9)。オペランドサイズ幅で push/pop する。
+    //   A0=PUSH FS, A1=POP FS, A8=PUSH GS, A9=POP GS。セグメント番号 FS=4, GS=5。
+    static State<Unit> PushPopFsGs =>
+        from _1 in SetLog("PushPopFsGs")
+        from opecode in Opecodes
+        let reg = (opecode[1] & 0x08) != 0 ? 5 : 4   // A8/A9=GS, A0/A1=FS
+        let pop = (opecode[1] & 0x01) != 0           // A1/A9=POP
+        from type in OperandType(true)
+        from _2 in pop
+            ? from v in Pop(type)
+              from _w in LoadSReg(reg, (ushort)v.Value())
+              select unit
+            : from v in GetSRegData(reg)
+              from _w in Push(type == 2 ? ((uint)v).ToTypeData() : v.ToTypeData())
+              select unit
+        select unit;
+
     // PUSH Sreg (06/0E/16/1E): opcode>>3 が ES/CS/SS/DS の順のセグメント番号になる。
     static State<Unit> PushSreg =>
         from _1 in SetLog("PushSreg")
@@ -1052,16 +1204,28 @@ static partial class Program
         from _2 in SetMemOrRegData(addr, sreg.ToTypeData())
         select unit;
 
-    // CBW (0x98): AL を符号拡張して AX にする。
+    // CBW/CWDE (0x98): オペランドサイズ 16 なら AL→AX、32 なら AX→EAX の符号拡張。
     static State<Unit> Cbw_98 =>
         from _1 in SetLog("Cbw_98")
-        from _2 in SetCpu(cpu => { cpu.ax = (ushort)(short)(sbyte)cpu.al; return cpu; })
+        from type in OperandType(true)
+        from _2 in SetCpu(cpu =>
+        {
+            if (type == 2) cpu.eax = (uint)(int)(short)cpu.ax;
+            else cpu.ax = (ushort)(short)(sbyte)cpu.al;
+            return cpu;
+        })
         select unit;
 
-    // CWD (0x99): AX を符号拡張して DX:AX にする（DX は符号ビットで埋める）。
+    // CWD/CDQ (0x99): オペランドサイズ 16 なら DX:AX、32 なら EDX:EAX の符号拡張。
     static State<Unit> Cwd_99 =>
         from _1 in SetLog("Cwd_99")
-        from _2 in SetCpu(cpu => { cpu.dx = (ushort)((short)cpu.ax < 0 ? 0xFFFF : 0x0000); return cpu; })
+        from type in OperandType(true)
+        from _2 in SetCpu(cpu =>
+        {
+            if (type == 2) cpu.edx = (int)cpu.eax < 0 ? 0xFFFFFFFF : 0;
+            else cpu.dx = (ushort)((short)cpu.ax < 0 ? 0xFFFF : 0x0000);
+            return cpu;
+        })
         select unit;
 
     // XLAT (0xD7): AL <- [DS:BX + AL]
@@ -1213,6 +1377,30 @@ static partial class Program
         })
         select unit;
 
+    // Group6 (0F 00): SLDT/STR/LLDT/LTR。LDT・タスクスイッチは未使用のため、
+    // LLDT/LTR はセレクタを読み捨て、SLDT/STR は 0 を返す最小実装(CPU 側に状態は持たない)。
+    static State<Unit> Group6_0F00 =>
+        from _1 in SetLog("Group6_0F00")
+        from m in ModRegRm()
+        from _ in Choice(
+            m.reg,
+            (0, SldtStr(m)),   // SLDT
+            (1, SldtStr(m)),   // STR
+            (2, LldtLtr(m)),   // LLDT
+            (3, LldtLtr(m))    // LTR
+        )
+        select unit;
+
+    static State<Unit> SldtStr((int mod, int reg, int rm) m) =>
+        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from _ in SetMemOrRegData(addr, ((ushort)0).ToTypeData())
+        select unit;
+
+    static State<Unit> LldtLtr((int mod, int reg, int rm) m) =>
+        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from _ in GetMemOrRegData16(addr) // セレクタを読み捨てる
+        select unit;
+
     static State<Unit> Group7_0F01 =>
         from _1 in SetLog("Group7_0F01")
         from m in ModRegRm()
@@ -1221,8 +1409,16 @@ static partial class Program
             (0, Sgdt(m.mod, m.rm, idt: false)),
             (1, Sgdt(m.mod, m.rm, idt: true)),
             (2, Lgdt(m.mod, m.rm, idt: false)),
-            (3, Lgdt(m.mod, m.rm, idt: true))
+            (3, Lgdt(m.mod, m.rm, idt: true)),
+            (7, Invlpg(m.mod, m.rm))
         )
+        select unit;
+
+    // INVLPG (0F 01 /7): 指定ページの TLB エントリを無効化する(簡便のため全フラッシュ)。
+    // アドレスはデコードして消費するだけで、変換はしない。
+    static State<Unit> Invlpg(int mod, int rm) =>
+        from addr in GetMemOrRegOffset(mod, rm)
+        from _ in SetCpu((env, cpu) => { env.FlushTlb(); return cpu; })
         select unit;
 
     static State<Unit> Group1_80_81 =>

@@ -37,6 +37,7 @@ static public partial class Ext
             else if (b == 0x3E) pds = true;
             else if (b == 0x64) pfs = true;
             else if (b == 0x65) pgs = true;
+            else if (b == 0xF0) { } // LOCK: 単一CPUなので無視して消費するだけ
             else break;
             len++;
         }
@@ -287,11 +288,13 @@ static public partial class Ext
                 RegSet(typeW, reg, ax);
                 break;
             }
-            case 0x98: // CBW(モナド版と同じく操作サイズによらず AL→AX)
-                cpu.ax = (ushort)(short)(sbyte)cpu.al;
+            case 0x98: // CBW/CWDE(オペランドサイズに従う)
+                if (typeW == 2) cpu.eax = (uint)(int)(short)cpu.ax;
+                else cpu.ax = (ushort)(short)(sbyte)cpu.al;
                 break;
-            case 0x99: // CWD
-                cpu.dx = (ushort)((short)cpu.ax < 0 ? 0xFFFF : 0x0000);
+            case 0x99: // CWD/CDQ
+                if (typeW == 2) cpu.edx = (int)cpu.eax < 0 ? 0xFFFFFFFF : 0;
+                else cpu.dx = (ushort)((short)cpu.ax < 0 ? 0xFFFF : 0x0000);
                 break;
             case 0x9C: // PUSHF(オペランドサイズに従う)
                 FPush(env, cpu, typeW, typeW == 2 ? cpu.eflags : (ushort)cpu.eflags);
@@ -679,21 +682,42 @@ static public partial class Ext
     }
 
     // メモリ書き込み。RAM 外は 1 バイト単位で無視する(EnvSetMemoryDatas と同じ挙動)。
+    // アドレスは線形。ページング有効時は変換し、境界跨ぎは 1 バイトずつ書く。
     static void FWrite8(EmuEnvironment env, uint a, byte v)
     {
+        if (env.PagingOn) a = EnvTranslate(env, a, write: true);
         var m = env.OneMegaMemory_;
         if (a < (uint)m.Length) m[a] = v;
     }
 
     static void FWrite16(EmuEnvironment env, uint a, ushort v)
     {
+        if (env.PagingOn)
+        {
+            if ((a & 0xFFF) >= 0xFFF)
+            {
+                FWrite8(env, a, (byte)v); FWrite8(env, a + 1, (byte)(v >> 8));
+                return;
+            }
+            a = EnvTranslate(env, a, write: true);
+        }
         var m = env.OneMegaMemory_;
         if (a <= (uint)m.Length - 2) { m[a] = (byte)v; m[a + 1] = (byte)(v >> 8); }
-        else { FWrite8(env, a, (byte)v); FWrite8(env, a + 1, (byte)(v >> 8)); }
+        else { FWritePhys8(env, a, (byte)v); FWritePhys8(env, a + 1, (byte)(v >> 8)); }
     }
 
     static void FWrite32(EmuEnvironment env, uint a, uint v)
     {
+        if (env.PagingOn)
+        {
+            if ((a & 0xFFF) > 0xFFC)
+            {
+                FWrite8(env, a, (byte)v); FWrite8(env, a + 1, (byte)(v >> 8));
+                FWrite8(env, a + 2, (byte)(v >> 16)); FWrite8(env, a + 3, (byte)(v >> 24));
+                return;
+            }
+            a = EnvTranslate(env, a, write: true);
+        }
         var m = env.OneMegaMemory_;
         if (a <= (uint)m.Length - 4)
         {
@@ -701,9 +725,16 @@ static public partial class Ext
         }
         else
         {
-            FWrite8(env, a, (byte)v); FWrite8(env, a + 1, (byte)(v >> 8));
-            FWrite8(env, a + 2, (byte)(v >> 16)); FWrite8(env, a + 3, (byte)(v >> 24));
+            FWritePhys8(env, a, (byte)v); FWritePhys8(env, a + 1, (byte)(v >> 8));
+            FWritePhys8(env, a + 2, (byte)(v >> 16)); FWritePhys8(env, a + 3, (byte)(v >> 24));
         }
+    }
+
+    // 物理アドレス直書き(変換済み・RAM 外は無視)。
+    static void FWritePhys8(EmuEnvironment env, uint a, byte v)
+    {
+        var m = env.OneMegaMemory_;
+        if (a < (uint)m.Length) m[a] = v;
     }
 
     // PUSH: SP/ESP を減らしてからスタックトップへ書く(Push と同一)。

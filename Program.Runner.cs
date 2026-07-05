@@ -55,6 +55,8 @@ static partial class Program
             cpu = _cs.setter(init_cpu2)(0xF000);
             count = 0;
         }
+        // CR0.PG/CR3 のミラーを初期化(スナップショット復元後は特に必須)。
+        EnvSyncPaging(env, cpu);
 
         // 実行トレースの粒度:
         //   既定       … 分岐(制御転送)が起きたときだけ CS:EIP を記録(命令ごとより桁違いに軽い)
@@ -72,8 +74,8 @@ static partial class Program
         var swatch = System.Diagnostics.Stopwatch.StartNew();
         long lastReport = count;
         long fastCount = 0;
+        var faultSave = new CPU(); // ページフォルト巻き戻し用のレジスタ退避先
         var step = Execute2;
-        var timerIrq = Interrupt(8);
         long nextIrq = count + IrqPeriod;
         long nextSnapshot = count + SnapshotInterval;
         // 大きめのバッファでトレースの I/O 負荷を抑える。
@@ -86,18 +88,35 @@ static partial class Program
                 sw.WriteLine($"\n--- resumed at instruction {count} ---");
             while (true)
             {
-                // 仮想タイマ割り込み(IRQ0): 一定命令数ごとに、リアルモードかつ IF=1 のとき
-                // INT 08h を注入する。SeaBIOS の handle_08 が BDA のティックカウンタを進める。
-                if (count >= nextIrq && !cpu.pe && cpu.jf)
+                // 仮想タイマ割り込み(IRQ0): 一定命令数ごとに、IF=1 かつ PIC でマスクされて
+                // いなければ、PIC のベクタベース+0 へ配送する(リアルモードは IVT 経由で
+                // SeaBIOS の handle_08 が BDA ティックを進め、プロテクトモードは IDT 経由で
+                // Linux の jiffies が進む)。IDT 未設定(limit 不足)の間は配送しない。
+                if (count >= nextIrq)
                 {
                     nextIrq = count + IrqPeriod;
-                    var irq = timerIrq(env, cpu, default);
-                    if (irq.IsSuccess)
-                        cpu = irq.cpu;
+                    var vec = env.PicMasterBase + 0;
+                    // 配送条件: IF=1 かつ IRQ0 が PIC でマスクされていない。
+                    // プロテクトモードでは、OS が PIC を BIOS 既定(base=0x08)から
+                    // 再プログラム(通常 base=0x20)し、かつ IDT にそのベクタの
+                    // ゲートが用意されるまで待つ。早すぎる注入は #DF 等へ誤配送して暴走する。
+                    var deliverable = cpu.jf && (env.PicMasterMask & 1) == 0 &&
+                        (cpu.pe
+                            ? env.PicMasterBase >= 0x20 && cpu.idt_limit >= (vec + 1) * 8 - 1
+                            : true);
+                    if (deliverable)
+                    {
+                        var irq = Interrupt(vec)(env, cpu, default);
+                        if (irq.IsSuccess)
+                            cpu = irq.cpu;
+                    }
                 }
 
                 var beforeCs = cpu.cs;
                 var beforeEip = cpu.eip;
+                // ページング有効時は、命令の途中でページフォルトが起きうるため
+                // 命令前のレジスタ状態を退避しておき、#PF 配送時に巻き戻す。
+                if (env.PagingOn) cpu.CopyTo(faultSave);
                 try
                 {
                     // まず高速コアで 1 命令実行し、未対応の命令だけモナド版へフォールバックする。
@@ -113,12 +132,30 @@ static partial class Program
                         cpu = r.cpu;
                     }
                 }
+                catch (PageFaultException pf)
+                {
+                    // 命令前状態へ巻き戻してから #PF を IDT 経由で配送する。
+                    // IDT が未整備(プロテクトモードでない/limit 不足)なら停止する。
+                    faultSave.CopyTo(cpu);
+                    if (!cpu.pe || cpu.idt_limit < 14 * 8 + 7)
+                    {
+                        WriteLine($"EXCEPTION at {cpu.cs:x4}:{cpu.eip:x8}: {pf.Message}");
+                        break;
+                    }
+                    var pfr = PageFault(pf.Linear, pf.ErrorCode)(env, cpu, default);
+                    if (!pfr.IsSuccess) { WriteLine($"#PF delivery failed at {cpu.cs:x4}:{cpu.eip:x8}"); break; }
+                    cpu = pfr.cpu;
+                    count++;
+                    env.Tsc = (ulong)count;
+                    continue;
+                }
                 catch (Exception ex)
                 {
                     WriteLine($"EXCEPTION at {cpu.cs:x4}:{cpu.eip:x8}: {ex.GetType().Name}: {ex.Message}");
                     break;
                 }
                 count++;
+                env.Tsc = (ulong)count; // RDTSC の代用カウンタ
                 if (trace)
                 {
                     // 制御転送(分岐/ジャンプ/CALL/RET/割り込み)が起きた命令だけ記録する。
@@ -156,7 +193,15 @@ static partial class Program
         if (!slow && count > 0)
             WriteLine($"fast-path coverage: {fastCount:N0}/{count:N0} ({100.0 * fastCount / count:F2}%)");
         var addr = GetCodeAddr(cpu).addr;
-        WriteLine($"STOP at {cpu.cs:x4}:{cpu.eip:x8} after {count} instructions, opcode: " +
-            string.Join(" ", env.OneMegaMemory_.Skip((int)addr).Take(6).Select(b => b.ToString("x2"))));
+        string opbytes;
+        try
+        {
+            opbytes = string.Join(" ", Enumerable.Range(0, 6).Select(i => EnvGetMemoryData8(env, addr + (uint)i).ToString("x2")));
+        }
+        catch (PageFaultException)
+        {
+            opbytes = "(unmapped)";
+        }
+        WriteLine($"STOP at {cpu.cs:x4}:{cpu.eip:x8} after {count} instructions, opcode: {opbytes}");
     }
 }

@@ -3,12 +3,159 @@ using static Emu86.CPU;
 
 namespace Emu86;
 
+// ページフォルト。Runner が捕捉して #PF(ベクタ 14)を IDT 経由で配送する。
+// errorCode: bit0=保護違反(1)/不在(0)、bit1=書き込み、bit2=ユーザ。
+public class PageFaultException(uint linear, uint errorCode) : Exception
+{
+    public uint Linear => linear;
+    public uint ErrorCode => errorCode;
+    public override string Message =>
+        $"PAGE FAULT lin={linear:x8} err={errorCode:x} " +
+        $"({((errorCode & 1) != 0 ? "protection" : "not-present")}, {((errorCode & 2) != 0 ? "write" : "read")})";
+}
+
 static public partial class Ext
 {
+    /// Paging //////////////////////////////////
+    // CPU の CR0.PG/CR3 をページング変換状態へ反映する(CR 書き込み・スナップショット復元時に呼ぶ)。
+    static public void EnvSyncPaging(EmuEnvironment env, CPU cpu)
+    {
+        env.PagingOn = cpu.pg;
+        env.PaeOn = 0 != (cpu.cr4 & 0x20);
+        env.WpOn = cpu.wp; // CR0.WP: リング0 の読み取り専用ページ書き込みを禁じる
+        // PAE では CR3 は 32 バイト境界の PDPT を指す。
+        env.Cr3Base = cpu.cr3 & (env.PaeOn ? 0xFFFFFFE0 : 0xFFFFF000);
+        env.FlushTlb();
+    }
+
+    // 線形→物理アドレス変換(2レベルページテーブル + 直結 TLB)。
+    // リング0 のブートコードが対象のため、U/S・R/W の保護チェックは行わない(存在チェックのみ)。
+    static uint EnvTranslate(EmuEnvironment env, uint lin, bool write)
+    {
+        var vpn = lin >> 12;
+        var idx = vpn & (EmuEnvironment.TlbSize - 1);
+        if (write)
+        {
+            if (env.TlbTagW[idx] == (0x80000000u | vpn))
+                return env.TlbPhysW[idx] | (lin & 0xFFF);
+        }
+        else if (env.TlbTagR[idx] == (0x80000000u | vpn))
+            return env.TlbPhysR[idx] | (lin & 0xFFF);
+        return EnvWalkPageTable(env, lin, write);
+    }
+
+    static uint EnvWalkPageTable(EmuEnvironment env, uint lin, bool write) =>
+        EnvTlbFill(env, lin, write, env.PaeOn ? EnvWalkPae(env, lin, write) : EnvWalk2Level(env, lin, write));
+
+    // 書き込みが許されるか(CR0.WP=1 のときのみ R/W ビットを尊重する)を検査し、
+    // 違反なら保護フォルトを投げる。許されるなら Accessed/Dirty 更新用のビットを返す。
+    static uint EnvCheckWrite(EmuEnvironment env, uint lin, bool write, bool rw)
+    {
+        if (write && env.WpOn && !rw)
+            throw new PageFaultException(lin, 0b011); // present + write + supervisor
+        return write ? 0x40u : 0u;
+    }
+
+    // 非 PAE: 2 レベル(PDE→PTE、PSE 4MB ページ対応)。ページの物理基底を返す。
+    static uint EnvWalk2Level(EmuEnvironment env, uint lin, bool write)
+    {
+        var pdeAddr = env.Cr3Base + ((lin >> 22) << 2);
+        var pde = RawRead32(env, pdeAddr);
+        if ((pde & 1) == 0)
+            throw new PageFaultException(lin, write ? 2u : 0u);
+
+        if ((pde & 0x80) != 0)
+        {
+            // 4MB ページ(PSE)。Accessed/Dirty を立てる。
+            var dirty = EnvCheckWrite(env, lin, write, (pde & 2) != 0);
+            RawWrite32(env, pdeAddr, pde | 0x20u | dirty);
+            return (pde & 0xFFC00000) | (lin & 0x003FF000);
+        }
+
+        var pteAddr = (pde & 0xFFFFF000) + (((lin >> 12) & 0x3FF) << 2);
+        var pte = RawRead32(env, pteAddr);
+        if ((pte & 1) == 0)
+            throw new PageFaultException(lin, write ? 2u : 0u);
+        // 有効 R/W は PDE と PTE の R/W の論理積。
+        var dirty2 = EnvCheckWrite(env, lin, write, (pde & 2) != 0 && (pte & 2) != 0);
+        // Accessed/Dirty を更新する(Linux のページ管理が参照する)。
+        if ((pde & 0x20) == 0)
+            RawWrite32(env, pdeAddr, pde | 0x20u);
+        var newPte = pte | 0x20u | dirty2;
+        if (newPte != pte)
+            RawWrite32(env, pteAddr, newPte);
+        return pte & 0xFFFFF000;
+    }
+
+    // PAE: 3 レベル(PDPT→PDE→PTE、エントリ 8 バイト、2MB ページ対応)。
+    // RAM は 4GB 未満なので各エントリの上位 32 ビットは無視する。
+    static uint EnvWalkPae(EmuEnvironment env, uint lin, bool write)
+    {
+        var pdpte = RawRead32(env, env.Cr3Base + ((lin >> 30) << 3));
+        if ((pdpte & 1) == 0)
+            throw new PageFaultException(lin, write ? 2u : 0u);
+
+        var pdeAddr = (pdpte & 0xFFFFF000) + (((lin >> 21) & 0x1FF) << 3);
+        var pde = RawRead32(env, pdeAddr);
+        if ((pde & 1) == 0)
+            throw new PageFaultException(lin, write ? 2u : 0u);
+
+        if ((pde & 0x80) != 0)
+        {
+            // 2MB ページ。Accessed/Dirty を立てる。
+            var dirty = EnvCheckWrite(env, lin, write, (pde & 2) != 0);
+            RawWrite32(env, pdeAddr, pde | 0x20u | dirty);
+            return (pde & 0xFFE00000) | (lin & 0x001FF000);
+        }
+
+        var pteAddr = (pde & 0xFFFFF000) + (((lin >> 12) & 0x1FF) << 3);
+        var pte = RawRead32(env, pteAddr);
+        if ((pte & 1) == 0)
+            throw new PageFaultException(lin, write ? 2u : 0u);
+        var dirty2 = EnvCheckWrite(env, lin, write, (pde & 2) != 0 && (pte & 2) != 0);
+        if ((pde & 0x20) == 0)
+            RawWrite32(env, pdeAddr, pde | 0x20u);
+        var newPte = pte | 0x20u | dirty2;
+        if (newPte != pte)
+            RawWrite32(env, pteAddr, newPte);
+        return pte & 0xFFFFF000;
+    }
+
+    static uint EnvTlbFill(EmuEnvironment env, uint lin, bool write, uint physPage)
+    {
+        var vpn = lin >> 12;
+        var idx = vpn & (EmuEnvironment.TlbSize - 1);
+        if (write) { env.TlbTagW[idx] = 0x80000000u | vpn; env.TlbPhysW[idx] = physPage; }
+        else { env.TlbTagR[idx] = 0x80000000u | vpn; env.TlbPhysR[idx] = physPage; }
+        return physPage | (lin & 0xFFF);
+    }
+
+    // ページテーブル自体へのアクセスは物理アドレス直指定(変換しない)。
+    static uint RawRead32(EmuEnvironment env, uint addr) =>
+        addr + 4 <= (uint)env.OneMegaMemory_.Length ? BitConverter.ToUInt32(env.OneMegaMemory_, (int)addr) : 0xFFFFFFFF;
+
+    static void RawWrite32(EmuEnvironment env, uint addr, uint v)
+    {
+        var m = env.OneMegaMemory_;
+        if (addr + 4 <= (uint)m.Length)
+        {
+            m[addr] = (byte)v; m[addr + 1] = (byte)(v >> 8); m[addr + 2] = (byte)(v >> 16); m[addr + 3] = (byte)(v >> 24);
+        }
+    }
+
     /// Mem /////////////////////////////////////
     // ArraySegment を使い、LINQ Skip の O(addr) 走査を避ける。
+    // ページング有効時はページ境界を正しく跨ぐため 1 バイトずつ変換して読む遅延列挙に切り替える。
     static public IEnumerable<byte> EnvGetMemoryDatas(EmuEnvironment env, uint addr) =>
-        new ArraySegment<byte>(env.OneMegaMemory_, (int)addr, env.OneMegaMemory_.Length - (int)addr);
+        env.PagingOn
+            ? EnumerateLinear(env, addr)
+            : new ArraySegment<byte>(env.OneMegaMemory_, (int)addr, env.OneMegaMemory_.Length - (int)addr);
+
+    static IEnumerable<byte> EnumerateLinear(EmuEnvironment env, uint addr)
+    {
+        for (uint i = 0; ; i++)
+            yield return EnvGetMemoryData8(env, addr + i);
+    }
 
     static public IEnumerable<byte> EnvGetMemoryDatas(EmuEnvironment env, ushort segment, ushort offset) =>
         EnvGetMemoryDatas(env, GetMemoryAddr(segment, offset).addr);
@@ -65,14 +212,17 @@ static public partial class Ext
     static public State<Unit> SetRegData32(int reg, uint dd) =>
         SetCpu(EnvSetRegData32(dd)(reg));
 
+    // CR 書き込み後はページング状態を env へ同期する(PG 切替・CR3 変更で TLB もフラッシュ)。
     static public State<Unit> SetCrReg(int reg, uint data) =>
-        Choice(
+        from _1 in Choice(
             reg,
             (0, _cr0),
             (2, _cr2),
             (3, _cr3),
             (4, _cr4)
-        ).Set(data);
+        ).Set(data)
+        from _2 in SetCpu((env, cpu) => { EnvSyncPaging(env, cpu); return cpu; })
+        select Unit.unit;
 
     static public State<Unit> SetRegData(int reg, Data data) =>
         SetCpu(EnvSetRegData(data)(reg));
@@ -283,9 +433,22 @@ static public partial class Ext
             .Sequence()
             .Ignore();
 
-    // INT vector: リアルモード割り込み。FLAGS,CS,IP を push し、IF/TF をクリアして
-    //   IVT(物理 vector*4)から CS:IP を読んでジャンプする。
+    // INT vector: モードに応じて配送する。
+    //   リアルモード      : IVT(物理 vector*4)から CS:IP。FLAGS/CS/IP を 16 ビットで push。
+    //   プロテクトモード  : IDT ゲート(idt_base + vector*8)から CS:EIP。
+    //                       EFLAGS/CS/EIP を 32 ビットで push(リング遷移なし = ring0 のみ対応)。
     static public State<Unit> Interrupt(int vector) =>
+        from cpu0 in GetCpu
+        from _ in cpu0.pe ? InterruptProtected(vector, hasError: false, 0) : InterruptReal(vector)
+        select Unit.unit;
+
+    // #PF(ベクタ 14): CR2 にフォルトアドレスを設定し、エラーコードを push して配送する。
+    static public State<Unit> PageFault(uint linear, uint errorCode) =>
+        from _1 in SetCpu(cpu => { cpu.cr2 = linear; return cpu; })
+        from _2 in InterruptProtected(14, hasError: true, errorCode)
+        select Unit.unit;
+
+    static State<Unit> InterruptReal(int vector) =>
         from fl in GetDataFromCpu(cpu => (ushort)cpu.eflags)
         from _1 in Push16(fl)
         from cs in GetSRegData(1)
@@ -299,14 +462,50 @@ static public partial class Ext
         from _5 in LoadSReg(1, newcs)
         select Unit.unit;
 
-    // IRET: IP, CS, FLAGS を pop して割り込みから復帰する。
+    // IDT ゲート経由の配送。idt_base は線形アドレスだが、この関数はページング変換の
+    // 起点(#PF ハンドラ自身)になりうるため、IDT は恒等マップ域にある前提で読む。
+    static State<Unit> InterruptProtected(int vector, bool hasError, uint errorCode) =>
+        from gateLo in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryData32(env, cpu.idt_base + (uint)vector * 8))
+        from gateHi in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryData32(env, cpu.idt_base + (uint)vector * 8 + 4))
+        let offset = (gateHi & 0xFFFF0000) | (gateLo & 0xFFFF)
+        let sel = (ushort)(gateLo >> 16)
+        let gateType = (int)(gateHi >> 8) & 0xF
+        from fl in GetDataFromCpu(cpu => cpu.eflags)
+        from _1 in Push(fl.ToTypeData())
+        from cs in GetSRegData(1)
+        from _2 in Push(((uint)cs).ToTypeData())
+        from eip0 in GetDataFromCpu(cpu => cpu.eip)
+        from _3 in Push(eip0.ToTypeData())
+        // 一部の例外(#PF 等)は EIP の後ろにエラーコードを push する。
+        from _e in hasError ? Push(errorCode.ToTypeData()) : Unit.unit.ToState()
+        // 割り込みゲート(型 0xE)は IF をクリアする。トラップゲート(0xF)は保つ。
+        from _if in SetCpu(cpu => { if (gateType == 0xE) cpu.jf = false; cpu.tf = false; return cpu; })
+        from _4 in _eip.Set(offset)
+        from _5 in LoadSReg(1, sel)
+        select Unit.unit;
+
+    // IRET: モードに応じて復帰する(リアル/16bit と プロテクト/32bit)。
     static public State<Unit> Iret =>
+        from cpu0 in GetCpu
+        from _ in cpu0.pe && cpu0.code32 ? Iret32 : Iret16
+        select Unit.unit;
+
+    static State<Unit> Iret16 =>
         from ip in Pop16
         from _1 in _ip.Set(ip)
         from cs in Pop16
         from _2 in LoadSReg(1, cs)
         from fl in Pop16
         from _3 in SetCpu(cpu => { cpu.eflags = (cpu.eflags & 0xFFFF0000) | fl; return cpu; })
+        select Unit.unit;
+
+    static State<Unit> Iret32 =>
+        from eip in Pop(2)
+        from cs in Pop(2)
+        from fl in Pop(2)
+        from _1 in _eip.Set(eip.dd)
+        from _2 in LoadSReg(1, (ushort)cs.dd)
+        from _3 in SetCpu(cpu => { cpu.eflags = fl.dd; return cpu; })
         select Unit.unit;
 
     // XLAT: AL <- [DS:BX + AL]（バイト変換テーブル参照）。
@@ -622,6 +821,12 @@ static public partial class Ext
         {
             case 0x71: // CMOS データ
                 return env.Cmos[env.CmosIndex];
+            case 0x21: // PIC マスタ: マスク読み出し
+                return env.PicMasterMask;
+            case 0xA1: // PIC スレーブ: マスク読み出し
+                return env.PicSlaveMask;
+            case 0x20 or 0xA0: // IRR/ISR 読み(キューは持たないため常に 0)
+                return 0;
             case 0x40: // PIT チャネル0
                 // リードバックでステータスがラッチされていれば、まずそれを返す。
                 //   0x36 = OUT=0, NULL COUNT=0(カウント有効), lo/hi アクセス, モード3, 二進
@@ -694,6 +899,27 @@ static public partial class Ext
             case 0x402:
                 System.Console.Error.Write((char)val);
                 break;
+            // 8259 PIC(マスタ 0x20/0x21、スレーブ 0xA0/0xA1)。
+            // ICW1-4 の初期化シーケンスとマスク、ベクタベース(ICW2)のみ追跡する。
+            // EOI(OCW2)は、割り込みキューを持たないため無視してよい。
+            case 0x20:
+                if ((val & 0x10) != 0) { env.PicMasterInit = 1; env.PicMasterIcw4 = (val & 1) != 0; }
+                break;
+            case 0x21:
+                if (env.PicMasterInit == 1) { env.PicMasterBase = val; env.PicMasterInit = 2; }
+                else if (env.PicMasterInit == 2) { env.PicMasterInit = env.PicMasterIcw4 ? 3 : 0; }
+                else if (env.PicMasterInit == 3) { env.PicMasterInit = 0; }
+                else env.PicMasterMask = val;
+                break;
+            case 0xA0:
+                if ((val & 0x10) != 0) { env.PicSlaveInit = 1; env.PicSlaveIcw4 = (val & 1) != 0; }
+                break;
+            case 0xA1:
+                if (env.PicSlaveInit == 1) { env.PicSlaveBase = val; env.PicSlaveInit = 2; }
+                else if (env.PicSlaveInit == 2) { env.PicSlaveInit = env.PicSlaveIcw4 ? 3 : 0; }
+                else if (env.PicSlaveInit == 3) { env.PicSlaveInit = 0; }
+                else env.PicSlaveMask = val;
+                break;
             case 0x1F0 when env.Ata != null:
                 env.Ata.WriteData(1, val);
                 break;
@@ -709,17 +935,44 @@ static public partial class Ext
     // 搭載RAM(RamSize)外へのアクセスは未マップ領域として扱う:
     //   読み出しは 0xFF(オープンバス)、書き込みは無視。MMIO 等をエミュレートしない代わりに
     //   クラッシュを避ける。
+    // アドレス引数は線形アドレス。ページング有効時はここで物理へ変換し、
+    // 複数バイトのアクセスがページ境界を跨ぐ場合は 1 バイトずつ変換する。
     static private void EnvWriteByte(EmuEnvironment env, uint addr, byte val)
     {
+        if (env.PagingOn) addr = EnvTranslate(env, addr, write: true);
         if (addr < (uint)env.OneMegaMemory_.Length) env.OneMegaMemory_[addr] = val;
     }
 
-    static public byte EnvGetMemoryData8(EmuEnvironment env, uint addr) =>
-        addr < (uint)env.OneMegaMemory_.Length ? env.OneMegaMemory_[addr] : (byte)0xFF;
-    static private ushort EnvGetMemoryData16(EmuEnvironment env, uint addr) =>
-        addr + 2 <= (uint)env.OneMegaMemory_.Length ? BitConverter.ToUInt16(env.OneMegaMemory_, (int)addr) : (ushort)0xFFFF;
-    static private uint EnvGetMemoryData32(EmuEnvironment env, uint addr) =>
-        addr + 4 <= (uint)env.OneMegaMemory_.Length ? BitConverter.ToUInt32(env.OneMegaMemory_, (int)addr) : 0xFFFFFFFF;
+    static public byte EnvGetMemoryData8(EmuEnvironment env, uint addr)
+    {
+        if (env.PagingOn) addr = EnvTranslate(env, addr, write: false);
+        return addr < (uint)env.OneMegaMemory_.Length ? env.OneMegaMemory_[addr] : (byte)0xFF;
+    }
+
+    static private ushort EnvGetMemoryData16(EmuEnvironment env, uint addr)
+    {
+        if (env.PagingOn)
+        {
+            if ((addr & 0xFFF) >= 0xFFF)
+                return (ushort)(EnvGetMemoryData8(env, addr) | (EnvGetMemoryData8(env, addr + 1) << 8));
+            addr = EnvTranslate(env, addr, write: false);
+        }
+        return addr + 2 <= (uint)env.OneMegaMemory_.Length ? BitConverter.ToUInt16(env.OneMegaMemory_, (int)addr) : (ushort)0xFFFF;
+    }
+
+    static private uint EnvGetMemoryData32(EmuEnvironment env, uint addr)
+    {
+        if (env.PagingOn)
+        {
+            if ((addr & 0xFFF) > 0xFFC)
+                return (uint)(EnvGetMemoryData8(env, addr)
+                    | (EnvGetMemoryData8(env, addr + 1) << 8)
+                    | (EnvGetMemoryData8(env, addr + 2) << 16)
+                    | (EnvGetMemoryData8(env, addr + 3) << 24));
+            addr = EnvTranslate(env, addr, write: false);
+        }
+        return addr + 4 <= (uint)env.OneMegaMemory_.Length ? BitConverter.ToUInt32(env.OneMegaMemory_, (int)addr) : 0xFFFFFFFF;
+    }
 }
 
 public class EmuEnvironment
@@ -787,6 +1040,40 @@ public class EmuEnvironment
     // 仮想 8254 PIT(チャネル0)。実時間を持たないため、カウンタをラッチのたびに
     // 減算して単調に時刻が進むようにする。SeaBIOS は下向きカウンタからラップを
     // 検出して 32bit の単調時刻を作るので、これで遅延ループが完了する。
+    // ページング変換状態(CPU の CR0.PG/CR3 のミラー。EnvSyncPaging で同期)。
+    // TLB は直結マップ(tag = 0x80000000 | vpn、0 は無効)。読み取り用と、
+    // Dirty ビット設定済みを保証する書き込み用を分けて持つ。
+    // いずれも過渡状態なのでスナップショットには保存しない(復元時に再同期される)。
+    public bool PagingOn;
+    public bool PaeOn;
+    public bool WpOn;
+    public uint Cr3Base;
+
+    // タイムスタンプカウンタの代用(Runner が毎命令、実行済み命令数を書き込む)。
+    public ulong Tsc;
+
+    // MSR の汎用ストア(RDMSR/WRMSR)。未書き込みは 0 として読める。
+    public Dictionary<uint, ulong> Msrs = new();
+
+    // デバッグレジスタ DR0-DR7(保持のみ。ブレークポイント機能はなし)。
+    // 過渡的な診断用途のためスナップショットには保存しない。
+    public uint[] Dr = new uint[8];
+
+    // 8259 PIC の状態。ベクタベース(ICW2)とマスク(OCW1)のみ。
+    // BIOS 既定はマスタ=0x08(タイマは INT 08h)。Linux は再プログラムする。
+    public byte PicMasterBase = 0x08, PicSlaveBase = 0x70;
+    public byte PicMasterMask, PicSlaveMask;
+    public int PicMasterInit, PicSlaveInit;   // ICW シーケンス位置(0=通常)
+    public bool PicMasterIcw4, PicSlaveIcw4;
+    public const int TlbSize = 4096;
+    public uint[] TlbTagR = new uint[TlbSize], TlbPhysR = new uint[TlbSize];
+    public uint[] TlbTagW = new uint[TlbSize], TlbPhysW = new uint[TlbSize];
+    public void FlushTlb()
+    {
+        Array.Clear(TlbTagR);
+        Array.Clear(TlbTagW);
+    }
+
     public ushort PitCounter = 0xFFFF;
     public ushort PitLatched = 0xFFFF;
     public int PitReadPhase; // 0=下位バイト, 1=上位バイト
