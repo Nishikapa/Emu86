@@ -379,14 +379,25 @@ static partial class Program
         from _2 in BitTest(addr, data, imm, m.reg & 0x3)
         select unit;
 
-    // BSF/BSR r16, r/m16 (0F BC/BD): ビットスキャン。BC=前方(最下位), BD=後方(最上位)。
+    // BSF/BSR r, r/m (0F BC/BD): ビットスキャン。BC=前方(最下位), BD=後方(最上位)。
     static State<Unit> BitScan_0FBC_BD =>
         from _1 in SetLog("BitScan_0FBC_BD")
         from opecode in Opecodes
         let forward = opecode[1] == 0xBC
         from m in ModRegRm()
         from src in GetMemOrRegData(m.mod, m.rm, true)
-        from _2 in BitScan(m.reg, src.data.dw, forward)
+        from _2 in BitScan(m.reg, src.data, forward)
+        select unit;
+
+    // CMOVcc r, r/m (0F 40-4F): 条件成立時のみ r/m を reg へ転送する。
+    static State<Unit> Cmov_0F40_4F =>
+        from _1 in SetLog("Cmov_0F40_4F")
+        from opecode in Opecodes
+        let cond = opecode[1] & 0xF
+        from m in ModRegRm()
+        from src in GetMemOrRegData(m.mod, m.rm, true)
+        from f in Jcc(cond)
+        from _2 in f ? SetRegData(m.reg, src.data) : unit.ToState()
         select unit;
 
     // SETcc r/m8 (0F 90-9F): 条件成立なら 1、不成立なら 0 を r/m8 に書く。
@@ -694,10 +705,30 @@ static partial class Program
             m.reg,
             (0, IncData(addr, data)),
             (1, DecData(addr, data)),
-            (2, Call_rm(data)),         // 近傍間接 CALL
-            (4, JmpTo(data)),           // 近傍間接 JMP
-            (6, Push(data))             // PUSH r/m
+            (2, Call_rm(data)),               // 近傍間接 CALL
+            (3, CallFar_rm(addr, data.type)), // far 間接 CALL m16:16/m16:32
+            (4, JmpTo(data)),                 // 近傍間接 JMP
+            (5, JmpFar_rm(addr, data.type)),  // far 間接 JMP m16:16/m16:32
+            (6, Push(data))                   // PUSH r/m
         )
+        select unit;
+
+    // far 間接 JMP: メモリから offset(16/32bit) と selector(16bit) を読み、CS:EIP を切り替える。
+    // CS のロードは LoadSReg 経由(プロテクトモードでは GDT 記述子から基底/D ビットを反映)。
+    static State<Unit> JmpFar_rm(MemAddr addr, int type) =>
+        from offset in type == 2 ? GetMemOrRegData32(addr) : GetMemOrRegData16(addr).Select(dw => (uint)dw)
+        from sel in GetMemOrRegData16((addr.isMem, addr.addr + (uint)(type == 2 ? 4 : 2)))
+        from _1 in _eip.Set(offset)
+        from _2 in LoadSReg(1, sel)
+        select unit;
+
+    // far 間接 CALL: CS と IP/EIP をオペランドサイズ幅で push してから far ジャンプする。
+    static State<Unit> CallFar_rm(MemAddr addr, int type) =>
+        from cs in GetSRegData(1)
+        from _1 in type == 2 ? Push(((uint)cs).ToTypeData()) : Push16(cs)
+        from cpu in GetCpu
+        from _2 in type == 2 ? Push(cpu.eip.ToTypeData()) : Push16(cpu.ip)
+        from _3 in JmpFar_rm(addr, type)
         select unit;
 
     // 近傍間接 CALL: 戻り番地(現在のIP/EIP)を push してから IP/EIP を target に設定する。
@@ -705,6 +736,36 @@ static partial class Program
         from cpu in GetCpu
         from _1 in Push((2 == target.type) ? cpu.eip.ToTypeData() : cpu.ip.ToTypeData())
         from _2 in JmpTo(target)
+        select unit;
+
+    // x87 FPU エスケープ (0xD8-0xDF)。FPU 存在検出に必要な最小限のみ実装し、
+    // それ以外の FPU 命令は失敗させて STOP 診断に載せる(演算スタックは未実装)。
+    static State<Unit> Fpu_D8_DF =>
+        from _1 in SetLog("Fpu_D8_DF")
+        from opecode in Opecodes
+        from m in ModRegRm()
+        from _2 in FpuOp(opecode[0], m)
+        select unit;
+
+    static State<Unit> FpuOp(byte op, (int mod, int reg, int rm) m) =>
+        (op, m.mod, m.reg, m.rm) switch
+        {
+            (0xDB, 3, 4, 3) => SetCpu(c => { c.fpu_cw = 0x037F; c.fpu_sw = 0; return c; }), // FNINIT
+            (0xDF, 3, 4, 0) => SetCpu(c => { c.ax = c.fpu_sw; return c; }),                 // FNSTSW AX
+            (0xD9, not 3, 7, _) => FpuStore16(m, c => c.fpu_cw),                            // FNSTCW m16
+            (0xDD, not 3, 7, _) => FpuStore16(m, c => c.fpu_sw),                            // FNSTSW m16
+            (0xD9, not 3, 5, _) =>                                                          // FLDCW m16
+                from addr in GetMemOrRegAddr(m.mod, m.rm)
+                from v in GetMemOrRegData16(addr)
+                from _ in SetCpu(c => { c.fpu_cw = v; return c; })
+                select unit,
+            _ => SetResult(false),
+        };
+
+    static State<Unit> FpuStore16((int mod, int reg, int rm) m, Func<CPU, ushort> get) =>
+        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from cpu in GetCpu
+        from _ in SetMemOrRegData(addr, get(cpu).ToTypeData())
         select unit;
 
     // INT imm8 (0xCD): 指定ベクタへソフトウェア割り込み。

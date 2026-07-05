@@ -34,6 +34,11 @@ static partial class Program
             return;
         }
 
+        // --snapshot <path> … スナップショットの保存/再開ファイルを指定(既定 snapshot.bin)
+        var snapIdx = Array.IndexOf(args, "--snapshot");
+        if (snapIdx >= 0 && snapIdx + 1 < args.Length)
+            SnapshotPath = args[snapIdx + 1];
+
         var env = new EmuEnvironment();
 
         long count;

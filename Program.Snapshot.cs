@@ -5,11 +5,14 @@ static partial class Program
     // スナップショット(CPU + メモリ + I/O 状態)の保存先と自動保存間隔(命令数)。
     // 1命令ずつ解釈実行するため長時間のブートは避けられないので、
     // "--resume" で前回の続きから再開できるようにする。
-    const string SnapshotPath = "snapshot.bin";
+    // "--snapshot <path>" で保存先を切り替えられる(ブート用チェックポイントと
+    // 回帰テスト用を分離し、検証済み区間を再実行せずに済ませるため)。
+    // 拡張子は .snap に統一する(.bin は BIOS/ディスクイメージ系と紛らわしいため)。
+    static string SnapshotPath = "snapshot.snap";
     // 高速コア(約7M命令/秒)前提で、保存オーバーヘッドが走行時間の数%に収まる間隔にする。
     const long SnapshotInterval = 100_000_000;
     const string SnapshotMagic = "EMU86SNP";
-    const int SnapshotVersion = 1;
+    const int SnapshotVersion = 2; // v2: CPU に cr4 を追加
 
     static void SaveSnapshot(long count, CPU cpu, EmuEnvironment env)
     {

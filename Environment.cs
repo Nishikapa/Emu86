@@ -70,7 +70,8 @@ static public partial class Ext
             reg,
             (0, _cr0),
             (2, _cr2),
-            (3, _cr3)
+            (3, _cr3),
+            (4, _cr4)
         ).Set(data);
 
     static public State<Unit> SetRegData(int reg, Data data) =>
@@ -234,27 +235,27 @@ static public partial class Ext
         return data.type == 1 ? ((ushort)v).ToTypeData() : v.ToTypeData();
     }
 
-    // BSF/BSR: r/m16 内のセットビット位置を求めて reg へ書く。
+    // BSF/BSR: r/m 内のセットビット位置を求めて reg へ書く(実効オペランドサイズに従う)。
     //   forward=true で最下位(BSF)、false で最上位(BSR)。
     //   ソースが 0 なら ZF=1 とし、結果は書き込まない（未定義）。
-    static public State<Unit> BitScan(int reg, ushort src, bool forward) =>
-        src == 0
+    static public State<Unit> BitScan(int reg, Data src, bool forward) =>
+        src.Value() == 0
             ? _zf.Set(true)
             : from _z in _zf.Set(false)
-              from _w in SetRegData16(reg, (ushort)BitScanIndex(src, forward))
+              from _w in SetRegData(reg, ((uint)BitScanIndex(src.Value(), forward, Bits(src.type))).ToTypeData(src.type))
               select Unit.unit;
 
-    static int BitScanIndex(ushort src, bool forward)
+    static int BitScanIndex(uint src, bool forward, int bits)
     {
         if (forward)
         {
-            for (int i = 0; i < 16; i++)
-                if ((src & (1 << i)) != 0) return i;
+            for (int i = 0; i < bits; i++)
+                if ((src & (1u << i)) != 0) return i;
         }
         else
         {
-            for (int i = 15; i >= 0; i--)
-                if ((src & (1 << i)) != 0) return i;
+            for (int i = bits - 1; i >= 0; i--)
+                if ((src & (1u << i)) != 0) return i;
         }
         return 0;
     }
@@ -380,7 +381,8 @@ static public partial class Ext
             reg,
             (0, Get(_cr0)),
             (2, Get(_cr2)),
-            (3, Get(_cr3))
+            (3, Get(_cr3)),
+            (4, Get(_cr4))
         );
 
     // GDT からセグメント記述子を読み、基底アドレスと D/B ビットを返す。
@@ -620,7 +622,16 @@ static public partial class Ext
         {
             case 0x71: // CMOS データ
                 return env.Cmos[env.CmosIndex];
-            case 0x40: // PIT チャネル0: ラッチ済み値を下位→上位の順に返す
+            case 0x40: // PIT チャネル0
+                // リードバックでステータスがラッチされていれば、まずそれを返す。
+                //   0x36 = OUT=0, NULL COUNT=0(カウント有効), lo/hi アクセス, モード3, 二進
+                // Linux の i8254 エントロピー読み(KASLR)は NULL COUNT ビットが
+                // 落ちるまでポーリングするため、これがないと無限ループになる。
+                if (env.PitStatusPending)
+                {
+                    env.PitStatusPending = false;
+                    return 0x36;
+                }
                 byte b = (byte)(env.PitReadPhase == 0 ? env.PitLatched : env.PitLatched >> 8);
                 env.PitReadPhase ^= 1;
                 return b;
@@ -667,13 +678,18 @@ static public partial class Ext
                 env.Cmos[env.CmosIndex] = val;
                 break;
             case 0x43: // PIT コントロール: ラッチ/リードバックでカウンタを捕捉し時刻を進める
-                bool latch = (val & 0x30) == 0 || (val & 0xC0) == 0xC0;
+                //   カウンタラッチ  : bit5-4 = 00
+                //   リードバック    : bit7-6 = 11。bit5=0 でカウント、bit4=0 でステータスをラッチ
+                bool readback = (val & 0xC0) == 0xC0;
+                bool latch = (val & 0x30) == 0 || (readback && (val & 0x20) == 0);
                 if (latch)
                 {
                     env.PitLatched = env.PitCounter;
                     env.PitReadPhase = 0;
                     env.PitCounter -= 0x100; // 経過時間の代用として下向きに減算する
                 }
+                if (readback && (val & 0x10) == 0)
+                    env.PitStatusPending = true;
                 break;
             case 0x402:
                 System.Console.Error.Write((char)val);
@@ -774,6 +790,10 @@ public class EmuEnvironment
     public ushort PitCounter = 0xFFFF;
     public ushort PitLatched = 0xFFFF;
     public int PitReadPhase; // 0=下位バイト, 1=上位バイト
+    // リードバックでラッチされたステータスバイトが未読かどうか。
+    // 意図的にスナップショットへは保存しない(過渡状態であり、保存形式を変えると
+    // 既存チェックポイントから --resume できなくなるため。再開後は次の OUT 0x43 で再設定される)。
+    public bool PitStatusPending;
     private static readonly string[] sourceArray = ["sample.vhdx", "sample.vhd"];
 
     // スナップショット保存/復元。ディスクの中身(DiskImage)は書き込みのたびに
