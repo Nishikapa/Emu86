@@ -85,6 +85,9 @@ static partial class Program
         uint breakEip = 0;
         var beIdx = Array.IndexOf(args, "--breakeip");
         if (beIdx >= 0 && beIdx + 1 < args.Length) breakEip = Convert.ToUInt32(args[beIdx + 1], 16);
+        uint breakEax = 0; bool hasBreakEax = false;
+        var bxIdx = Array.IndexOf(args, "--breakeax");
+        if (bxIdx >= 0 && bxIdx + 1 < args.Length) { breakEax = Convert.ToUInt32(args[bxIdx + 1], 16); hasBreakEax = true; }
         if (args.Contains("--intlog")) env.IntLog = [];
         var wlogIdx = Array.IndexOf(args, "--wlog");
         if (wlogIdx >= 0 && wlogIdx + 2 < args.Length)
@@ -149,7 +152,7 @@ static partial class Program
                 var beforeCs = cpu.cs;
                 var beforeEip = cpu.eip;
                 env.CurEip = cpu.eip; // 書き込みログの帰属用
-                if (breakEip != 0 && cpu.eip == breakEip)
+                if (breakEip != 0 && cpu.eip == breakEip && (!hasBreakEax || cpu.eax == breakEax))
                 {
                     WriteLine($"BREAKEIP {cpu.eip:x8}: eax={cpu.eax:x8} ecx={cpu.ecx:x8} edx={cpu.edx:x8} ebx={cpu.ebx:x8} esi={cpu.esi:x8} edi={cpu.edi:x8} ebp={cpu.ebp:x8} esp={cpu.esp:x8}");
                     var sb2 = cpu.ss_base;
