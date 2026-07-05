@@ -465,6 +465,12 @@ static public partial class Ext
     // IDT ゲート経由の配送。idt_base は線形アドレスだが、この関数はページング変換の
     // 起点(#PF ハンドラ自身)になりうるため、IDT は恒等マップ域にある前提で読む。
     static State<Unit> InterruptProtected(int vector, bool hasError, uint errorCode) =>
+        from _log in GetDataFromEnvCpu((env, cpu) =>
+        {
+            if (env.IntLog != null && cpu.pg)
+                env.IntLog.Add($"vec={vector:x2} err={(hasError ? errorCode.ToString("x") : "-")} at cs:eip={cpu.cs:x4}:{cpu.eip:x8} esp={cpu.esp:x8}");
+            return Unit.unit;
+        })
         from gateLo in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryData32(env, cpu.idt_base + (uint)vector * 8))
         from gateHi in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryData32(env, cpu.idt_base + (uint)vector * 8 + 4))
         let offset = (gateHi & 0xFFFF0000) | (gateLo & 0xFFFF)
@@ -825,8 +831,27 @@ static public partial class Ext
                 return env.PicMasterMask;
             case 0xA1: // PIC スレーブ: マスク読み出し
                 return env.PicSlaveMask;
-            case 0x20 or 0xA0: // IRR/ISR 読み(キューは持たないため常に 0)
-                return 0;
+            case 0x20: // マスタ IRR/ISR 読み(in-service ビットを返す)
+                return env.PicMasterIsr;
+            case 0xA0: // スレーブ IRR/ISR 読み
+                return env.PicSlaveIsr;
+            case 0x61: // システム制御ポートB(NMI/PIT ch2 ゲート・スピーカ)
+                // bit4 = リフレッシュタイマ(読むたびにトグルさせて DRAM リフレッシュ
+                //         監視のディレイループを進める)。
+                // bit5 = PIT ch2 の OUT。ゲート有効かつ ch2 がプログラム済みなら、
+                //         数回読んだ後に High にして TSC 校正のウェイトを抜けさせる。
+                env.Port61Refresh ^= 0x10;
+                byte out2 = 0;
+                if ((env.Port61 & 1) != 0 && env.Pit2Armed)
+                {
+                    if (env.Pit2Wait > 0) env.Pit2Wait--;
+                    else out2 = 0x20;
+                }
+                return (byte)((env.Port61 & 0x0F) | env.Port61Refresh | out2);
+            case 0x42: // PIT チャネル2 データ(読み出しはラッチ値を返す)
+                byte c2 = (byte)(env.Pit2ReadPhase == 0 ? env.Pit2Counter : env.Pit2Counter >> 8);
+                env.Pit2ReadPhase ^= 1;
+                return c2;
             case 0x40: // PIT チャネル0
                 // リードバックでステータスがラッチされていれば、まずそれを返す。
                 //   0x36 = OUT=0, NULL COUNT=0(カウント有効), lo/hi アクセス, モード3, 二進
@@ -885,6 +910,14 @@ static public partial class Ext
             case 0x43: // PIT コントロール: ラッチ/リードバックでカウンタを捕捉し時刻を進める
                 //   カウンタラッチ  : bit5-4 = 00
                 //   リードバック    : bit7-6 = 11。bit5=0 でカウント、bit4=0 でステータスをラッチ
+                int channel = (val >> 6) & 3;
+                if (channel == 2)
+                {
+                    // ch2 のプログラム開始。lo/hi 書き込みの位相をリセットする。
+                    env.Pit2WritePhase = 0;
+                    env.Pit2Armed = false;
+                    break;
+                }
                 bool readback = (val & 0xC0) == 0xC0;
                 bool latch = (val & 0x30) == 0 || (readback && (val & 0x20) == 0);
                 if (latch)
@@ -896,6 +929,20 @@ static public partial class Ext
                 if (readback && (val & 0x10) == 0)
                     env.PitStatusPending = true;
                 break;
+            case 0x42: // PIT チャネル2 カウント(lo→hi)。全部書けたら「短時間で満了」として武装する。
+                if (env.Pit2WritePhase == 0) { env.Pit2Counter = val; env.Pit2WritePhase = 1; }
+                else
+                {
+                    env.Pit2Counter = (ushort)((env.Pit2Counter & 0xFF) | (val << 8));
+                    env.Pit2WritePhase = 0;
+                    env.Pit2Armed = true;
+                    env.Pit2Wait = 2; // 数回 0x61 を読んだら OUT2 を立てる(ウェイトを抜けさせる)
+                }
+                break;
+            case 0x61: // システム制御ポートB。低位ビット(ゲート/スピーカ)を保持する。
+                env.Port61 = val;
+                if ((val & 1) == 0) env.Pit2Armed = false; // ゲート断で武装解除
+                break;
             case 0x402:
                 System.Console.Error.Write((char)val);
                 break;
@@ -904,6 +951,12 @@ static public partial class Ext
             // EOI(OCW2)は、割り込みキューを持たないため無視してよい。
             case 0x20:
                 if ((val & 0x10) != 0) { env.PicMasterInit = 1; env.PicMasterIcw4 = (val & 1) != 0; }
+                else if ((val & 0x08) == 0) // OCW2
+                {
+                    // EOI(非特定 0x20 / 特定 0x60|irq)で in-service を降ろす。
+                    if ((val & 0x20) != 0)
+                        env.PicMasterIsr = (val & 0x40) != 0 ? (byte)(env.PicMasterIsr & ~(1 << (val & 7))) : (byte)0;
+                }
                 break;
             case 0x21:
                 if (env.PicMasterInit == 1) { env.PicMasterBase = val; env.PicMasterInit = 2; }
@@ -913,6 +966,11 @@ static public partial class Ext
                 break;
             case 0xA0:
                 if ((val & 0x10) != 0) { env.PicSlaveInit = 1; env.PicSlaveIcw4 = (val & 1) != 0; }
+                else if ((val & 0x08) == 0) // OCW2
+                {
+                    if ((val & 0x20) != 0)
+                        env.PicSlaveIsr = (val & 0x40) != 0 ? (byte)(env.PicSlaveIsr & ~(1 << (val & 7))) : (byte)0;
+                }
                 break;
             case 0xA1:
                 if (env.PicSlaveInit == 1) { env.PicSlaveBase = val; env.PicSlaveInit = 2; }
@@ -940,6 +998,9 @@ static public partial class Ext
     static private void EnvWriteByte(EmuEnvironment env, uint addr, byte val)
     {
         if (env.PagingOn) addr = EnvTranslate(env, addr, write: true);
+        if (env.PagingOn && addr >= env.WatchLo && addr < env.WatchHi) env.WatchTriggered = true;
+        if (env.WriteLog != null && addr >= env.WLogLo && addr < env.WLogHi)
+            env.WriteLog.Add($"{env.CurEip:x8}: [{addr:x8}]={val:x2}");
         if (addr < (uint)env.OneMegaMemory_.Length) env.OneMegaMemory_[addr] = val;
     }
 
@@ -1049,6 +1110,19 @@ public class EmuEnvironment
     public bool WpOn;
     public uint Cr3Base;
 
+    // 物理アドレス書き込みウォッチポイント(デバッグ用)。WatchLo<=phys<WatchHi の
+    // 書き込みで WatchTriggered を立て、Runner が原因命令の EIP を出力する。
+    public uint WatchLo, WatchHi;
+    public bool WatchTriggered;
+
+    // プロテクトモード(ページング有効)割り込み配送のログ(デバッグ用、null で無効)。
+    public System.Collections.Generic.List<string> IntLog;
+
+    // 物理アドレス範囲への書き込みを値付きでログする(デバッグ用)。
+    public uint WLogLo, WLogHi;
+    public uint CurEip; // Runner が命令実行前に現在 EIP をセットする(ログの帰属用)
+    public System.Collections.Generic.List<string> WriteLog;
+
     // タイムスタンプカウンタの代用(Runner が毎命令、実行済み命令数を書き込む)。
     public ulong Tsc;
 
@@ -1065,6 +1139,9 @@ public class EmuEnvironment
     public byte PicMasterMask, PicSlaveMask;
     public int PicMasterInit, PicSlaveInit;   // ICW シーケンス位置(0=通常)
     public bool PicMasterIcw4, PicSlaveIcw4;
+    // in-service ビット。IRQ 配送で立ち、ハンドラの EOI(OCW2)で降りる。
+    // これが立っている間は同じ IRQ を再配送しない(多重ネスト=割り込みストーム防止)。
+    public byte PicMasterIsr, PicSlaveIsr;
     public const int TlbSize = 4096;
     public uint[] TlbTagR = new uint[TlbSize], TlbPhysR = new uint[TlbSize];
     public uint[] TlbTagW = new uint[TlbSize], TlbPhysW = new uint[TlbSize];
@@ -1077,6 +1154,17 @@ public class EmuEnvironment
     public ushort PitCounter = 0xFFFF;
     public ushort PitLatched = 0xFFFF;
     public int PitReadPhase; // 0=下位バイト, 1=上位バイト
+
+    // PIT チャネル2 + システム制御ポートB(0x61)。TSC/遅延校正で使われる。
+    // 実時間を持たないため、ゲート有効かつ ch2 プログラム済みなら数回の 0x61 読みで
+    // OUT2(bit5)を立てて校正ウェイトを終わらせる。値の正確さより「ループが抜けること」を優先。
+    public byte Port61;          // 0x61 の書き込み値(bit0=ch2ゲート, bit1=スピーカ)
+    public byte Port61Refresh;   // bit4 のリフレッシュトグル
+    public ushort Pit2Counter = 0xFFFF;
+    public int Pit2WritePhase;   // 0x42 書き込み位相(0=lo,1=hi)
+    public int Pit2ReadPhase;    // 0x42 読み出し位相
+    public bool Pit2Armed;       // ch2 がプログラムされゲート有効
+    public int Pit2Wait;         // OUT2 を立てるまでの残り 0x61 読み回数
     // リードバックでラッチされたステータスバイトが未読かどうか。
     // 意図的にスナップショットへは保存しない(過渡状態であり、保存形式を変えると
     // 既存チェックポイントから --resume できなくなるため。再開後は次の OUT 0x43 で再設定される)。

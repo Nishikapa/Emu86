@@ -75,6 +75,35 @@ static partial class Program
         long lastReport = count;
         long fastCount = 0;
         var faultSave = new CPU(); // ページフォルト巻き戻し用のレジスタ退避先
+        // 直近の分岐履歴(制御転送のみ)のリングバッファ。STOP 時に原因追跡用に出力する。
+        // --brhist 指定時のみ記録する(通常実行のオーバーヘッドを避ける)。
+        var brHist = args.Contains("--brhist");
+        var espTrap = args.Contains("--esptrap");
+        uint beforeEsp = 0;
+        var noirq = args.Contains("--noirq");
+        var pfTrap = args.Contains("--pftrap");
+        uint breakEip = 0;
+        var beIdx = Array.IndexOf(args, "--breakeip");
+        if (beIdx >= 0 && beIdx + 1 < args.Length) breakEip = Convert.ToUInt32(args[beIdx + 1], 16);
+        if (args.Contains("--intlog")) env.IntLog = [];
+        var wlogIdx = Array.IndexOf(args, "--wlog");
+        if (wlogIdx >= 0 && wlogIdx + 2 < args.Length)
+        {
+            env.WLogLo = Convert.ToUInt32(args[wlogIdx + 1], 16);
+            env.WLogHi = Convert.ToUInt32(args[wlogIdx + 2], 16);
+            env.WriteLog = [];
+        }
+        // --watch <physLo> <physHi>: 物理アドレス範囲への書き込みで停止し、犯人命令を出力する。
+        var watchIdx = Array.IndexOf(args, "--watch");
+        if (watchIdx >= 0 && watchIdx + 2 < args.Length)
+        {
+            env.WatchLo = Convert.ToUInt32(args[watchIdx + 1], 16);
+            env.WatchHi = Convert.ToUInt32(args[watchIdx + 2], 16);
+        }
+        const int BrN = 64;
+        var brFrom = new (ushort cs, uint eip)[BrN];
+        var brTo = new (ushort cs, uint eip)[BrN];
+        var brIdx = 0;
         var step = Execute2;
         long nextIrq = count + IrqPeriod;
         long nextSnapshot = count + SnapshotInterval;
@@ -92,15 +121,17 @@ static partial class Program
                 // いなければ、PIC のベクタベース+0 へ配送する(リアルモードは IVT 経由で
                 // SeaBIOS の handle_08 が BDA ティックを進め、プロテクトモードは IDT 経由で
                 // Linux の jiffies が進む)。IDT 未設定(limit 不足)の間は配送しない。
-                if (count >= nextIrq)
+                if (!noirq && count >= nextIrq)
                 {
                     nextIrq = count + IrqPeriod;
                     var vec = env.PicMasterBase + 0;
-                    // 配送条件: IF=1 かつ IRQ0 が PIC でマスクされていない。
-                    // プロテクトモードでは、OS が PIC を BIOS 既定(base=0x08)から
-                    // 再プログラム(通常 base=0x20)し、かつ IDT にそのベクタの
-                    // ゲートが用意されるまで待つ。早すぎる注入は #DF 等へ誤配送して暴走する。
-                    var deliverable = cpu.jf && (env.PicMasterMask & 1) == 0 &&
+                    // 配送条件: IF=1、IRQ0 が PIC でマスクされておらず、かつ前回の IRQ0 が
+                    // まだ処理中(in-service)でないこと。in-service は実機 8259 と同じく EOI で降りる。
+                    // これがないとハンドラ完了前に次を注入して多重ネストし、SAVE_ALL の push が
+                    // スタックを .text へ押し下げてコードを破壊する(割り込みストーム)。
+                    // プロテクトモードでは OS が PIC を再プログラム(base>=0x20)し IDT ゲートが
+                    // 用意されるまで待つ。
+                    var deliverable = cpu.jf && (env.PicMasterMask & 1) == 0 && (env.PicMasterIsr & 1) == 0 &&
                         (cpu.pe
                             ? env.PicMasterBase >= 0x20 && cpu.idt_limit >= (vec + 1) * 8 - 1
                             : true);
@@ -108,12 +139,29 @@ static partial class Program
                     {
                         var irq = Interrupt(vec)(env, cpu, default);
                         if (irq.IsSuccess)
+                        {
                             cpu = irq.cpu;
+                            env.PicMasterIsr |= 1; // IRQ0 を in-service にする(EOI まで再配送しない)
+                        }
                     }
                 }
 
                 var beforeCs = cpu.cs;
                 var beforeEip = cpu.eip;
+                env.CurEip = cpu.eip; // 書き込みログの帰属用
+                if (breakEip != 0 && cpu.eip == breakEip)
+                {
+                    WriteLine($"BREAKEIP {cpu.eip:x8}: eax={cpu.eax:x8} ecx={cpu.ecx:x8} edx={cpu.edx:x8} ebx={cpu.ebx:x8} esi={cpu.esi:x8} edi={cpu.edi:x8} ebp={cpu.ebp:x8} esp={cpu.esp:x8}");
+                    var sb2 = cpu.ss_base;
+                    for (var k = 0u; k < 0x40; k += 4)
+                    {
+                        var a = sb2 + cpu.esp + k;
+                        var v = (uint)(EnvGetMemoryData8(env, a) | (EnvGetMemoryData8(env, a + 1) << 8)
+                            | (EnvGetMemoryData8(env, a + 2) << 16) | (EnvGetMemoryData8(env, a + 3) << 24));
+                        WriteLine($"  [esp+{k:x2}] = {v:x8}");
+                    }
+                    break;
+                }
                 // ページング有効時は、命令の途中でページフォルトが起きうるため
                 // 命令前のレジスタ状態を退避しておき、#PF 配送時に巻き戻す。
                 if (env.PagingOn) cpu.CopyTo(faultSave);
@@ -142,6 +190,17 @@ static partial class Program
                         WriteLine($"EXCEPTION at {cpu.cs:x4}:{cpu.eip:x8}: {pf.Message}");
                         break;
                     }
+                    // デバッグ: 最初の保護違反(WP)#PF で停止し、原因を調べられるようにする。
+                    if (pfTrap && (pf.ErrorCode & 1) != 0)
+                    {
+                        WriteLine($"PFTRAP: protection #PF lin={pf.Linear:x8} err={pf.ErrorCode:x} at {cpu.cs:x4}:{cpu.eip:x8} (instr {count})");
+                        if (env.WriteLog != null)
+                        {
+                            WriteLine($"--- writes to [{env.WLogLo:x8},{env.WLogHi:x8}) (last 30 of {env.WriteLog.Count}) ---");
+                            foreach (var e in env.WriteLog.TakeLast(30)) WriteLine("  " + e);
+                        }
+                        break;
+                    }
                     var pfr = PageFault(pf.Linear, pf.ErrorCode)(env, cpu, default);
                     if (!pfr.IsSuccess) { WriteLine($"#PF delivery failed at {cpu.cs:x4}:{cpu.eip:x8}"); break; }
                     cpu = pfr.cpu;
@@ -156,6 +215,30 @@ static partial class Program
                 }
                 count++;
                 env.Tsc = (ulong)count; // RDTSC の代用カウンタ
+                if (env.WatchTriggered)
+                {
+                    WriteLine($"WATCH: write into [{env.WatchLo:x8},{env.WatchHi:x8}) by instruction at {beforeCs:x4}:{beforeEip:x8} (instr {count})");
+                    env.WatchTriggered = false;
+                    break;
+                }
+                // ESP がカーネルのエントリコード領域を指す不正値になった瞬間を捕捉する。
+                if (espTrap && cpu.esp is >= 0xc16a8000 and < 0xc16aa000 && !(beforeEsp is >= 0xc16a8000 and < 0xc16aa000))
+                {
+                    WriteLine($"ESPTRAP: esp={cpu.esp:x8} set by {beforeCs:x4}:{beforeEip:x8} (instr {count})");
+                    break;
+                }
+                beforeEsp = cpu.esp;
+                if (brHist)
+                {
+                    // 制御転送(順次進行を外れた)命令を記録する。
+                    var seq2 = cpu.cs == beforeCs && cpu.eip > beforeEip && cpu.eip <= beforeEip + 15;
+                    if (!seq2)
+                    {
+                        brFrom[brIdx] = (beforeCs, beforeEip);
+                        brTo[brIdx] = (cpu.cs, cpu.eip);
+                        brIdx = (brIdx + 1) % BrN;
+                    }
+                }
                 if (trace)
                 {
                     // 制御転送(分岐/ジャンプ/CALL/RET/割り込み)が起きた命令だけ記録する。
@@ -203,5 +286,25 @@ static partial class Program
             opbytes = "(unmapped)";
         }
         WriteLine($"STOP at {cpu.cs:x4}:{cpu.eip:x8} after {count} instructions, opcode: {opbytes}");
+        if (env.IntLog != null)
+        {
+            WriteLine($"--- protected-mode interrupt deliveries (total {env.IntLog.Count}) ---");
+            WriteLine("[first 30]");
+            foreach (var e in env.IntLog.Take(30))
+                WriteLine("  " + e);
+            WriteLine("[last 4]");
+            foreach (var e in env.IntLog.TakeLast(4))
+                WriteLine("  " + e);
+        }
+        if (brHist)
+        {
+            WriteLine("--- last branches (from -> to) ---");
+            for (var k = 0; k < BrN; k++)
+            {
+                var j = (brIdx + k) % BrN;
+                if (brTo[j] == default) continue;
+                WriteLine($"  {brFrom[j].cs:x4}:{brFrom[j].eip:x8} -> {brTo[j].cs:x4}:{brTo[j].eip:x8}");
+            }
+        }
     }
 }

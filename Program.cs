@@ -1099,21 +1099,25 @@ static partial class Program
         select unit;
 
     // PUSH Sreg (06/0E/16/1E): opcode>>3 が ES/CS/SS/DS の順のセグメント番号になる。
+    // 32ビットモードでは 4 バイト push する(セレクタをゼロ拡張)。オペランドサイズに従う。
     static State<Unit> PushSreg =>
         from _1 in SetLog("PushSreg")
         from opecode in Opecodes
         let reg = opecode[0] >> 3
+        from type in OperandType(true)
         from v in GetSRegData(reg)
-        from _2 in Push16(v)
+        from _2 in Push(type == 2 ? ((uint)v).ToTypeData() : v.ToTypeData())
         select unit;
 
-    // POP Sreg (07/17/1F)。プロテクトモードでは記述子を再ロードする。
+    // POP Sreg (07/17/1F)。オペランドサイズ幅で pop し、下位16ビットをロードする。
+    // プロテクトモードでは記述子を再ロードする。
     static State<Unit> PopSreg =>
         from _1 in SetLog("PopSreg")
         from opecode in Opecodes
         let reg = opecode[0] >> 3
-        from v in Pop16
-        from _2 in LoadSReg(reg, v)
+        from type in OperandType(true)
+        from v in Pop(type)
+        from _2 in LoadSReg(reg, (ushort)v.Value())
         select unit;
 
     static State<Unit> Push_50_57 =>
