@@ -686,6 +686,9 @@ static public partial class Ext
     static void FWrite8(EmuEnvironment env, uint a, byte v)
     {
         if (env.PagingOn) a = EnvTranslate(env, a, write: true);
+        if (env.PagingOn && a >= env.WatchLo && a < env.WatchHi) env.WatchTriggered = true;
+        if (env.WriteLog != null && a >= env.WLogLo && a < env.WLogHi)
+            env.WriteLog.Add($"{env.CurEip:x8}: [{a:x8}]={v:x2}");
         var m = env.OneMegaMemory_;
         if (a < (uint)m.Length) m[a] = v;
     }
@@ -701,6 +704,9 @@ static public partial class Ext
             }
             a = EnvTranslate(env, a, write: true);
         }
+        if (env.PagingOn && a >= env.WatchLo - 1 && a < env.WatchHi) env.WatchTriggered = true;
+        if (env.WriteLog != null && a + 2 > env.WLogLo && a < env.WLogHi)
+            env.WriteLog.Add($"{env.CurEip:x8}: [{a:x8}]={v:x4} (w16)");
         var m = env.OneMegaMemory_;
         if (a <= (uint)m.Length - 2) { m[a] = (byte)v; m[a + 1] = (byte)(v >> 8); }
         else { FWritePhys8(env, a, (byte)v); FWritePhys8(env, a + 1, (byte)(v >> 8)); }
@@ -718,6 +724,9 @@ static public partial class Ext
             }
             a = EnvTranslate(env, a, write: true);
         }
+        if (env.PagingOn && a >= env.WatchLo - 3 && a < env.WatchHi) env.WatchTriggered = true;
+        if (env.WriteLog != null && a + 4 > env.WLogLo && a < env.WLogHi)
+            env.WriteLog.Add($"{env.CurEip:x8}: [{a:x8}]={v:x8} (w32)");
         var m = env.OneMegaMemory_;
         if (a <= (uint)m.Length - 4)
         {
