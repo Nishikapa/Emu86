@@ -876,13 +876,13 @@ static partial class Program
         from _2 in Enter(alloc, level)
         select unit;
 
-    // LEAVE (0xC9): SP <- BP; BP <- pop()。スタックフレームを破棄する。
+    // LEAVE (0xC9): (E)SP <- (E)BP; (E)BP <- pop()。スタックフレームを破棄する。
     static State<Unit> Leave_C9 =>
         from _1 in SetLog("Leave_C9")
-        from bp in GetRegData16(5)
-        from _2 in _sp.Set(bp)        // SP <- BP
-        from val in Pop16
-        from _3 in SetRegData16(5, val) // BP <- [SP]
+        from type in OperandType(true)
+        from _2 in SetCpu(cpu => { if (cpu.code32) { cpu.esp = cpu.ebp; } else { cpu.sp = cpu.bp; } return cpu; })
+        from val in Pop(type)
+        from _3 in type == 2 ? _ebp.Set(val.dd) : _bp.Set(val.dw)
         select unit;
 
     // PUSH Sreg (06/0E/16/1E): opcode>>3 が ES/CS/SS/DS の順のセグメント番号になる。
@@ -950,16 +950,19 @@ static partial class Program
             : ((ushort)(sbyte)imm).ToTypeData())
         select unit;
 
+    // PUSHF/POPF はオペランドサイズに従う(32ビットコードでは EFLAGS 全体を 4 バイトで push/pop)。
     static State<Unit> Pushf_9C =>
         from _1 in SetLog("Pushf_9C")
-        from fl in GetDataFromCpu(cpu => (ushort)cpu.eflags)
-        from _2 in Push16(fl)
+        from type in OperandType(true)
+        from fl in GetDataFromCpu(cpu => cpu.eflags)
+        from _2 in Push(type == 2 ? fl.ToTypeData() : ((ushort)fl).ToTypeData())
         select unit;
 
     static State<Unit> Popf_9D =>
         from _1 in SetLog("Popf_9D")
-        from fl in Pop16
-        from _2 in SetCpu(cpu => { cpu.eflags = (cpu.eflags & 0xFFFF0000) | fl; return cpu; })
+        from type in OperandType(true)
+        from fl in Pop(type)
+        from _2 in SetCpu(cpu => { cpu.eflags = type == 2 ? fl.dd : (cpu.eflags & 0xFFFF0000) | fl.dw; return cpu; })
         select unit;
 
     // SAHF (0x9E): AH の下位8bit を FLAGS の下位8bit(SF/ZF/AF/PF/CF)へ転送する。

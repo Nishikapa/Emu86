@@ -15,6 +15,25 @@ static partial class Program
 
     static void Main(string[] args)
     {
+        // デバッグ用: --dumplba <開始LBA> <セクタ数> で、エミュレータと同じディスクスタック
+        // (ベース + 差分オーバーレイ)からセクタを読み出して lba_dump.bin に書き出す。
+        var dumpIdx = Array.IndexOf(args, "--dumplba");
+        if (dumpIdx >= 0)
+        {
+            var start = long.Parse(args[dumpIdx + 1]);
+            var cnt = int.Parse(args[dumpIdx + 2]);
+            var disk = new DiskImage("sample.avhdx", writable: false);
+            var buf = new byte[512];
+            using var ofs = new FileStream("lba_dump.bin", FileMode.Create, FileAccess.Write);
+            for (var i = 0L; i < cnt; i++)
+            {
+                disk.ReadSector(start + i, buf, 0);
+                ofs.Write(buf);
+            }
+            WriteLine($"dumped LBA {start}..{start + cnt - 1} to lba_dump.bin");
+            return;
+        }
+
         var env = new EmuEnvironment();
 
         long count;

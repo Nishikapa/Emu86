@@ -194,9 +194,9 @@ static public partial class Ext
                 !cpu.sf,                          // JNS
                 cpu.pf,                           // JP
                 !cpu.pf,                          // JNP
-                (cpu.sf != cpu.of) && (!cpu.zf),  // JL
+                cpu.sf != cpu.of,                 // JL
                 cpu.sf == cpu.of,                 // JNL
-                cpu.sf != cpu.of,                 // JLE
+                cpu.zf || (cpu.sf != cpu.of),     // JLE
                 (cpu.sf == cpu.of) && (!cpu.zf),  // JNLE
             }[type]
         );

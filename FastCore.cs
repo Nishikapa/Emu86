@@ -293,11 +293,12 @@ static public partial class Ext
             case 0x99: // CWD
                 cpu.dx = (ushort)((short)cpu.ax < 0 ? 0xFFFF : 0x0000);
                 break;
-            case 0x9C: // PUSHF(常に 16 ビット)
-                FPush(env, cpu, 1, (ushort)cpu.eflags);
+            case 0x9C: // PUSHF(オペランドサイズに従う)
+                FPush(env, cpu, typeW, typeW == 2 ? cpu.eflags : (ushort)cpu.eflags);
                 break;
             case 0x9D: // POPF
-                cpu.eflags = (cpu.eflags & 0xFFFF0000) | FPop(env, cpu, 1);
+                if (typeW == 2) cpu.eflags = FPop(env, cpu, 2);
+                else cpu.eflags = (cpu.eflags & 0xFFFF0000) | FPop(env, cpu, 1);
                 break;
             case 0x9E: // SAHF
                 cpu.eflags = (cpu.eflags & 0xFFFFFF00) | cpu.ah | 0x02u;
@@ -381,10 +382,11 @@ static public partial class Ext
                 RmSet(type, isMem, addr, FImm(type));
                 break;
             }
-            case 0xC9: // LEAVE(モナド版と同じく 16 ビット固定)
+            case 0xC9: // LEAVE: (E)SP <- (E)BP; (E)BP <- pop()
             {
-                cpu.sp = cpu.bp;
-                cpu.bp = (ushort)FPop(env, cpu, 1);
+                if (cpu.code32) cpu.esp = cpu.ebp; else cpu.sp = cpu.bp;
+                if (typeW == 2) cpu.ebp = FPop(env, cpu, 2);
+                else cpu.bp = (ushort)FPop(env, cpu, 1);
                 break;
             }
             case >= 0xE0 and <= 0xE2: // LOOPNE/LOOPE/LOOP(CX は常に 16 ビット)
@@ -787,7 +789,7 @@ static public partial class Ext
         c.of = (v & Mask(type)) == (delta > 0 ? msb - 1 : msb);
     }
 
-    // Jcc 条件(Jcc と同一。JL/JLE の式もモナド版に合わせてある)。
+    // Jcc 条件(モナド版 Jcc と同一)。
     static bool FCond(CPU c, int t) => t switch
     {
         0 => c.of,
@@ -802,9 +804,9 @@ static public partial class Ext
         9 => !c.sf,
         10 => c.pf,
         11 => !c.pf,
-        12 => c.sf != c.of && !c.zf,
+        12 => c.sf != c.of,
         13 => c.sf == c.of,
-        14 => c.sf != c.of,
+        14 => c.zf || c.sf != c.of,
         _ => c.sf == c.of && !c.zf,
     };
 

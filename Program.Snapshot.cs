@@ -6,7 +6,8 @@ static partial class Program
     // 1命令ずつ解釈実行するため長時間のブートは避けられないので、
     // "--resume" で前回の続きから再開できるようにする。
     const string SnapshotPath = "snapshot.bin";
-    const long SnapshotInterval = 10_000_000;
+    // 高速コア(約7M命令/秒)前提で、保存オーバーヘッドが走行時間の数%に収まる間隔にする。
+    const long SnapshotInterval = 100_000_000;
     const string SnapshotMagic = "EMU86SNP";
     const int SnapshotVersion = 1;
 
