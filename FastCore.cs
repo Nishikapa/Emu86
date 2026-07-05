@@ -730,25 +730,27 @@ static public partial class Ext
     }
 
     // 算術/論理グループ(Calc と同一の計算とフラグ更新。PF/AF は更新しない)。
+    // ADC/SBB のキャリー入力はオペランドに畳み込まず個別に扱う(Calc と同一)。
     static uint FCalc(CPU c, int type, uint a, uint b0, int kind)
     {
         var mask = Mask(type);
         var msb = Msb(type);
         a &= mask;
-        var b = (b0 + (kind is 2 or 3 && c.cf ? 1u : 0u)) & mask;
+        var b = b0 & mask;
+        var cin = kind is 2 or 3 && c.cf ? 1u : 0u;
         var r = kind switch
         {
-            0 or 2 => (a + b) & mask,   // ADD/ADC
-            1 => a | b,                 // OR
-            3 or 5 => (a - b) & mask,   // SBB/SUB
-            4 => a & b,                 // AND
-            6 => a ^ b,                 // XOR
-            _ => a,                     // CMP
+            0 or 2 => (a + b + cin) & mask,   // ADD/ADC
+            1 => a | b,                       // OR
+            3 or 5 => (a - b - cin) & mask,   // SBB/SUB
+            4 => a & b,                       // AND
+            6 => a ^ b,                       // XOR
+            _ => a,                           // CMP
         };
         var isAdd = kind is 0 or 2;
         var isSub = kind is 3 or 5 or 7;
-        var fr = isSub ? (a - b) & mask : r;
-        c.cf = isAdd ? (ulong)a + b > mask : isSub && a < b;
+        var fr = isSub ? (a - b - cin) & mask : r;
+        c.cf = isAdd ? (ulong)a + b + cin > mask : isSub && (ulong)b + cin > a;
         c.zf = fr == 0;
         c.sf = (fr & msb) != 0;
         c.of = isAdd ? ((a ^ b) & msb) == 0 && ((a ^ fr) & msb) != 0

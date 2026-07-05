@@ -111,6 +111,7 @@ static partial class Program
         (0xD0, 2, Group2_D0_D1),
         (0xD2, 2, Group2_D2_D3),
         (0xD7, 1, Xlat_D7),
+        (0xD8, 8, Fpu_D8_DF),
         (0xE0, 3, Loop_E0_E2),
         (0xE3, 1, Jcxz_E3),
         (0xE4, 2, In_E4_E5),
@@ -141,6 +142,7 @@ static partial class Program
         (0x0F, 0x80, 0x10, Jcc_0F80_0F8F),
         (0x0F, 0x01, 0x01, Group7_0F01),
         (0x0F, 0x20, 0x01, Mov_0F20),
+        (0x0F, 0x40, 0x10, Cmov_0F40_4F),         // CMOVcc r, r/m (16 条件)
         (0x0F, 0x22, 0x01, Mov_0F22),
         (0x0F, 0x90, 0x10, Setcc_0F90_9F),        // SETcc r/m8 (16 条件)
         (0x0F, 0xA3, 0x01, BitTest_reg),          // BT  r/m, r

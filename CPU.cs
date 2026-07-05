@@ -61,6 +61,8 @@ static public partial class Ext
 
     // 算術/論理グループを uint 上で幅共通に計算する。
     // kind: 0=ADD 1=OR 2=ADC 3=SBB 4=AND 5=SUB 6=XOR 7=CMP
+    // ADC/SBB のキャリー入力はオペランドに畳み込まず個別に扱う
+    // (b=0xFF..FF かつ CF=1 のときにキャリー出力が失われるのを防ぐ)。
     static public State<Data> Calc(Data d1, Data d2, int kind)
     {
         if (d1.type != d2.type)
@@ -70,22 +72,22 @@ static public partial class Ext
             let mask = Mask(d1.type)
             let msb = Msb(d1.type)
             let a = d1.Value()
-            // ADC/SBB は b に CF を加えてから ADD/SUB と同じ計算をする
-            let b = (d2.Value() + (kind is 2 or 3 && cf0 ? 1u : 0u)) & mask
+            let b = d2.Value() & mask
+            let cin = kind is 2 or 3 && cf0 ? 1u : 0u
             let r = kind switch
             {
-                0 or 2 => (a + b) & mask,   // ADD/ADC
-                1 => a | b,                 // OR
-                3 or 5 => (a - b) & mask,   // SBB/SUB
-                4 => a & b,                 // AND
-                6 => a ^ b,                 // XOR
-                _ => a,                     // CMP は結果を捨てて a を返す
+                0 or 2 => (a + b + cin) & mask,   // ADD/ADC
+                1 => a | b,                       // OR
+                3 or 5 => (a - b - cin) & mask,   // SBB/SUB
+                4 => a & b,                       // AND
+                6 => a ^ b,                       // XOR
+                _ => a,                           // CMP は結果を捨てて a を返す
             }
             let isAdd = kind is 0 or 2
             let isSub = kind is 3 or 5 or 7
-            let fr = isSub ? (a - b) & mask : r  // フラグ計算の対象(CMP は減算結果)
+            let fr = isSub ? (a - b - cin) & mask : r  // フラグ計算の対象(CMP は減算結果)
             from _ in SetCpu(
-                (_cf, isAdd ? (ulong)a + b > mask : isSub && a < b),
+                (_cf, isAdd ? (ulong)a + b + cin > mask : isSub && (ulong)b + cin > a),
                 (_zf, fr == 0),
                 (_sf, (fr & msb) != 0),
                 (_of, isAdd ? ((a ^ b) & msb) == 0 && ((a ^ fr) & msb) != 0
@@ -388,6 +390,10 @@ public class CPU
     // CSがプロテクトモードでロードされたときにセットされる。
     public bool code32;
 
+    // x87 FPU の制御/状態ワード(FPU 存在検出に必要な最小限のみ保持。演算スタックは未実装)。
+    public ushort fpu_cw = 0x037F;
+    public ushort fpu_sw;
+
     public ushort idt_limit { get; set; }
     public uint idt_base { get; set; }
     public ushort gdt_limit { get; set; }
@@ -396,10 +402,12 @@ public class CPU
     static public readonly Accessor<CPU, uint> _cr0 = new(c => c.cr0, c => v => { c.cr0 = v; return c; });
     static public readonly Accessor<CPU, uint> _cr2 = new(c => c.cr2, c => v => { c.cr2 = v; return c; });
     static public readonly Accessor<CPU, uint> _cr3 = new(c => c.cr3, c => v => { c.cr3 = v; return c; });
+    static public readonly Accessor<CPU, uint> _cr4 = new(c => c.cr4, c => v => { c.cr4 = v; return c; });
 
     private uint cr0 { get; set; }
     private uint cr2 { get; set; }
     private uint cr3 { get; set; }
+    private uint cr4 { get; set; }
 
     static public readonly Accessor<CPU, ushort> _sp = new(c => c.sp, c => v => { c.sp = v; return c; });
     static public readonly Accessor<CPU, ushort> _bp = new(c => c.bp, c => v => { c.bp = v; return c; });
@@ -535,7 +543,8 @@ public class CPU
         w.Write(eip);
         w.Write(code32);
         w.Write(idt_limit); w.Write(idt_base); w.Write(gdt_limit); w.Write(gdt_base);
-        w.Write(cr0); w.Write(cr2); w.Write(cr3);
+        w.Write(cr0); w.Write(cr2); w.Write(cr3); w.Write(cr4);
+        w.Write(fpu_cw); w.Write(fpu_sw);
         w.Write(ebp); w.Write(esp);
         w.Write(eflags);
         w.Write(cs_prefix); w.Write(es_prefix); w.Write(ss_prefix); w.Write(ds_prefix);
@@ -561,7 +570,8 @@ public class CPU
         c.code32 = r.ReadBoolean();
         c.idt_limit = r.ReadUInt16(); c.idt_base = r.ReadUInt32();
         c.gdt_limit = r.ReadUInt16(); c.gdt_base = r.ReadUInt32();
-        c.cr0 = r.ReadUInt32(); c.cr2 = r.ReadUInt32(); c.cr3 = r.ReadUInt32();
+        c.cr0 = r.ReadUInt32(); c.cr2 = r.ReadUInt32(); c.cr3 = r.ReadUInt32(); c.cr4 = r.ReadUInt32();
+        c.fpu_cw = r.ReadUInt16(); c.fpu_sw = r.ReadUInt16();
         c.ebp = r.ReadUInt32(); c.esp = r.ReadUInt32();
         c.eflags = r.ReadUInt32();
         c.cs_prefix = r.ReadBoolean(); c.es_prefix = r.ReadBoolean();
