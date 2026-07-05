@@ -141,6 +141,18 @@ static partial class Program
     //   repZf==false    : REPNE  (0xF2)           — ZF==1 になったら打ち切り
     static State<Unit> RepLoop(bool? repZf) => (env, cpu1, ope) =>
     {
+        // REP と文字列命令の間に来るプレフィックス(66/67/セグメント/F0)を消費し、
+        // 対応する CPU フラグを立てる。例: F3 66 AB = REP STOSW(16ビット幅)。
+        while (true)
+        {
+            var op0 = EnvGetMemoryData8(env, GetCodeAddr(cpu1).addr);
+            if (default == dicPrefixes[op0].state) break;
+            cpu1 = _eip.setter(cpu1)(cpu1.eip + 1);
+            var (okp, _, cpup, _) = dicPrefixes[op0].state(env, cpu1, [op0]);
+            if (!okp) return (false, default, cpu1, log: string.Empty);
+            cpu1 = cpup;
+        }
+
         var (ok, op, cpu2, log) = GetMemoryDataIp8(env, cpu1, ope);
         if (!ok)
             return (false, default, cpu1, log);
