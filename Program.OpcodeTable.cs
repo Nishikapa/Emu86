@@ -22,7 +22,8 @@ static partial class Program
             { 0x64, _fs_prefix },
             { 0x65, _gs_prefix },
             { 0x66, _operand_size_prefix },
-            { 0x67, _address_size_prefix }
+            { 0x67, _address_size_prefix },
+            { 0xF0, _lock_prefix }
         };
 
     // 毎命令の再構築を避けるため、オペコードテーブルは static readonly でキャッシュする。
@@ -140,8 +141,11 @@ static partial class Program
     static (byte ope1, byte ope2, int len, State<Unit> state)[] TwoBytesStates =>
     [
         (0x0F, 0x80, 0x10, Jcc_0F80_0F8F),
+        (0x0F, 0x00, 0x01, Group6_0F00),
         (0x0F, 0x01, 0x01, Group7_0F01),
         (0x0F, 0x20, 0x01, Mov_0F20),
+        (0x0F, 0x21, 0x01, Mov_0F21),
+        (0x0F, 0x23, 0x01, Mov_0F23),
         (0x0F, 0x40, 0x10, Cmov_0F40_4F),         // CMOVcc r, r/m (16 条件)
         (0x0F, 0x22, 0x01, Mov_0F22),
         (0x0F, 0x90, 0x10, Setcc_0F90_9F),        // SETcc r/m8 (16 条件)
@@ -153,7 +157,18 @@ static partial class Program
         (0x0F, 0xB6, 0x02, MovzxMovsx_0FB6_BF),   // MOVZX r,r/m8 ; r,r/m16
         (0x0F, 0xBC, 0x02, BitScan_0FBC_BD),      // BSF/BSR r16, r/m16
         (0x0F, 0xBE, 0x02, MovzxMovsx_0FB6_BF),   // MOVSX r,r/m8 ; r,r/m16
+        (0x0F, 0xA0, 0x01, PushPopFsGs),          // PUSH FS
+        (0x0F, 0xA1, 0x01, PushPopFsGs),          // POP FS
+        (0x0F, 0xA8, 0x01, PushPopFsGs),          // PUSH GS
+        (0x0F, 0xA9, 0x01, PushPopFsGs),          // POP GS
         (0x0F, 0xA2, 0x01, Cpuid_0FA2),           // CPUID
+        (0x0F, 0x30, 0x01, Wrmsr_0F30),           // WRMSR
+        (0x0F, 0x31, 0x01, Rdtsc_0F31),           // RDTSC
+        (0x0F, 0x32, 0x01, Rdmsr_0F32),           // RDMSR
+        (0x0F, 0xB0, 0x02, Cmpxchg_0FB0_B1),      // CMPXCHG r/m, r
+        (0x0F, 0xC0, 0x02, Xadd_0FC0_C1),         // XADD r/m, r
+        (0x0F, 0xC7, 0x01, Group9_0FC7),          // CMPXCHG8B m64
+        (0x0F, 0xC8, 0x08, Bswap_0FC8_CF),        // BSWAP r32
         (0x0F, 0xA4, 0x02, ShldShrd),             // SHLD r/m,r,imm8 ; r/m,r,CL
         (0x0F, 0xAC, 0x02, ShldShrd),             // SHRD r/m,r,imm8 ; r/m,r,CL
         (0x0F, 0xAF, 0x01, Imul_0FAF)             // IMUL r, r/m

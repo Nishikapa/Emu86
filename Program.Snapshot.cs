@@ -12,7 +12,11 @@ static partial class Program
     // 高速コア(約7M命令/秒)前提で、保存オーバーヘッドが走行時間の数%に収まる間隔にする。
     const long SnapshotInterval = 100_000_000;
     const string SnapshotMagic = "EMU86SNP";
-    const int SnapshotVersion = 2; // v2: CPU に cr4 を追加
+    // v2: CPU に cr4 + FPU 制御/状態ワードを追加
+    // v3: 末尾に TSC と MSR ストアを追加
+    // v4: 末尾に PIC 状態(ベース/マスク)を追加
+    // (旧バージョンは互換ロード可能: 足りない分は既定値で補われる)
+    const int SnapshotVersion = 4;
 
     static void SaveSnapshot(long count, CPU cpu, EmuEnvironment env)
     {
@@ -27,6 +31,17 @@ static partial class Program
             w.Write(count);
             cpu.WriteTo(w);
             env.SaveState(w);
+            // v3: TSC + MSR ストア
+            w.Write(env.Tsc);
+            w.Write(env.Msrs.Count);
+            foreach (var (k, v) in env.Msrs)
+            {
+                w.Write(k);
+                w.Write(v);
+            }
+            // v4: PIC 状態
+            w.Write(env.PicMasterBase); w.Write(env.PicSlaveBase);
+            w.Write(env.PicMasterMask); w.Write(env.PicSlaveMask);
         }
         File.Move(tmp, SnapshotPath, overwrite: true);
     }
@@ -37,11 +52,31 @@ static partial class Program
         using var r = new BinaryReader(fs);
         if (System.Text.Encoding.ASCII.GetString(r.ReadBytes(SnapshotMagic.Length)) != SnapshotMagic)
             throw new InvalidDataException($"{SnapshotPath} is not a valid Emu86 snapshot");
-        if (r.ReadInt32() != SnapshotVersion)
+        var version = r.ReadInt32();
+        if (version is not (2 or 3 or 4))
             throw new InvalidDataException($"{SnapshotPath} has an unsupported snapshot version");
         var count = r.ReadInt64();
         var cpu = CPU.ReadFrom(r);
         env.LoadState(r);
+        if (version >= 3)
+        {
+            env.Tsc = r.ReadUInt64();
+            var n = r.ReadInt32();
+            for (var i = 0; i < n; i++)
+            {
+                var k = r.ReadUInt32();
+                env.Msrs[k] = r.ReadUInt64();
+            }
+        }
+        else
+        {
+            env.Tsc = (ulong)count; // v2 には無いので命令数で代用
+        }
+        if (version >= 4)
+        {
+            env.PicMasterBase = r.ReadByte(); env.PicSlaveBase = r.ReadByte();
+            env.PicMasterMask = r.ReadByte(); env.PicSlaveMask = r.ReadByte();
+        }
         return (count, cpu);
     }
 }

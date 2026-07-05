@@ -405,9 +405,9 @@ public class CPU
     static public readonly Accessor<CPU, uint> _cr4 = new(c => c.cr4, c => v => { c.cr4 = v; return c; });
 
     private uint cr0 { get; set; }
-    private uint cr2 { get; set; }
-    private uint cr3 { get; set; }
-    private uint cr4 { get; set; }
+    public uint cr2 { get; set; }          // #PF 発生時にフォルトした線形アドレスを保持する
+    public uint cr3 { get; private set; }  // EnvSyncPaging がページテーブル基底として参照する
+    public uint cr4 { get; private set; }  // EnvSyncPaging が PAE ビットを参照する
 
     static public readonly Accessor<CPU, ushort> _sp = new(c => c.sp, c => v => { c.sp = v; return c; });
     static public readonly Accessor<CPU, ushort> _bp = new(c => c.bp, c => v => { c.bp = v; return c; });
@@ -443,6 +443,13 @@ public class CPU
 
     public bool pe => 0 != (this.cr0 & 0x1);
 
+    // ページング有効(CR0.PG)。変換に使う実際の状態は EmuEnvironment 側に
+    // ミラーされる(EnvSyncPaging)。CR 書き込みとスナップショット復元時に同期する。
+    public bool pg => 0 != (this.cr0 & 0x80000000u);
+
+    // 書き込み保護(CR0.WP)。リング0 でも読み取り専用ページへの書き込みを #PF にする。
+    public bool wp => 0 != (this.cr0 & 0x10000);
+
     public bool cs_prefix;
     public bool es_prefix;
     public bool ss_prefix;
@@ -451,6 +458,10 @@ public class CPU
     public bool gs_prefix;
     public bool operand_size_prefix;
     public bool address_size_prefix;
+    // LOCK (F0)。単一CPUなのでアトミック性は自明に満たされ、実質無視でよい。
+    // 命令間では常に false のためスナップショットには保存しない。
+    public bool lock_prefix;
+    static public readonly Accessor<CPU, bool> _lock_prefix = new(c => c.lock_prefix, c => v => { c.lock_prefix = v; return c; });
     static public readonly Accessor<CPU, bool> _cs_prefix = new(c => c.cs_prefix, c => v => { c.cs_prefix = v; return c; });
     static public readonly Accessor<CPU, bool> _es_prefix = new(c => c.es_prefix, c => v => { c.es_prefix = v; return c; });
     static public readonly Accessor<CPU, bool> _ss_prefix = new(c => c.ss_prefix, c => v => { c.ss_prefix = v; return c; });
@@ -533,6 +544,24 @@ public class CPU
 
     public uint esi { get; set; }
     public uint edi { get; set; }
+
+    // レジスタ状態を dest へ丸ごとコピーする。ページフォルトはメモリアクセスの
+    // 途中(命令の中間)で起きうるため、Runner はページング有効時に命令前状態を
+    // ここへ退避し、フォルト配送時に巻き戻して命令を再開可能にする。
+    public void CopyTo(CPU d)
+    {
+        d.cs = cs; d.ds = ds; d.es = es; d.ss = ss; d.fs = fs; d.gs = gs;
+        d.cs_base = cs_base; d.ds_base = ds_base; d.es_base = es_base;
+        d.ss_base = ss_base; d.fs_base = fs_base; d.gs_base = gs_base;
+        d.eip = eip; d.code32 = code32;
+        d.idt_limit = idt_limit; d.idt_base = idt_base;
+        d.gdt_limit = gdt_limit; d.gdt_base = gdt_base;
+        d.cr0 = cr0; d.cr2 = cr2; d.cr3 = cr3; d.cr4 = cr4;
+        d.fpu_cw = fpu_cw; d.fpu_sw = fpu_sw;
+        d.ebp = ebp; d.esp = esp; d.eflags = eflags;
+        d.eax = eax; d.ebx = ebx; d.ecx = ecx; d.edx = edx;
+        d.esi = esi; d.edi = edi;
+    }
 
     // スナップショット保存/復元。導出プロパティ(ip/bp/sp/al/ah 等)は元の
     // 32bit レジスタから再計算されるため、ここでは書き出さない。
