@@ -653,6 +653,11 @@ public class AtaDevice(DiskImage disk)
 
     bool SlaveSelected => (drive & 0x10) != 0;
 
+    // INTRQ 相当。コマンド完了/データ準備で立ち、ステータスレジスタ(0x1F7)読み出しで降りる。
+    // ランナーがこれを見て IRQ14(スレーブ PIC 入力6)を配送する。過渡的な状態なので
+    // スナップショットには含めない(復元後 false でも検出には無害)。
+    public bool IrqPending;
+
     // スナップショット保存/復元。接続先の DiskImage 自体は書き込みのたびに
     // ファイルへ反映済みのため、ここでは PIO レジスタとバッファのみを扱う。
     public void SaveState(BinaryWriter w)
@@ -679,19 +684,26 @@ public class AtaDevice(DiskImage disk)
         writeSectorsLeft = r.ReadInt32();
     }
 
-    public byte ReadReg(int port) =>
-        port switch
+    public byte ReadReg(int port)
+    {
+        switch (port)
         {
-            0x1F1 => error,
-            0x1F2 => sectorCount,
-            0x1F3 => lbaLow,
-            0x1F4 => lbaMid,
-            0x1F5 => lbaHigh,
-            0x1F6 => drive,
-            // スレーブは存在しない: ステータス 0 を返して SeaBIOS に「デバイスなし」と判定させる
-            0x1F7 or 0x3F6 => SlaveSelected ? (byte)0 : status,
-            _ => 0xFF,
-        };
+            case 0x1F1: return error;
+            case 0x1F2: return sectorCount;
+            case 0x1F3: return lbaLow;
+            case 0x1F4: return lbaMid;
+            case 0x1F5: return lbaHigh;
+            case 0x1F6: return drive;
+            // ステータスレジスタ読み出しは INTRQ を降ろす(0x1F7 のみ。0x3F6 は代替ステータスで降ろさない)。
+            case 0x1F7:
+                if (SlaveSelected) return 0;
+                IrqPending = false;
+                return status;
+            case 0x3F6:
+                return SlaveSelected ? (byte)0 : status;
+            default: return 0xFF;
+        }
+    }
 
     public void WriteReg(int port, byte val)
     {
@@ -726,14 +738,16 @@ public class AtaDevice(DiskImage disk)
                 buf = BuildIdentify();
                 bufPos = 0;
                 status = DRDY | DSC | DRQ;
+                IrqPending = true; // データ準備完了 → INTRQ
                 break;
 
             case 0xA1: // IDENTIFY PACKET DEVICE (ATAPI ではないので abort)
                 error = 0x04;
                 status = DRDY | DSC | ERR;
+                IrqPending = true;
                 break;
 
-            case 0x20 or 0x21: // READ SECTORS (PIO)
+            case 0x20 or 0x21 or 0x24 or 0xC4: // READ SECTORS (PIO) / EXT / MULTIPLE(単一扱い)
                 {
                     var count = sectorCount == 0 ? 256 : sectorCount;
                     var lba = CurrentLba();
@@ -742,23 +756,33 @@ public class AtaDevice(DiskImage disk)
                         disk.ReadSector(lba + i, buf, i * DiskImage.SectorSize);
                     bufPos = 0;
                     status = DRDY | DSC | DRQ;
+                    IrqPending = true; // データ準備完了 → INTRQ
                 }
                 break;
 
-            case 0x30 or 0x31: // WRITE SECTORS (PIO)
+            case 0x30 or 0x31 or 0x34 or 0xC5: // WRITE SECTORS (PIO) / EXT / MULTIPLE(単一扱い)
                 {
                     writeSectorsLeft = sectorCount == 0 ? 256 : sectorCount;
                     writeLba = CurrentLba();
                     buf = new byte[DiskImage.SectorSize];
                     bufPos = 0;
                     pendingWrite = true;
+                    // WRITE の最初のブロック要求は DRQ を立てるが INTRQ は上げない(ホストが先にデータを書く)。
                     status = DRDY | DSC | DRQ;
                 }
                 break;
 
-            default: // 未対応コマンドは abort
+            case 0xEF or 0xE7 or 0xEA or 0x40 or 0x41 or 0x91 or 0x00 or 0xE1 or 0xE0:
+                // SET FEATURES / FLUSH CACHE(EXT) / READ VERIFY / INIT DEV PARAMS / NOP / IDLE:
+                // libata のプローブ・設定で発行される非データコマンド。成功として完了 → INTRQ。
+                status = DRDY | DSC;
+                IrqPending = true;
+                break;
+
+            default: // 未対応コマンド(DMA 系 0xC8/0x25/0xCA/0x35 等含む)は abort → libata は PIO へ後退
                 error = 0x04;
                 status = DRDY | DSC | ERR;
+                IrqPending = true;
                 break;
         }
     }
@@ -790,6 +814,8 @@ public class AtaDevice(DiskImage disk)
             writeLba++;
             writeSectorsLeft--;
             bufPos = 0;
+            // 1セクタ処理完了ごとに INTRQ を上げる(次ブロック要求 or 全完了)。
+            IrqPending = true;
             if (writeSectorsLeft <= 0)
             {
                 pendingWrite = false;
