@@ -234,14 +234,15 @@ static public partial class Ext
         GetDataFromCpu(EnvGetDataFromCPU(ArrayReg32)(reg));
 
     /// Stack ////////////////////////////////////
-    // スタックトップの物理アドレス。SS の基底 + SP/ESP(32ビットコードでは ESP)。
+    // スタックトップの物理アドレス。SS の基底 + SP/ESP。
+    // 32ビットスタック(SS.B=1)なら ESP、そうでなければ SP を使う(CS.D ではなく SS.B で決まる)。
     static private MemAddr EnvGetStackAddr(CPU cpu) =>
-        (true, cpu.ss_base + (cpu.code32 ? cpu.esp : cpu.sp));
+        (true, cpu.ss_base + (cpu.stack32 ? cpu.esp : cpu.sp));
 
     // SP/ESP をデータ長分減らしてからスタックトップへ書き込む（PUSH）。
     static public State<Unit> Push(Data data) =>
         from cpu0 in GetCpu
-        from _1 in cpu0.code32 ?
+        from _1 in cpu0.stack32 ?
             _esp.Set((uint)(cpu0.esp - arrLen[data.type])) :
             _sp.Set((ushort)(cpu0.sp - arrLen[data.type]))
         from cpu in GetCpu
@@ -258,7 +259,7 @@ static public partial class Ext
             GetMemOrRegData16(addr),
             GetMemOrRegData32(addr)
         )
-        from _ in cpu.code32 ?
+        from _ in cpu.stack32 ?
             _esp.Set((uint)(cpu.esp + arrLen[type])) :
             _sp.Set((ushort)(cpu.sp + arrLen[type]))
         select data;
@@ -611,11 +612,15 @@ static public partial class Ext
             {
                 var (base_, d) = EnvReadDescriptor(env, cpu, sel);
                 cpu = ArraySregBase[reg].setter(cpu)(base_);
-                if (reg == 1) // CS
+                if (reg == 1) // CS: D ビットで 32ビットコードか決まる
                     cpu.code32 = d;
+                else if (reg == 2) // SS: B ビットで 32ビットスタックか決まる
+                    cpu.stack32 = d;
             }
             else if (reg == 1)
                 cpu.code32 = false;
+            else if (reg == 2)
+                cpu.stack32 = false;
             return cpu;
         });
 

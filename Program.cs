@@ -37,37 +37,41 @@ static partial class Program
         from _2 in IpInc(inc)
         select unit;
 
-    // CALL far ptr16:16 (0x9A): CS, IP を push してから offset:segment へ far ジャンプ。
+    // CALL far ptr16:16 / ptr16:32 (0x9A): CS, (E)IP を push してから offset:segment へ far ジャンプ。
+    // オペランドサイズに従う(32ビットコードではオフセットは 32 ビット、リターンフレームも 32 ビット幅)。
     static State<Unit> CallFar_9A =>
         from _1 in SetLog("CallFar_9A")
-        from offset in GetMemoryDataIp16
+        from type in OperandType(true)
+        from offset in (2 == type) ? GetMemoryDataIp32 : GetMemoryDataIp16.Select(dw => (uint)dw)
         from segment in GetMemoryDataIp16
         from cs in GetSRegData(1)
-        from _2 in Push16(cs)
-        from ip in GetDataFromCpu(cpu => cpu.ip)
-        from _3 in Push16(ip)
-        from _4 in _ip.Set(offset)
+        from _2 in (2 == type) ? Push(((uint)cs).ToTypeData()) : Push16(cs)
+        from cpu in GetCpu
+        from _3 in (2 == type) ? Push(cpu.eip.ToTypeData()) : Push16(cpu.ip)
+        from _4 in (2 == type) ? _eip.Set(offset) : _ip.Set((ushort)offset)
         from _5 in LoadSReg(1, segment)
         select unit;
 
-    // RETF (0xCB): IP, CS を pop して far 復帰する。
+    // RETF (0xCB): (E)IP, CS を pop して far 復帰する(オペランドサイズに従う)。
     static State<Unit> Retf_CB =>
         from _1 in SetLog("Retf_CB")
-        from ip in Pop16
-        from _2 in _ip.Set(ip)
-        from cs in Pop16
-        from _3 in LoadSReg(1, cs)
+        from type in OperandType(true)
+        from ret in Pop(type)
+        from _2 in (2 == type) ? _eip.Set(ret.dd) : _ip.Set(ret.dw)
+        from cs in Pop(type)
+        from _3 in LoadSReg(1, (ushort)cs.Value())
         select unit;
 
-    // RETF imm16 (0xCA): IP, CS を pop して復帰後、SP += imm16。
+    // RETF imm16 (0xCA): (E)IP, CS を pop して復帰後、(E)SP += imm16。
     static State<Unit> Retf_CA =>
         from _1 in SetLog("Retf_CA")
         from imm in GetMemoryDataIp16
-        from ip in Pop16
-        from _2 in _ip.Set(ip)
-        from cs in Pop16
-        from _3 in LoadSReg(1, cs)
-        from _4 in SetCpu(cpu => { cpu.sp += imm; return cpu; })
+        from type in OperandType(true)
+        from ret in Pop(type)
+        from _2 in (2 == type) ? _eip.Set(ret.dd) : _ip.Set(ret.dw)
+        from cs in Pop(type)
+        from _3 in LoadSReg(1, (ushort)cs.Value())
+        from _4 in SetCpu(cpu => { if (cpu.stack32) cpu.esp += imm; else cpu.sp += imm; return cpu; })
         select unit;
 
     // Group1 (0x83): r/m op imm8(符号拡張)
@@ -885,34 +889,9 @@ static partial class Program
         from _2 in JmpTo(target)
         select unit;
 
-    // x87 FPU エスケープ (0xD8-0xDF)。FPU 存在検出に必要な最小限のみ実装し、
-    // それ以外の FPU 命令は失敗させて STOP 診断に載せる(演算スタックは未実装)。
-    static State<Unit> Fpu_D8_DF =>
-        from _1 in SetLog("Fpu_D8_DF")
-        from opecode in Opecodes
-        from m in ModRegRm()
-        from _2 in FpuOp(opecode[0], m)
-        select unit;
-
-    static State<Unit> FpuOp(byte op, (int mod, int reg, int rm) m) =>
-        (op, m.mod, m.reg, m.rm) switch
-        {
-            (0xDB, 3, 4, 3) => SetCpu(c => { c.fpu_cw = 0x037F; c.fpu_sw = 0; return c; }), // FNINIT
-            (0xDF, 3, 4, 0) => SetCpu(c => { c.ax = c.fpu_sw; return c; }),                 // FNSTSW AX
-            (0xD9, not 3, 7, _) => FpuStore16(m, c => c.fpu_cw),                            // FNSTCW m16
-            (0xDD, not 3, 7, _) => FpuStore16(m, c => c.fpu_sw),                            // FNSTSW m16
-            (0xD9, not 3, 5, _) =>                                                          // FLDCW m16
-                from addr in GetMemOrRegAddr(m.mod, m.rm)
-                from v in GetMemOrRegData16(addr)
-                from _ in SetCpu(c => { c.fpu_cw = v; return c; })
-                select unit,
-            _ => SetResult(false),
-        };
-
-    static State<Unit> FpuStore16((int mod, int reg, int rm) m, Func<CPU, ushort> get) =>
-        from addr in GetMemOrRegAddr(m.mod, m.rm)
-        from cpu in GetCpu
-        from _ in SetMemOrRegData(addr, get(cpu).ToTypeData())
+    // WAIT/FWAIT (0x9B): FPU 例外を同期する。例外は配送しないため NOP。
+    static State<Unit> Fwait_9B =>
+        from _ in SetLog("Fwait_9B")
         select unit;
 
     // INT imm8 (0xCD): 指定ベクタへソフトウェア割り込み。
@@ -1047,7 +1026,7 @@ static partial class Program
         from type in OperandType(true)
         from ret in Pop(type)
         from _2 in JmpTo(ret)
-        from _3 in SetCpu(cpu => { if (cpu.code32) { cpu.esp += imm; } else { cpu.sp += imm; } return cpu; })
+        from _3 in SetCpu(cpu => { if (cpu.stack32) { cpu.esp += imm; } else { cpu.sp += imm; } return cpu; })
         select unit;
 
     // PUSHA (0x60): AX,CX,DX,BX,(開始時SP),BP,SI,DI をこの順で push する。
@@ -1088,7 +1067,7 @@ static partial class Program
     static State<Unit> Leave_C9 =>
         from _1 in SetLog("Leave_C9")
         from type in OperandType(true)
-        from _2 in SetCpu(cpu => { if (cpu.code32) { cpu.esp = cpu.ebp; } else { cpu.sp = cpu.bp; } return cpu; })
+        from _2 in SetCpu(cpu => { if (cpu.stack32) { cpu.esp = cpu.ebp; } else { cpu.sp = cpu.bp; } return cpu; })
         from val in Pop(type)
         from _3 in type == 2 ? _ebp.Set(val.dd) : _bp.Set(val.dw)
         select unit;

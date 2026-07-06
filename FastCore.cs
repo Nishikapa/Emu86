@@ -368,7 +368,7 @@ static public partial class Ext
                 var imm = F16();
                 var ret = FPop(env, cpu, typeW);
                 cpu.eip = typeW == 2 ? ret : ((startEip + len) & 0xFFFF0000) | (ushort)ret;
-                if (cpu.code32) cpu.esp += imm; else cpu.sp += imm;
+                if (cpu.stack32) cpu.esp += imm; else cpu.sp += imm;
                 return true;
             }
             case 0xC3: // RET
@@ -387,7 +387,7 @@ static public partial class Ext
             }
             case 0xC9: // LEAVE: (E)SP <- (E)BP; (E)BP <- pop()
             {
-                if (cpu.code32) cpu.esp = cpu.ebp; else cpu.sp = cpu.bp;
+                if (cpu.stack32) cpu.esp = cpu.ebp; else cpu.sp = cpu.bp;
                 if (typeW == 2) cpu.ebp = FPop(env, cpu, 2);
                 else cpu.bp = (ushort)FPop(env, cpu, 1);
                 break;
@@ -747,11 +747,12 @@ static public partial class Ext
     }
 
     // PUSH: SP/ESP を減らしてからスタックトップへ書く(Push と同一)。
+    // スタック幅は SS.B(stack32)で決まる(CS.D ではない)。
     static void FPush(EmuEnvironment env, CPU c, int type, uint v)
     {
         var size = type == 0 ? 1 : type == 1 ? 2 : 4;
-        if (c.code32) c.esp = (uint)(c.esp - size); else c.sp = (ushort)(c.sp - size);
-        var addr = c.ss_base + (c.code32 ? c.esp : c.sp);
+        if (c.stack32) c.esp = (uint)(c.esp - size); else c.sp = (ushort)(c.sp - size);
+        var addr = c.ss_base + (c.stack32 ? c.esp : c.sp);
         if (type == 0) FWrite8(env, addr, (byte)v);
         else if (type == 1) FWrite16(env, addr, (ushort)v);
         else FWrite32(env, addr, v);
@@ -760,12 +761,12 @@ static public partial class Ext
     // POP: スタックトップから読んでから SP/ESP を増やす(Pop と同一)。
     static uint FPop(EmuEnvironment env, CPU c, int type)
     {
-        var addr = c.ss_base + (c.code32 ? c.esp : c.sp);
+        var addr = c.ss_base + (c.stack32 ? c.esp : c.sp);
         var v = type == 0 ? EnvGetMemoryData8(env, addr)
               : type == 1 ? EnvGetMemoryData16(env, addr)
               : EnvGetMemoryData32(env, addr);
         var size = type == 0 ? 1 : type == 1 ? 2 : 4;
-        if (c.code32) c.esp = (uint)(c.esp + size); else c.sp = (ushort)(c.sp + size);
+        if (c.stack32) c.esp = (uint)(c.esp + size); else c.sp = (ushort)(c.sp + size);
         return v;
     }
 
