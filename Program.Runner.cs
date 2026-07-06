@@ -140,11 +140,19 @@ static partial class Program
                             : true);
                     if (deliverable)
                     {
-                        var irq = Interrupt(vec)(env, cpu, default);
-                        if (irq.IsSuccess)
+                        try
                         {
-                            cpu = irq.cpu;
-                            env.PicMasterIsr |= 1; // IRQ0 を in-service にする(EOI まで再配送しない)
+                            var irq = Interrupt(vec)(env, cpu, default);
+                            if (irq.IsSuccess)
+                            {
+                                cpu = irq.cpu;
+                                env.PicMasterIsr |= 1; // IRQ0 を in-service にする(EOI まで再配送しない)
+                            }
+                        }
+                        catch (PageFaultException pf)
+                        {
+                            WriteLine($"FAULT during IRQ delivery: lin={pf.Linear:x8} err={pf.ErrorCode:x} at {cpu.cs:x4}:{cpu.eip:x8} esp={cpu.esp:x8} (instr {count})");
+                            break;
                         }
                     }
                 }
@@ -204,9 +212,19 @@ static partial class Program
                         }
                         break;
                     }
-                    var pfr = PageFault(pf.Linear, pf.ErrorCode)(env, cpu, default);
-                    if (!pfr.IsSuccess) { WriteLine($"#PF delivery failed at {cpu.cs:x4}:{cpu.eip:x8}"); break; }
-                    cpu = pfr.cpu;
+                    try
+                    {
+                        var pfr = PageFault(pf.Linear, pf.ErrorCode)(env, cpu, default);
+                        if (!pfr.IsSuccess) { WriteLine($"#PF delivery failed at {cpu.cs:x4}:{cpu.eip:x8}"); break; }
+                        cpu = pfr.cpu;
+                    }
+                    catch (PageFaultException pf2)
+                    {
+                        // 配送中の再フォルト = ダブルフォルト相当。診断を出して停止する。
+                        WriteLine($"DOUBLE FAULT: #PF delivery faulted lin={pf2.Linear:x8} err={pf2.ErrorCode:x}");
+                        WriteLine($"  original #PF: lin={pf.Linear:x8} err={pf.ErrorCode:x} at {cpu.cs:x4}:{cpu.eip:x8} esp={cpu.esp:x8} (instr {count})");
+                        break;
+                    }
                     count++;
                     env.Tsc = (ulong)count;
                     continue;
@@ -240,6 +258,12 @@ static partial class Program
                         brFrom[brIdx] = (beforeCs, beforeEip);
                         brTo[brIdx] = (cpu.cs, cpu.eip);
                         brIdx = (brIdx + 1) % BrN;
+                    }
+                    // プロテクトモードで CS が NULL セレクタになった瞬間を捕捉する。
+                    if (cpu.pe && cpu.cs == 0 && beforeCs != 0)
+                    {
+                        WriteLine($"CSTRAP: cs=0 loaded by instruction at {beforeCs:x4}:{beforeEip:x8} -> eip={cpu.eip:x8} (instr {count})");
+                        break;
                     }
                 }
                 if (trace)

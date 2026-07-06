@@ -84,6 +84,7 @@ static partial class Program
         (0x9A, 1, CallFar_9A),
         (0x98, 1, Cbw_98),
         (0x99, 1, Cwd_99),
+        (0x9B, 1, Fwait_9B),
         (0x9C, 1, Pushf_9C),
         (0x9E, 1, Sahf_9E),
         (0x9F, 1, Lahf_9F),

@@ -390,9 +390,20 @@ public class CPU
     // CSがプロテクトモードでロードされたときにセットされる。
     public bool code32;
 
-    // x87 FPU の制御/状態ワード(FPU 存在検出に必要な最小限のみ保持。演算スタックは未実装)。
+    // スタックが32ビット(SS の B ビット=1)かどうか。スタック操作(PUSH/POP/CALL/RET/
+    // 割り込み)で SP/ESP のどちらを使うかは CS.D ではなく SS.B で決まる。
+    // 例: PnP BIOS は 16ビットCS + 32ビットSS で動くため両者が食い違う。
+    public bool stack32;
+
+    // x87 FPU の状態。ST(i) = fpu_st[(fpu_top + i) & 7]。
+    // 値は C# の double で保持する(実機の内部 80 ビットではなく倍精度)。
+    // fpu_sw のうち TOP フィールド(bit11-13)は fpu_top から合成する(FpuSw)。
+    // fpu_valid は物理レジスタごとの「空でない」ビットマスク(タグワードの元)。
     public ushort fpu_cw = 0x037F;
     public ushort fpu_sw;
+    public double[] fpu_st = new double[8];
+    public int fpu_top;
+    public byte fpu_valid;
 
     public ushort idt_limit { get; set; }
     public uint idt_base { get; set; }
@@ -553,11 +564,13 @@ public class CPU
         d.cs = cs; d.ds = ds; d.es = es; d.ss = ss; d.fs = fs; d.gs = gs;
         d.cs_base = cs_base; d.ds_base = ds_base; d.es_base = es_base;
         d.ss_base = ss_base; d.fs_base = fs_base; d.gs_base = gs_base;
-        d.eip = eip; d.code32 = code32;
+        d.eip = eip; d.code32 = code32; d.stack32 = stack32;
         d.idt_limit = idt_limit; d.idt_base = idt_base;
         d.gdt_limit = gdt_limit; d.gdt_base = gdt_base;
         d.cr0 = cr0; d.cr2 = cr2; d.cr3 = cr3; d.cr4 = cr4;
         d.fpu_cw = fpu_cw; d.fpu_sw = fpu_sw;
+        d.fpu_top = fpu_top; d.fpu_valid = fpu_valid;
+        Array.Copy(fpu_st, d.fpu_st, 8);
         d.ebp = ebp; d.esp = esp; d.eflags = eflags;
         d.eax = eax; d.ebx = ebx; d.ecx = ecx; d.edx = edx;
         d.esi = esi; d.edi = edi;
@@ -571,6 +584,7 @@ public class CPU
         w.Write(cs_base); w.Write(ds_base); w.Write(es_base); w.Write(ss_base); w.Write(fs_base); w.Write(gs_base);
         w.Write(eip);
         w.Write(code32);
+        w.Write(stack32);
         w.Write(idt_limit); w.Write(idt_base); w.Write(gdt_limit); w.Write(gdt_base);
         w.Write(cr0); w.Write(cr2); w.Write(cr3); w.Write(cr4);
         w.Write(fpu_cw); w.Write(fpu_sw);
@@ -597,6 +611,7 @@ public class CPU
         c.ss_base = r.ReadUInt32(); c.fs_base = r.ReadUInt32(); c.gs_base = r.ReadUInt32();
         c.eip = r.ReadUInt32();
         c.code32 = r.ReadBoolean();
+        c.stack32 = r.ReadBoolean();
         c.idt_limit = r.ReadUInt16(); c.idt_base = r.ReadUInt32();
         c.gdt_limit = r.ReadUInt16(); c.gdt_base = r.ReadUInt32();
         c.cr0 = r.ReadUInt32(); c.cr2 = r.ReadUInt32(); c.cr3 = r.ReadUInt32(); c.cr4 = r.ReadUInt32();
