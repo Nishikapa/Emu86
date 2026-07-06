@@ -894,6 +894,11 @@ static partial class Program
         from _ in SetLog("Fwait_9B")
         select unit;
 
+    // INVD (0F 08) / WBINVD (0F 09): キャッシュ無効化/書き戻し。エミュレータでは NOP。
+    static State<Unit> CacheInvd_0F08_09 =>
+        from _ in SetLog("CacheInvd")
+        select unit;
+
     // INT imm8 (0xCD): 指定ベクタへソフトウェア割り込み。
     static State<Unit> Int_CD =>
         from _1 in SetLog("Int_CD")

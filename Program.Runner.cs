@@ -157,6 +157,37 @@ static partial class Program
                     }
                 }
 
+                // ATA(IRQ14, スレーブ PIC 入力6)の配送。IDE ディスクがコマンド完了/データ準備で
+                // INTRQ を上げたら、プロテクトモードで IF=1・非マスク・非 in-service のとき配送する。
+                // レガシー IDE の IRQ14 はスレーブ経由なので、カスケード(マスタ IRQ2)の
+                // in-service も同時に立てる。EOI(0xA0/0x20)で両方降りる。
+                if (!noirq && env.Ata is { IrqPending: true } && cpu.pe && cpu.jf
+                    && env.PicMasterBase >= 0x20  // OS が PIC を保護モードベースへ再プログラム済み(SeaBIOS は除外)
+                    && (env.PicSlaveMask & 0x40) == 0 && (env.PicMasterMask & 0x04) == 0
+                    && (env.PicSlaveIsr & 0x40) == 0)
+                {
+                    var vec = env.PicSlaveBase + 6;
+                    if (cpu.idt_limit >= (vec + 1) * 8 - 1)
+                    {
+                        try
+                        {
+                            var irq = Interrupt(vec)(env, cpu, default);
+                            if (irq.IsSuccess)
+                            {
+                                cpu = irq.cpu;
+                                env.Ata.IrqPending = false;
+                                env.PicSlaveIsr |= 0x40;  // スレーブ入力6 in-service
+                                env.PicMasterIsr |= 0x04; // カスケード(マスタ入力2)in-service
+                            }
+                        }
+                        catch (PageFaultException pf)
+                        {
+                            WriteLine($"FAULT during ATA IRQ delivery: lin={pf.Linear:x8} err={pf.ErrorCode:x} at {cpu.cs:x4}:{cpu.eip:x8} (instr {count})");
+                            break;
+                        }
+                    }
+                }
+
                 var beforeCs = cpu.cs;
                 var beforeEip = cpu.eip;
                 env.CurEip = cpu.eip; // 書き込みログの帰属用

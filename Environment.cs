@@ -885,6 +885,13 @@ static public partial class Ext
     {
         if ((port & 0xFFFF) == 0x1F0 && env.Ata != null)
             return env.Ata.ReadData(size);
+        var p = port & 0xFFFF;
+        if (p >= 0xCF8 && p <= 0xCFB) return env.Pci.Address >> (8 * (p - 0xCF8));
+        if (p >= 0xCFC && p <= 0xCFF) return env.Pci.DataRead(p - 0xCFC, size);
+        // セカンダリ IDE チャネル(ディスク無し)はフローティングバス 0xFF を返し、
+        // libata に「デバイス無し」と即断させる。
+        if ((p >= 0x170 && p <= 0x177) || p == 0x376)
+            return size >= 4 ? 0xFFFFFFFF : (1u << (8 * size)) - 1;
         uint v = 0;
         for (int i = 0; i < size; i++)
             v |= (uint)EnvInPort(env, port + i) << (8 * i);
@@ -898,6 +905,16 @@ static public partial class Ext
             env.Ata.WriteData(size, val);
             return;
         }
+        var p = port & 0xFFFF;
+        if (p >= 0xCF8 && p <= 0xCFB)
+        {
+            // CONFIG_ADDRESS ラッチをバイト位置に合わせて更新(通常は 0xCF8 への 32bit 書き込み)。
+            var shift = 8 * (p - 0xCF8);
+            uint mask = size >= 4 ? 0xFFFFFFFF : (((1u << (8 * size)) - 1) << shift);
+            env.Pci.Address = (env.Pci.Address & ~mask) | ((val << shift) & mask);
+            return;
+        }
+        if (p >= 0xCFC && p <= 0xCFF) { env.Pci.DataWrite(p - 0xCFC, size, val); return; }
         for (int i = 0; i < size; i++)
             EnvOutPort(env, port + i, (byte)(val >> (8 * i)));
     }
@@ -1000,9 +1017,16 @@ static public partial class Ext
     //   クラッシュを避ける。
     // アドレス引数は線形アドレス。ページング有効時はここで物理へ変換し、
     // 複数バイトのアクセスがページ境界を跨ぐ場合は 1 バイトずつ変換する。
+    // BIOS ROM は実機同様に 4GB 上端(0xFFF00000-0xFFFFFFFF)にもエイリアスされ、先頭1MBの
+    // 同じ内容を映す。SeaBIOS の 32bit flat コードは自身を高位エイリアス経由で call/jmp する
+    // (例: 0xffff1edd = 低位 0xf1edd)。ページング無効時の物理アクセスでここへ折り返す。
+    // ページング有効時は変換後の物理が先頭 RAM 内なので実質何もしない。
+    static uint EnvAlias(uint addr) => addr >= 0xFFF00000 ? addr - 0xFFF00000 : addr;
+
     static private void EnvWriteByte(EmuEnvironment env, uint addr, byte val)
     {
         if (env.PagingOn) addr = EnvTranslate(env, addr, write: true);
+        addr = EnvAlias(addr);
         if (env.PagingOn && addr >= env.WatchLo && addr < env.WatchHi) env.WatchTriggered = true;
         if (env.WriteLog != null && addr >= env.WLogLo && addr < env.WLogHi)
             env.WriteLog.Add($"{env.CurEip:x8}: [{addr:x8}]={val:x2}");
@@ -1012,6 +1036,7 @@ static public partial class Ext
     static public byte EnvGetMemoryData8(EmuEnvironment env, uint addr)
     {
         if (env.PagingOn) addr = EnvTranslate(env, addr, write: false);
+        addr = EnvAlias(addr);
         return addr < (uint)env.OneMegaMemory_.Length ? env.OneMegaMemory_[addr] : (byte)0xFF;
     }
 
@@ -1023,6 +1048,7 @@ static public partial class Ext
                 return (ushort)(EnvGetMemoryData8(env, addr) | (EnvGetMemoryData8(env, addr + 1) << 8));
             addr = EnvTranslate(env, addr, write: false);
         }
+        addr = EnvAlias(addr);
         return addr + 2 <= (uint)env.OneMegaMemory_.Length ? BitConverter.ToUInt16(env.OneMegaMemory_, (int)addr) : (ushort)0xFFFF;
     }
 
@@ -1037,6 +1063,7 @@ static public partial class Ext
                     | (EnvGetMemoryData8(env, addr + 3) << 24));
             addr = EnvTranslate(env, addr, write: false);
         }
+        addr = EnvAlias(addr);
         return addr + 4 <= (uint)env.OneMegaMemory_.Length ? BitConverter.ToUInt32(env.OneMegaMemory_, (int)addr) : 0xFFFFFFFF;
     }
 }
@@ -1045,7 +1072,7 @@ public class EmuEnvironment
 {
     // 搭載RAM量。SeaBIOS の init 再配置は 1MB 超のRAMを要求するため、
     // 1MBちょうどではなく拡張メモリを持たせる。BIOS(bios.bin)は先頭1MBの末尾に配置される。
-    public const int RamSize = 32 * 1024 * 1024; // 32MB
+    public const int RamSize = 256 * 1024 * 1024; // 256MB(Debian の initramfs をロードするには 32MB では不足)
 
     public EmuEnvironment()
     {
@@ -1077,6 +1104,9 @@ public class EmuEnvironment
 
     // プライマリ ATA チャネルのマスタドライブ(未接続なら null)。
     public AtaDevice Ata;
+
+    // PCI ホスト(コンフィグ機構 #1)。ata_piix を bind させるため PIIX3 IDE を露出する。
+    public PciHost Pci = new();
 
     // SeaBIOS が CMOS(RTC)経由でメモリ量を検出できるよう、メモリサイズレジスタを設定する。
     //   0x15/0x16: ベースメモリ(KB)          … 640KB
