@@ -41,6 +41,10 @@ public class DiskImage
 
     public long TotalSectors { get; }
 
+    // このイメージのファイルパス(フルパス)と、解決済みの親イメージのパス(親なしなら null)。
+    public string FilePath { get; }
+    public string ParentPath => parent?.FilePath;
+
     // VHD (conectix)
     readonly bool vhd;
     readonly int vhdType;
@@ -63,6 +67,7 @@ public class DiskImage
     public DiskImage(string path, bool writable = false)
     {
         this.writable = writable;
+        FilePath = Path.GetFullPath(path);
         file = new FileStream(path, FileMode.Open, writable ? FileAccess.ReadWrite : FileAccess.Read, FileShare.Read);
 
         var hdr = new byte[SectorSize];
@@ -441,12 +446,12 @@ public class DiskImage
     {
         if (File.Exists(overlayPath))
         {
-            if (OverlayIsCurrent(overlayPath))
+            if (!OverlayIsCurrent(overlayPath))
+                RetireOverlay(overlayPath, "is from an older format");
+            else if (!OverlayParentIs(overlayPath, basePath))
+                RetireOverlay(overlayPath, $"was created against a different base image (expected {basePath})");
+            else
                 return;
-            var stale = overlayPath + ".old";
-            File.Delete(stale);
-            File.Move(overlayPath, stale);
-            Console.Error.WriteLine($"[disk] overlay {overlayPath} is from an older format; moved to {stale} and recreating");
         }
 
         var p = new DiskImage(basePath);
@@ -454,6 +459,33 @@ public class DiskImage
         CreateAvhdx(overlayPath, basePath, p.TotalSectors * SectorSize, blockSize, p.dataWriteGuid);
         p.Close();
         Console.Error.WriteLine($"[disk] created overlay: {overlayPath} (parent: {basePath})");
+    }
+
+    // 古い/親違いの overlay を .old へ退避する(既存の .old は上書き)。
+    static void RetireOverlay(string overlayPath, string reason)
+    {
+        var stale = overlayPath + ".old";
+        File.Delete(stale);
+        File.Move(overlayPath, stale);
+        Console.Error.WriteLine($"[disk] overlay {overlayPath} {reason}; moved to {stale} and recreating");
+    }
+
+    // overlay のペアレントロケータが basePath を指しているか。
+    // (sample.vhd と sample.vhdx を切り替えたときに、別の親向けに作られた差分を使い回さないため)
+    static bool OverlayParentIs(string overlayPath, string basePath)
+    {
+        try
+        {
+            var o = new DiskImage(overlayPath);
+            var parentPath = o.ParentPath;
+            o.Close();
+            return parentPath != null
+                && string.Equals(parentPath, Path.GetFullPath(basePath), StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     // overlay の File Identifier に埋めた Creator 印が現行版と一致するか。
@@ -658,6 +690,13 @@ public class AtaDevice(DiskImage disk)
     // スナップショットには含めない(復元後 false でも検出には無害)。
     public bool IrqPending;
 
+    // --atalog: コマンド/制御レジスタ書き込みとデータ転送完了を標準エラーへ記録する(OS のプローブ手順の調査用)。
+    public static bool Log;
+    // ページング有効後(OS 稼働中)のレジスタ読み出しも記録する(上限付き)。ランナーが LogReads を更新する。
+    public static bool LogReads;
+    static int readLogLeft = 400;
+    static void L(string s) { if (Log) Console.Error.WriteLine("[ata] " + s); }
+
     // スナップショット保存/復元。接続先の DiskImage 自体は書き込みのたびに
     // ファイルへ反映済みのため、ここでは PIO レジスタとバッファのみを扱う。
     public void SaveState(BinaryWriter w)
@@ -686,6 +725,7 @@ public class AtaDevice(DiskImage disk)
 
     public byte ReadReg(int port)
     {
+        if (Log && LogReads && readLogLeft > 0) { readLogLeft--; Console.Error.WriteLine($"[ata] rd {port:x3} (status={status:x2} drive={drive:x2})"); }
         switch (port)
         {
             case 0x1F1: return error;
@@ -715,8 +755,13 @@ public class AtaDevice(DiskImage disk)
             case 0x1F4: lbaMid = val; break;
             case 0x1F5: lbaHigh = val; break;
             case 0x1F6: drive = val; break;
-            case 0x1F7: if (!SlaveSelected) Command(val); break;
+            case 0x1F7:
+                if (SlaveSelected) { L($"cmd {val:x2} to slave (absent) drive={drive:x2}"); break; }
+                L($"cmd {val:x2} feat={feature:x2} cnt={sectorCount:x2} lba={lbaHigh:x2}{lbaMid:x2}{lbaLow:x2} drive={drive:x2}");
+                Command(val);
+                break;
             case 0x3F6:
+                L($"devctl {val:x2}");
                 if ((val & 0x04) != 0) // SRST: ソフトウェアリセット
                 {
                     status = DRDY | DSC;
@@ -780,6 +825,7 @@ public class AtaDevice(DiskImage disk)
                 break;
 
             default: // 未対応コマンド(DMA 系 0xC8/0x25/0xCA/0x35 等含む)は abort → libata は PIO へ後退
+                L($"  -> unsupported command {cmd:x2}: abort");
                 error = 0x04;
                 status = DRDY | DSC | ERR;
                 IrqPending = true;
@@ -794,10 +840,17 @@ public class AtaDevice(DiskImage disk)
     public uint ReadData(int size)
     {
         uint v = 0;
+        var before = bufPos;
         for (int i = 0; i < size; i++)
             v |= (uint)(bufPos < buf.Length ? buf[bufPos++] : 0) << (8 * i);
         if (bufPos >= buf.Length && !pendingWrite)
             status = DRDY | DSC; // 転送完了
+        else if (!pendingWrite && bufPos / DiskImage.SectorSize != before / DiskImage.SectorSize)
+        {
+            // READ SECTORS(PIO)は 1 セクタ転送し終えるごとに次のセクタで INTRQ を上げる
+            // (Windows の atapi.sys はセクタごとの割り込みを待つ。無いとタイムアウト→リセット→再試行を繰り返す)。
+            IrqPending = true;
+        }
         return v;
     }
 

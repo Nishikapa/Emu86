@@ -826,6 +826,39 @@ static public partial class Ext
     /// I/O port ///////////////////////////////////
     // CMOS(0x70/0x71)・PIT(0x40/0x43)・ATA(0x1F0-0x1F7, 0x3F6)を
     // 特別扱いする以外は IoPort 配列を素通しする。
+    // ACPI PM I/O ブロック(0xB000 起点、dword 単位で値を返す)。
+    //   +0x00 PM1a_STS / +0x02 PM1a_EN / +0x04 PM1a_CNT / +0x08 PM_TMR(24bit)
+    static uint EnvPmRead(EmuEnvironment env, int port)
+    {
+        switch ((port - 0xB000) & ~3)
+        {
+            case 0x00: return (uint)env.Pm1Sts | ((uint)env.Pm1En << 16);
+            case 0x04: return env.Pm1Cnt;
+            case 0x08: return env.PmTimer;
+            default: return 0;
+        }
+    }
+
+    static void EnvPmWrite(EmuEnvironment env, int port, byte val)
+    {
+        int off = port - 0xB000;
+        switch (off)
+        {
+            case 0x00: env.Pm1Sts &= (ushort)~val; break;                          // W1C
+            case 0x01: env.Pm1Sts &= (ushort)~(val << 8); break;
+            case 0x02: env.Pm1En = (ushort)((env.Pm1En & 0xFF00) | val); break;
+            case 0x03: env.Pm1En = (ushort)((env.Pm1En & 0x00FF) | (val << 8)); break;
+            case 0x04: env.Pm1Cnt = (ushort)((env.Pm1Cnt & 0xFF00) | val); break;
+            case 0x05:
+                env.Pm1Cnt = (ushort)((env.Pm1Cnt & 0x00FF) | (val << 8));
+                if ((env.Pm1Cnt & 0x2000) != 0) // SLP_EN
+                    System.Console.Error.WriteLine($"[acpi] sleep requested: SLP_TYP={(env.Pm1Cnt >> 10) & 7} (PM1_CNT={env.Pm1Cnt:x4})");
+                env.Pm1Cnt &= 0xDFFF; // SLP_EN は書き込み専用で読み戻しは 0
+                break;
+            default: break; // タイマ等は読み取り専用
+        }
+    }
+
     static public byte EnvInPort(EmuEnvironment env, int port)
     {
         switch (port & 0xFFFF)
@@ -870,6 +903,21 @@ static public partial class Ext
                 byte b = (byte)(env.PitReadPhase == 0 ? env.PitLatched : env.PitLatched >> 8);
                 env.PitReadPhase ^= 1;
                 return b;
+            case >= 0xB000 and <= 0xB03F: // ACPI PM I/O ブロック(バイト単位)
+                return (byte)(EnvPmRead(env, port & 0xFFFF) >> (8 * ((port & 0xFFFF) & 3)));
+            case 0xAFE0 or 0xAFE1: return (byte)(env.Gpe0Sts >> (8 * (port & 1)));
+            case 0xAFE2 or 0xAFE3: return (byte)(env.Gpe0En >> (8 * (port & 1)));
+            case >= 0xB100 and <= 0xB10F: // SMBus: デバイス無し(ホストステータス=アイドル)
+                return 0;
+            case var bm when env.Pci.IdeBmBase != 0 && bm >= env.Pci.IdeBmBase && bm < env.Pci.IdeBmBase + 16:
+                // バスマスタ IDE(BMIDE)レジスタ: DMA は未実装。ステータスは常に「非活性・割り込みなし」。
+                // ディスクの IDENTIFY も DMA 非対応を報告するので、ドライバは PIO を使う。
+                return 0;
+            case 0x60: // 8042 出力バッファ(読むと OBF が落ちる)
+                if (env.KbdOut.Count > 0) env.KbdLast = env.KbdOut.Dequeue();
+                return env.KbdLast;
+            case 0x64: // 8042 ステータス: bit0=OBF, bit1=IBF(常に0), bit2=システムフラグ, bit4=キーボード非禁止
+                return (byte)(0x14 | (env.KbdOut.Count > 0 ? 1 : 0));
             case 0x1F0 when env.Ata != null:
                 return (byte)env.Ata.ReadData(1);
             case (>= 0x1F1 and <= 0x1F7) or 0x3F6 when env.Ata != null:
@@ -888,6 +936,8 @@ static public partial class Ext
         var p = port & 0xFFFF;
         if (p >= 0xCF8 && p <= 0xCFB) return env.Pci.Address >> (8 * (p - 0xCF8));
         if (p >= 0xCFC && p <= 0xCFF) return env.Pci.DataRead(p - 0xCFC, size);
+        if (p >= 0xB000 && p <= 0xB03F && (p & 3) == 0)
+            return size >= 4 ? EnvPmRead(env, p) : EnvPmRead(env, p) & ((1u << (8 * size)) - 1);
         // セカンダリ IDE チャネル(ディスク無し)はフローティングバス 0xFF を返し、
         // libata に「デバイス無し」と即断させる。
         if ((p >= 0x170 && p <= 0x177) || p == 0x376)
@@ -984,7 +1034,7 @@ static public partial class Ext
                 if (env.PicMasterInit == 1) { env.PicMasterBase = val; env.PicMasterInit = 2; }
                 else if (env.PicMasterInit == 2) { env.PicMasterInit = env.PicMasterIcw4 ? 3 : 0; }
                 else if (env.PicMasterInit == 3) { env.PicMasterInit = 0; }
-                else env.PicMasterMask = val;
+                else { if (EmuEnvironment.PicLog && env.PicMasterMask != val) System.Console.Error.WriteLine($"[pic] master mask {env.PicMasterMask:x2} -> {val:x2}"); env.PicMasterMask = val; }
                 break;
             case 0xA0:
                 if ((val & 0x10) != 0) { env.PicSlaveInit = 1; env.PicSlaveIcw4 = (val & 1) != 0; }
@@ -998,7 +1048,54 @@ static public partial class Ext
                 if (env.PicSlaveInit == 1) { env.PicSlaveBase = val; env.PicSlaveInit = 2; }
                 else if (env.PicSlaveInit == 2) { env.PicSlaveInit = env.PicSlaveIcw4 ? 3 : 0; }
                 else if (env.PicSlaveInit == 3) { env.PicSlaveInit = 0; }
-                else env.PicSlaveMask = val;
+                else { if (EmuEnvironment.PicLog && env.PicSlaveMask != val) System.Console.Error.WriteLine($"[pic] slave mask {env.PicSlaveMask:x2} -> {val:x2}"); env.PicSlaveMask = val; }
+                break;
+            case >= 0xB000 and <= 0xB03F: // ACPI PM I/O ブロック
+                EnvPmWrite(env, port & 0xFFFF, val);
+                break;
+            case 0xB2: // APM コマンド(FADT の SMI_CMD)。SMM の代わりに直接 SCI_EN を操作する。
+                       // ACPI_ENABLE(0xF1) で PM1_CNT.SCI_EN=1、ACPI_DISABLE(0xF0) で 0(QEMU の PIIX4 と同じ)。
+                if (val == 0xF1) env.Pm1Cnt |= 1;
+                else if (val == 0xF0) env.Pm1Cnt &= 0xFFFE;
+                env.IoPort[0xB2] = val;
+                System.Console.Error.WriteLine($"[acpi] APMC=0x{val:x2} -> SCI_EN={env.Pm1Cnt & 1}");
+                break;
+            case 0xAFE0: env.Gpe0Sts &= (ushort)~val; break;                       // GPE0_STS: W1C
+            case 0xAFE1: env.Gpe0Sts &= (ushort)~(val << 8); break;
+            case 0xAFE2: env.Gpe0En = (ushort)((env.Gpe0En & 0xFF00) | val); break;
+            case 0xAFE3: env.Gpe0En = (ushort)((env.Gpe0En & 0x00FF) | (val << 8)); break;
+            case >= 0xB100 and <= 0xB10F: break;                                    // SMBus: 無視
+            case var bm when env.Pci.IdeBmBase != 0 && bm >= env.Pci.IdeBmBase && bm < env.Pci.IdeBmBase + 16:
+                break;                                                              // BMIDE: 無視
+            case 0x64: // 8042 コントローラコマンド
+                env.KbdPendingCmd = 0;
+                switch (val)
+                {
+                    case 0x20: env.KbdOut.Enqueue(env.KbdCmdByte); break;       // コマンドバイト読み出し
+                    case 0x60: env.KbdPendingCmd = 0x60; break;                  // 次の 0x60 書き込みがコマンドバイト
+                    case 0xAA: env.KbdOut.Enqueue(0x55); break;                  // 自己診断 OK
+                    case 0xAB: env.KbdOut.Enqueue(0x00); break;                  // インタフェース試験 OK
+                    case 0xA9: env.KbdOut.Enqueue(0x00); break;                  // マウスポート試験 OK
+                    case 0xD0: env.KbdOut.Enqueue(0x03); break;                  // 出力ポート読み(A20 有効・リセット非活性)
+                    case 0xD1 or 0xD2 or 0xD3 or 0xD4: env.KbdPendingCmd = val; break; // 次の 0x60 書き込みが引数
+                    default: break;                                              // AD/AE(禁止/許可)、A7/A8、FE(リセット)等は無視
+                }
+                break;
+            case 0x60: // 8042 データ: 保留コマンドの引数、またはキーボードへのコマンド
+                switch (env.KbdPendingCmd)
+                {
+                    case 0x60: env.KbdCmdByte = val; break;
+                    case 0xD1: break; // 出力ポート書き込み(A20 等)は無視
+                    case 0xD2: env.KbdOut.Enqueue(val); break; // 出力バッファへ書き込み
+                    case 0xD3 or 0xD4: break;                   // マウス関連は未接続
+                    default:
+                        // キーボードコマンド: ACK を返し、必要な追加応答を積む。
+                        env.KbdOut.Enqueue(0xFA);
+                        if (val == 0xFF) env.KbdOut.Enqueue(0xAA);                          // リセット → BAT OK
+                        else if (val == 0xF2) { env.KbdOut.Enqueue(0xAB); env.KbdOut.Enqueue(0x83); } // ID
+                        break;
+                }
+                env.KbdPendingCmd = 0;
                 break;
             case 0x1F0 when env.Ata != null:
                 env.Ata.WriteData(1, val);
@@ -1070,6 +1167,9 @@ static public partial class Ext
 
 public class EmuEnvironment
 {
+    // --piclog: PIC マスクの変化を記録する。
+    public static bool PicLog;
+
     // 搭載RAM量。SeaBIOS の init 再配置は 1MB 超のRAMを要求するため、
     // 1MBちょうどではなく拡張メモリを持たせる。BIOS(bios.bin)は先頭1MBの末尾に配置される。
     public const int RamSize = 256 * 1024 * 1024; // 256MB(Debian の initramfs をロードするには 32MB では不足)
@@ -1091,7 +1191,7 @@ public class EmuEnvironment
 
         InitCmos();
 
-        // ディスク: sample.vhdx / sample.vhd があればプライマリ ATA マスタとして接続する(vhdx 優先)。
+        // ディスク: sample.vhd / sample.vhdx があればプライマリ ATA マスタとして接続する(vhd 優先)。
         // 書き込みは差分 VHDX(sample.avhdx)へ蓄積され、ベースイメージ自体は変更されない。
         var diskImage = sourceArray.FirstOrDefault(File.Exists);
         if (diskImage != null)
@@ -1193,6 +1293,22 @@ public class EmuEnvironment
     // PIT チャネル2 + システム制御ポートB(0x61)。TSC/遅延校正で使われる。
     // 実時間を持たないため、ゲート有効かつ ch2 プログラム済みなら数回の 0x61 読みで
     // OUT2(bit5)を立てて校正ウェイトを終わらせる。値の正確さより「ループが抜けること」を優先。
+    // 8042 キーボードコントローラ(最小実装)。キーボード本体は接続されていない扱いだが、
+    // コントローラ/キーボードコマンドへの応答(ACK・自己診断結果・コマンドバイト)を
+    // 出力バッファに積み、0x64 の OBF(bit0) を読み出しに合わせて上下させる。
+    // これがないと 0x64 が最後に書いたコマンド値(0xAD 等)をそのまま返し、
+    // NTLDR/SeaBIOS の「OBF が落ちるまで 0x60 を読む」フラッシュが無限ループになる。
+    // (過渡状態なのでスナップショットには保存しない)
+    public readonly Queue<byte> KbdOut = new();
+    public byte KbdLast;         // 0x60 の直近読み出し値(空読み時に返す)
+    public byte KbdCmdByte = 0x45; // コマンドバイト(初期値: 変換有効・IRQ1 有効)
+    public int KbdPendingCmd;    // 次の 0x60 書き込みを引数として受け取る 0x64 コマンド(0=なし)
+    // PIIX4 ACPI 電源管理レジスタ(I/O 0xB000-)。Windows の halacpi は PM タイマ(0xB008)を
+    // QueryPerformanceCounter に使い、acpi.sys は PM1 イベント/制御と GPE を操作する。
+    // タイマは 3.579545MHz。仮想時間は IRQ0 周期(10,000 命令 = 10ms)から 1 秒 = 100 万命令とみなす。
+    public ushort Pm1Sts, Pm1En, Pm1Cnt;
+    public ushort Gpe0Sts, Gpe0En;
+    public uint PmTimer => (uint)(Tsc * 3579545UL / 1_000_000UL) & 0xFFFFFF;
     public byte Port61;          // 0x61 の書き込み値(bit0=ch2ゲート, bit1=スピーカ)
     public byte Port61Refresh;   // bit4 のリフレッシュトグル
     public ushort Pit2Counter = 0xFFFF;
@@ -1204,7 +1320,7 @@ public class EmuEnvironment
     // 意図的にスナップショットへは保存しない(過渡状態であり、保存形式を変えると
     // 既存チェックポイントから --resume できなくなるため。再開後は次の OUT 0x43 で再設定される)。
     public bool PitStatusPending;
-    private static readonly string[] sourceArray = ["sample.vhdx", "sample.vhd"];
+    private static readonly string[] sourceArray = ["sample.vhd", "sample.vhdx"];
 
     // スナップショット保存/復元。ディスクの中身(DiskImage)は書き込みのたびに
     // ファイルへ反映済みなので、ここでは RAM/IOポート/CMOS/PIT/ATA レジスタのみを扱う。

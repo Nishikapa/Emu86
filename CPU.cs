@@ -394,6 +394,10 @@ public class CPU
     // 割り込み)で SP/ESP のどちらを使うかは CS.D ではなく SS.B で決まる。
     // 例: PnP BIOS は 16ビットCS + 32ビットSS で動くため両者が食い違う。
     public bool stack32;
+    // タスクレジスタ / LDT レジスタのセレクタ。タスク切替や LDT 自体は未実装だが、
+    // LTR/LLDT で保持し STR/SLDT で返す(NT カーネルは STR→GDT から TSS の番地を求める)。
+    public ushort tr;
+    public ushort ldtr;
 
     // x87 FPU の状態。ST(i) = fpu_st[(fpu_top + i) & 7]。
     // 値は C# の double で保持する(実機の内部 80 ビットではなく倍精度)。
@@ -565,6 +569,7 @@ public class CPU
         d.cs_base = cs_base; d.ds_base = ds_base; d.es_base = es_base;
         d.ss_base = ss_base; d.fs_base = fs_base; d.gs_base = gs_base;
         d.eip = eip; d.code32 = code32; d.stack32 = stack32;
+        d.tr = tr; d.ldtr = ldtr;
         d.idt_limit = idt_limit; d.idt_base = idt_base;
         d.gdt_limit = gdt_limit; d.gdt_base = gdt_base;
         d.cr0 = cr0; d.cr2 = cr2; d.cr3 = cr3; d.cr4 = cr4;

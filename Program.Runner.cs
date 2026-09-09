@@ -79,6 +79,36 @@ static partial class Program
         // --brhist 指定時のみ記録する(通常実行のオーバーヘッドを避ける)。
         var brHist = args.Contains("--brhist");
         var espTrap = args.Contains("--esptrap");
+        var udLogLeft = 40; // #UD 配送ログの残り行数
+        // --entrylog <lo> <hi> … EIP が範囲外から [lo,hi) に入るたびに、入口・呼び出し元・引数(IRP なら major/minor)を記録する
+        uint elLo = 0, elHi = 0; var entryLogLeft = 400; var wasInRange = false;
+        var elIdx = Array.IndexOf(args, "--entrylog");
+        if (elIdx >= 0 && elIdx + 2 < args.Length) { elLo = Convert.ToUInt32(args[elIdx + 1], 16); elHi = Convert.ToUInt32(args[elIdx + 2], 16); }
+        // --breakrange <lo> <hi> … EIP が [lo,hi) に入った最初の命令で停止する(ドライバが実行されるかの確認用)
+        uint brLo = 0, brHi = 0;
+        var brIdxArg = Array.IndexOf(args, "--breakrange");
+        if (brIdxArg >= 0 && brIdxArg + 2 < args.Length) { brLo = Convert.ToUInt32(args[brIdxArg + 1], 16); brHi = Convert.ToUInt32(args[brIdxArg + 2], 16); }
+        AtaDevice.Log = args.Contains("--atalog"); // ATA コマンド/制御レジスタのログ
+        PciHost.Log = args.Contains("--pcilog");   // PCI コンフィグアクセスのログ
+        PciHost.Caller = () =>
+        {
+            // EBP チェーンをたどって戻り番地を並べる(呼び出し元ドライバの特定用)。
+            var sb = new System.Text.StringBuilder();
+            try
+            {
+                uint Rd32(uint a) => (uint)(EnvGetMemoryData8(env, a) | (EnvGetMemoryData8(env, a + 1) << 8)
+                    | (EnvGetMemoryData8(env, a + 2) << 16) | (EnvGetMemoryData8(env, a + 3) << 24));
+                var bp = cpu.ebp;
+                for (var k = 0; k < 8 && bp != 0; k++)
+                {
+                    sb.Append(Rd32(bp + 4).ToString("x8")).Append(' ');
+                    bp = Rd32(bp);
+                }
+            }
+            catch (Exception) { sb.Append("?"); }
+            return sb.ToString();
+        };
+        EmuEnvironment.PicLog = args.Contains("--piclog"); // PIC マスク変化のログ
         uint beforeEsp = 0;
         var noirq = args.Contains("--noirq");
         var pfTrap = args.Contains("--pftrap");
@@ -191,7 +221,36 @@ static partial class Program
                 var beforeCs = cpu.cs;
                 var beforeEip = cpu.eip;
                 env.CurEip = cpu.eip; // 書き込みログの帰属用
-                if (breakEip != 0 && cpu.eip == breakEip && (!hasBreakEax || cpu.eax == breakEax))
+                if (elHi != 0 && cpu.pe)
+                {
+                    var inRange = cpu.eip >= elLo && cpu.eip < elHi;
+                    if (inRange && !wasInRange && entryLogLeft > 0)
+                    {
+                        entryLogLeft--;
+                        try
+                        {
+                            uint Rd32(uint a) => (uint)(EnvGetMemoryData8(env, a) | (EnvGetMemoryData8(env, a + 1) << 8)
+                                | (EnvGetMemoryData8(env, a + 2) << 16) | (EnvGetMemoryData8(env, a + 3) << 24));
+                            var sp = cpu.esp;
+                            var ret = Rd32(sp); var a1 = Rd32(sp + 4); var a2 = Rd32(sp + 8);
+                            var irpInfo = "";
+                            if (a2 >= 0x80000000 && a2 < 0xF0000000)
+                            {
+                                // IRP なら Tail.Overlay.CurrentStackLocation(+0x60) から Major/Minor を読む(Type=6 で判定)
+                                var type = Rd32(a2) & 0xFFFF;
+                                if (type == 6)
+                                {
+                                    var stk = Rd32(a2 + 0x60);
+                                    irpInfo = $" irp major={EnvGetMemoryData8(env, stk):x2} minor={EnvGetMemoryData8(env, stk + 1):x2}";
+                                }
+                            }
+                            WriteLine($"ENTRY {count}: {beforeEip:x8} -> {cpu.eip:x8} ret={ret:x8} a1={a1:x8} a2={a2:x8}{irpInfo}");
+                        }
+                        catch (Exception) { WriteLine($"ENTRY {count}: -> {cpu.eip:x8} (args unreadable)"); }
+                    }
+                    wasInRange = inRange;
+                }
+                if ((breakEip != 0 && cpu.eip == breakEip && (!hasBreakEax || cpu.eax == breakEax)) || (brHi != 0 && cpu.pe && cpu.eip >= brLo && cpu.eip < brHi))
                 {
                     WriteLine($"BREAKEIP {cpu.eip:x8}: eax={cpu.eax:x8} ecx={cpu.ecx:x8} edx={cpu.edx:x8} ebx={cpu.ebx:x8} esi={cpu.esi:x8} edi={cpu.edi:x8} ebp={cpu.ebp:x8} esp={cpu.esp:x8}");
                     var sb2 = cpu.ss_base;
@@ -206,7 +265,9 @@ static partial class Program
                 }
                 // ページング有効時は、命令の途中でページフォルトが起きうるため
                 // 命令前のレジスタ状態を退避しておき、#PF 配送時に巻き戻す。
-                if (env.PagingOn) cpu.CopyTo(faultSave);
+                if (env.PagingOn || cpu.pe) cpu.CopyTo(faultSave);
+                AtaDevice.LogReads = env.PagingOn;
+                PciHost.Eip = cpu.eip;
                 try
                 {
                     // まず高速コアで 1 命令実行し、未対応の命令だけモナド版へフォールバックする。
@@ -218,8 +279,28 @@ static partial class Program
                     {
                         var r = step(env, cpu, default);
                         if (!r.IsSuccess)
-                            break;
-                        cpu = r.cpu;
+                        {
+                            // 未定義/未対応命令。プロテクトモードで IDT が整っていれば #UD(ベクタ 6)として
+                            // 命令開始時の状態から配送する(Virtual PC のハイパーコール命令 0F C7 C8 のように、
+                            // OS 側が例外を前提に実行する不正命令がある)。診断のため先頭数十回はログに残す。
+                            if (!cpu.pe || cpu.idt_limit < 6 * 8 + 7)
+                                break;
+                            faultSave.CopyTo(cpu);
+                            if (udLogLeft > 0)
+                            {
+                                udLogLeft--;
+                                var ua = GetCodeAddr(cpu).addr;
+                                string ub;
+                                try { ub = string.Join(" ", Enumerable.Range(0, 6).Select(i => EnvGetMemoryData8(env, ua + (uint)i).ToString("x2"))); }
+                                catch (PageFaultException) { ub = "(unmapped)"; }
+                                WriteLine($"[cpu] #UD at {cpu.cs:x4}:{cpu.eip:x8} opcode {ub} (instr {count}) -> IDT vector 6");
+                            }
+                            var ud = Interrupt(6)(env, cpu, default);
+                            if (!ud.IsSuccess) { WriteLine("#UD delivery failed"); break; }
+                            cpu = ud.cpu;
+                        }
+                        else
+                            cpu = r.cpu;
                     }
                 }
                 catch (PageFaultException pf)

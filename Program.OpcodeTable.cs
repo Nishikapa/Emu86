@@ -101,6 +101,7 @@ static partial class Program
         (0xC0, 2, Group2_C0_C1),
         (0xC2, 1, Ret_C2),
         (0xC3, 1, Ret_C3),
+        (0xC4, 2, LesLds_C4_C5),
         (0xC6, 2, Mov_C6_C7),
         (0xC8, 1, Enter_C8),
         (0xC9, 1, Leave_C9),
@@ -113,6 +114,11 @@ static partial class Program
         (0xD0, 2, Group2_D0_D1),
         (0xD2, 2, Group2_D2_D3),
         (0xD7, 1, Xlat_D7),
+        (0xD4, 2, AamAad_D4_D5),
+        (0x27, 1, DaaDas_27_2F),
+        (0x2F, 1, DaaDas_27_2F),
+        (0x37, 1, AaaAas_37_3F),
+        (0x3F, 1, AaaAas_37_3F),
         (0xD8, 8, Fpu_D8_DF),
         (0xE0, 3, Loop_E0_E2),
         (0xE3, 1, Jcxz_E3),
@@ -157,6 +163,8 @@ static partial class Program
         (0x0F, 0xBA, 0x01, Group8_0FBA),          // BT/BTS/BTR/BTC r/m, imm8
         (0x0F, 0xBB, 0x01, BitTest_reg),          // BTC r/m, r
         (0x0F, 0xB6, 0x02, MovzxMovsx_0FB6_BF),   // MOVZX r,r/m8 ; r,r/m16
+        (0x0F, 0xB2, 0x01, LssLfsLgs_0FB2_B5),    // LSS r, m16:16/32
+        (0x0F, 0xB4, 0x02, LssLfsLgs_0FB2_B5),    // LFS / LGS r, m16:16/32
         (0x0F, 0xBC, 0x02, BitScan_0FBC_BD),      // BSF/BSR r16, r/m16
         (0x0F, 0xBE, 0x02, MovzxMovsx_0FB6_BF),   // MOVSX r,r/m8 ; r,r/m16
         (0x0F, 0xA0, 0x01, PushPopFsGs),          // PUSH FS
