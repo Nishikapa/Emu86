@@ -227,3 +227,63 @@ PCI 実装後も root マウントは同じ panic(空の "tried:" リスト)。d
 - `Program.Runner.cs`: 実行ループ、タイマ IRQ 注入、#PF 配送、各種デバッグトラップ。
 - `Program.Snapshot.cs`: スナップショット保存/復元。
 - `Disk.cs`: VHD/VHDX/AVHDX(COW オーバーレイ)+ ATA PIO デバイス。
+
+## Windows XP(sample.vhd)ブート(2026-09-09)
+
+読み込み先を `sample.vhd`(vhd 優先)に切り替えて着手。**すべて未コミット**(git status で 10 ファイル変更 + `tools/win-debug/` 追加)。
+
+### イメージの正体
+- 127GB 動的 VHD、作成元 "vpc 1.0"(Virtual PC 2007)。NTFS 1 パーティション(LBA 63)。
+- Windows XP Professional、HAL は **halacpi.dll(ACPI・PIC・UP)**。boot.ini は `/noexecute=optin /fastdetect` のみ(デバッグ無し)。
+- レジストリ(SYSTEM ハイブ)が知っているハードは Virtual PC のもの: 440BX ホスト(8086:7192)、PIIX4 ISA 7110 → isapnp、
+  **PIIX4 IDE 7111 → intelide**、S3 Trio(vpc-s3)。CriticalDeviceDatabase には `pci#ven_8086&dev_7111` しか無く、
+  `pciide` サービスは Start=4(無効)。→ PIIX3(7010)のままではブート時にドライバが結び付かず 0x7B になる。
+- Virtual PC 統合コンポーネント(MSVMMOUF.SYS 等)が入っている。
+
+### 到達点
+冷起動 → SeaBIOS → NTLDR → ntoskrnl → ブートドライバ群(pci/ACPI/atapi/disk/ftdisk/ntfs…)→ **atapi.sys がディスクを認識し、
+NTFS を読み書き中**(READ 2,599 LBA 以上、WRITE は差分 sample.avhdx へ)。約 5.8 億命令(Release、~15M 命令/秒)で次のブロッカーに到達。
+
+### 追加・修正したもの(順に、それぞれが停止の原因だった)
+1. `Disk.cs` EnsureOverlay: 差分の親が違う場合は `.old` へ退避して作り直す(sample.vhdx 用の差分を誤って使い回さないため)。
+2. 未実装命令: LES/LDS(C4/C5)、LSS/LFS/LGS(0F B2/B4/B5)= `LoadFarPtr`、AAA/AAS/DAA/DAS/AAM/AAD、
+   LTR/STR/LLDT/SLDT(CPU に `tr`/`ldtr` 追加。**NT の KiSystemStartup は STR→GDT から TSS を求める**ので 0 を返すと NULL 書き込み #PF)。
+3. 8042 キーボードコントローラ最小実装(`KbdOut` キュー、0x64 OBF、コマンド応答)。無いと 0x64 が最後の書き込み値を返し
+   NTLDR/SeaBIOS の「OBF が落ちるまで 0x60 を読む」フラッシュが無限ループ。
+4. ACPI: PCI 00:01.3 に PIIX4 PM(8086:7113)を露出 → SeaBIOS が RSDP/RSDT/FADT/DSDT/SSDT/APIC を生成(HAL の 0x79 MISMATCHED_HAL(4) 解消)。
+   PM I/O(0xB000-: PM1_STS/EN/CNT、PM タイマ 3.579545MHz = Tsc×3.579545/1e6、GPE0 0xAFE0、SMBus 0xB100 ダミー)。
+   SMI_CMD(0xB2)へ 0xF1 で PM1_CNT.SCI_EN=1(無いと acpi.sys が 0xA5 ACPI_BIOS_ERROR (0x11,6))。
+   DEVACTB(0x58) bit25 を初期値で立て、SeaBIOS の SMM 再配置(0xB2/0xB3 待ち)を省略。
+5. PCI: ISA/IDE のデバイス ID を **PIIX4(7110/7111、rev 01)** に変更(レジストリ都合、上記)。
+   IDE BAR4(バスマスタ I/O 16 バイト、サイズ問い合わせ対応。`barMask`)+ BMIDE ポートは読み 0/書き無視。
+   BAR4 が無いと pciidex が資源不足で開始できない可能性があった(ID 変更と同時に入れたので単独効果は未確認)。拡張 ROM BAR は読み取り専用 0。
+6. ATA: PIO READ SECTORS はセクタ転送ごとに INTRQ(atapi.sys はセクタごとに割り込みを待つ。無いと SRST→再試行ループ)。
+7. スナップショット v6(末尾に TR/LDTR)。
+8. 調査フラグ: `--atalog`(ATA コマンド/制御/OS 稼働中のレジスタ読み)、`--pcilog`(PCI コンフィグアクセス + EBP チェーンの戻り番地)、
+   `--piclog`(PIC マスク変化)、`--breakrange lo hi`(EIP が範囲に入ったら停止)、`--entrylog lo hi`(範囲へ入るたびに入口/引数/IRP major/minor を記録)。
+
+### 次のブロッカー(ここから再開)
+約 576M 命令で `STOP at 0008:f9f64524 opcode 0f c7 c8` — **MSVMMOUF.SYS(Virtual PC 統合のマウスフィルタ)が VPC ハイパーコール命令
+`0F C7 C8`(レジスタ形式 CMPXCHG8B、実 CPU では #UD)を実行**。ドライバは例外を捕捉して VM 外と判断するはず。
+対処案(パッチ案は用意したが未適用): `Program.Runner.cs` のモナド版 `step` が失敗したとき、
+`cpu.pe && idt_limit >= 6*8+7` なら `faultSave` から命令開始時の状態に戻して `Interrupt(6)` を配送する
+(`faultSave` のコピー条件を `env.PagingOn || cpu.pe` に広げる)。診断性を保つため配送時は `[cpu] #UD at cs:eip opcode …` を数十行までログ。
+注意: 未実装命令も #UD になって OS 側で不正命令例外になるため、STOP しなくなった代わりにログを必ず見ること。
+
+### 再開コマンド
+```
+dotnet build Emu86.sln -c Release
+# 冷起動(Windows 区間は ~15M 命令/秒。6 億命令で次のブロッカー)
+./bin/Release/net10.0/Emu86.exe --notrace --atalog --limit 2000000000 --snapshot sample_vhd.snap
+# 停止時の解析: tools/win-debug/README.md 参照(snapcpu → pfdiag4 で逆アセンブル → symstack / KiBugCheckData)
+```
+- バグチェックの有無は `KiBugCheckData`(0x8055abc0、5 dword)で判定。HAL の 806f0432〜806f0520 のループは
+  バグチェック後の電源ボタン待ち(PM1_STS ポーリング)。
+- Windows 側の進捗はモジュール列挙(pfdiag.py のページウォークで MZ を探し、リソースの OriginalFilename を読む)や
+  `--atalog` の READ/WRITE 量で見る。
+- 作業ファイル: `sample_vhd.snap`(約 268MB、直近の停止点)、`sample.avhdx.old`(vhdx 用の旧差分)。どちらも消してよい。
+
+### 判明したエミュレータの仕様上の注意
+- 実モードで `ret`/`jmp` 後も EIP の上位 16 ビットにゴミが残る(コードフェッチは `ip` を使うので実害なし)。
+- EFLAGS の予約ビット 1 が常に 0(実 CPU は 1)。今のところ問題なし。
+- PIC マスクの高速なトグル(fb↔fa、ff↔fe/fc)は XP HAL の割り込み処理中マスクで正常。

@@ -16,8 +16,9 @@ static partial class Program
     // v3: 末尾に TSC と MSR ストアを追加
     // v4: 末尾に PIC 状態(ベース/マスク)を追加
     // v5: 末尾に x87 レジスタスタック(top/valid/ST0-7)を追加
+    // v6: 末尾に TR/LDTR セレクタを追加
     // (旧バージョンは互換ロード可能: 足りない分は既定値で補われる)
-    const int SnapshotVersion = 5;
+    const int SnapshotVersion = 6;
 
     static void SaveSnapshot(long count, CPU cpu, EmuEnvironment env)
     {
@@ -48,6 +49,9 @@ static partial class Program
             w.Write(cpu.fpu_valid);
             for (var i = 0; i < 8; i++)
                 w.Write(cpu.fpu_st[i]);
+            // v6: TR/LDTR
+            w.Write(cpu.tr);
+            w.Write(cpu.ldtr);
         }
         File.Move(tmp, SnapshotPath, overwrite: true);
     }
@@ -59,7 +63,7 @@ static partial class Program
         if (System.Text.Encoding.ASCII.GetString(r.ReadBytes(SnapshotMagic.Length)) != SnapshotMagic)
             throw new InvalidDataException($"{SnapshotPath} is not a valid Emu86 snapshot");
         var version = r.ReadInt32();
-        if (version is not (>= 2 and <= 5))
+        if (version is not (>= 2 and <= 6))
             throw new InvalidDataException($"{SnapshotPath} has an unsupported snapshot version");
         var count = r.ReadInt64();
         var cpu = CPU.ReadFrom(r);
@@ -89,6 +93,11 @@ static partial class Program
             cpu.fpu_valid = r.ReadByte();
             for (var i = 0; i < 8; i++)
                 cpu.fpu_st[i] = r.ReadDouble();
+        }
+        if (version >= 6)
+        {
+            cpu.tr = r.ReadUInt16();
+            cpu.ldtr = r.ReadUInt16();
         }
         return (count, cpu);
     }

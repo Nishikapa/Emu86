@@ -889,6 +889,33 @@ static partial class Program
         from _2 in JmpTo(target)
         select unit;
 
+    // LES (0xC4) / LDS (0xC5): メモリの far ポインタ m16:16/m16:32 を読み、
+    // オフセットを reg、セレクタを ES/DS へロードする。レジスタ形式(mod=3)は #UD 扱いで停止。
+    // (NTLDR 等の 16bit リアルモードコードが多用する。Linux は使わないため未実装だった。)
+    static State<Unit> LesLds_C4_C5 =>
+        from _1 in SetLog("LesLds_C4_C5")
+        from opecode in Opecodes
+        from _2 in LoadFarPtr(opecode[0] == 0xC4 ? 0 : 3) // ES / DS
+        select unit;
+
+    // LSS (0F B2) / LFS (0F B4) / LGS (0F B5): 2バイト版の far ポインタロード。
+    static State<Unit> LssLfsLgs_0FB2_B5 =>
+        from _1 in SetLog("LssLfsLgs_0FB2_B5")
+        from opecode in Opecodes
+        from _2 in LoadFarPtr(opecode[1] == 0xB2 ? 2 : opecode[1] == 0xB4 ? 4 : 5) // SS / FS / GS
+        select unit;
+
+    // far ポインタ m16:16/m16:32 を読み、オフセットを reg、セレクタを sreg へロードする共通部。
+    static State<Unit> LoadFarPtr(int sreg) =>
+        from m in ModRegRm()
+        from _2 in SetResult(3 != m.mod)
+        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from data in GetMemOrRegData(addr, true)
+        from sel in GetMemOrRegData16((addr.isMem, addr.addr + (uint)(data.type == 2 ? 4 : 2)))
+        from _3 in SetRegData(m.reg, data)
+        from _4 in LoadSReg(sreg, sel)
+        select unit;
+
     // WAIT/FWAIT (0x9B): FPU 例外を同期する。例外は配送しないため NOP。
     static State<Unit> Fwait_9B =>
         from _ in SetLog("Fwait_9B")
@@ -1234,6 +1261,61 @@ static partial class Program
         from _2 in Xlat
         select unit;
 
+    // BCD 調整命令群。Linux は使わないが、Windows の HAL/NTLDR 等の 16/32bit コードが使う。
+    static bool ParityEven(byte v) => (System.Numerics.BitOperations.PopCount(v) & 1) == 0;
+
+    // AAA (0x37) / AAS (0x3F): 加減算後の非パック BCD 調整。
+    static State<Unit> AaaAas_37_3F =>
+        from _1 in SetLog("AaaAas_37_3F")
+        from opecode in Opecodes
+        from _2 in SetCpu(cpu =>
+        {
+            bool adjust = (cpu.al & 0x0F) > 9 || cpu.af;
+            if (adjust)
+            {
+                if (opecode[0] == 0x37) { cpu.al = (byte)(cpu.al + 6); cpu.ah = (byte)(cpu.ah + 1); }
+                else { cpu.al = (byte)(cpu.al - 6); cpu.ah = (byte)(cpu.ah - 1); }
+            }
+            cpu.af = adjust; cpu.cf = adjust;
+            cpu.al = (byte)(cpu.al & 0x0F);
+            return cpu;
+        })
+        select unit;
+
+    // DAA (0x27) / DAS (0x2F): 加減算後のパック BCD 調整。
+    static State<Unit> DaaDas_27_2F =>
+        from _1 in SetLog("DaaDas_27_2F")
+        from opecode in Opecodes
+        from _2 in SetCpu(cpu =>
+        {
+            byte old = cpu.al; bool oldCf = cpu.cf; bool sub = opecode[0] == 0x2F;
+            bool af = (old & 0x0F) > 9 || cpu.af;
+            bool cf = oldCf || old > 0x99;
+            int al = old;
+            if (af) al = sub ? al - 6 : al + 6;
+            if (cf) al = sub ? al - 0x60 : al + 0x60;
+            cpu.al = (byte)al;
+            cpu.af = af; cpu.cf = cf;
+            cpu.zf = cpu.al == 0; cpu.sf = (cpu.al & 0x80) != 0; cpu.pf = ParityEven(cpu.al);
+            return cpu;
+        })
+        select unit;
+
+    // AAM (D4 ib) / AAD (D5 ib): AL を基数 ib で分解 / AH:AL を基数 ib で結合。
+    static State<Unit> AamAad_D4_D5 =>
+        from _1 in SetLog("AamAad_D4_D5")
+        from opecode in Opecodes
+        from imm in GetMemoryDataIp8
+        from _2 in SetResult(opecode[0] != 0xD4 || imm != 0) // AAM 0 は #DE
+        from _3 in SetCpu(cpu =>
+        {
+            if (opecode[0] == 0xD4) { byte al = cpu.al; cpu.ah = (byte)(al / imm); cpu.al = (byte)(al % imm); }
+            else { cpu.al = (byte)(cpu.al + cpu.ah * imm); cpu.ah = 0; }
+            cpu.zf = cpu.al == 0; cpu.sf = (cpu.al & 0x80) != 0; cpu.pf = ParityEven(cpu.al);
+            return cpu;
+        })
+        select unit;
+
     static State<Unit> Nop_90 =>
         from _ in SetLog("Nop_90")
         select unit;
@@ -1391,14 +1473,19 @@ static partial class Program
         )
         select unit;
 
+    // SLDT/STR: 保持しているセレクタを返す(レジスタ形式は32bit幅のときゼロ拡張)。
     static State<Unit> SldtStr((int mod, int reg, int rm) m) =>
         from addr in GetMemOrRegAddr(m.mod, m.rm)
-        from _ in SetMemOrRegData(addr, ((ushort)0).ToTypeData())
+        from cpu in GetCpu
+        let sel = m.reg == 1 ? cpu.tr : cpu.ldtr
+        from _ in addr.isMem ? SetMemOrRegData(addr, sel.ToTypeData()) : SetRegData(m.rm, ((uint)sel).ToTypeData())
         select unit;
 
+    // LLDT/LTR: セレクタを保持するだけ(記述子の検証・ビジー化は行わない)。
     static State<Unit> LldtLtr((int mod, int reg, int rm) m) =>
         from addr in GetMemOrRegAddr(m.mod, m.rm)
-        from _ in GetMemOrRegData16(addr) // セレクタを読み捨てる
+        from sel in GetMemOrRegData16(addr)
+        from _ in SetCpu(cpu => { if (m.reg == 3) cpu.tr = sel; else cpu.ldtr = sel; return cpu; })
         select unit;
 
     static State<Unit> Group7_0F01 =>
