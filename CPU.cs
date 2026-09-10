@@ -63,6 +63,9 @@ static public partial class Ext
     // kind: 0=ADD 1=OR 2=ADC 3=SBB 4=AND 5=SUB 6=XOR 7=CMP
     // ADC/SBB のキャリー入力はオペランドに畳み込まず個別に扱う
     // (b=0xFF..FF かつ CF=1 のときにキャリー出力が失われるのを防ぐ)。
+    // PF: 結果の下位 8 ビットの 1 の個数が偶数なら 1。
+    static public bool Par(uint v) => (System.Numerics.BitOperations.PopCount(v & 0xFF) & 1) == 0;
+
     static public State<Data> Calc(Data d1, Data d2, int kind)
     {
         if (d1.type != d2.type)
@@ -91,7 +94,9 @@ static public partial class Ext
                 (_zf, fr == 0),
                 (_sf, (fr & msb) != 0),
                 (_of, isAdd ? ((a ^ b) & msb) == 0 && ((a ^ fr) & msb) != 0
-                    : isSub && ((a ^ b) & msb) != 0 && ((a ^ fr) & msb) != 0)
+                    : isSub && ((a ^ b) & msb) != 0 && ((a ^ fr) & msb) != 0),
+                (_pf, Par(fr)),
+                (_af, (isAdd || isSub) && ((a ^ b ^ fr) & 0x10) != 0) // 論理演算では 0(実 CPU は未定義だがクリアされる)
             )
             select r.ToTypeData(d1.type);
     }
@@ -173,7 +178,7 @@ static public partial class Ext
         from _f in cnt == 0
             ? unit.ToState()
             : kind >= 4
-                ? SetCpu((_cf, res.cf), (_of, res.of), (_zf, res.result == 0), (_sf, (res.result & Msb(data.type)) != 0))
+                ? SetCpu((_cf, res.cf), (_of, res.of), (_zf, res.result == 0), (_sf, (res.result & Msb(data.type)) != 0), (_pf, Par(res.result)))
                 : SetCpu((_cf, res.cf), (_of, res.of))
         select res.result.ToTypeData(data.type);
 
@@ -263,7 +268,9 @@ static public partial class Ext
             (_cf, false),
             (_zf, 0 == v),
             (_sf, 0 != (v & 0x80)),
-            (_of, false)
+            (_of, false),
+            (_pf, Par(v)),
+            (_af, false)
         );
 
     static public State<Unit> update_eflags(ushort v) =>
@@ -271,7 +278,9 @@ static public partial class Ext
             (_cf, false),
             (_zf, 0 == v),
             (_sf, 0 != (v & 0x8000)),
-            (_of, false)
+            (_of, false),
+            (_pf, Par(v)),
+            (_af, false)
         );
 
     static public State<Unit> update_eflags(uint v) =>
@@ -279,7 +288,9 @@ static public partial class Ext
             (_cf, false),
             (_zf, 0 == v),
             (_sf, 0 != (v & 0x80000000)),
-            (_of, false)
+            (_of, false),
+            (_pf, Par(v)),
+            (_af, false)
         );
 
     // type(0=byte,1=word,2=dword) に応じて幅ごとの update_eflags を呼ぶ。
@@ -293,7 +304,9 @@ static public partial class Ext
             (_cf, v1 < v2),
             (_zf, v1 == v2),
             (_sf, TopBit((byte)(v1 - v2))),
-            (_of, (TopBit(v1) != TopBit(v2)) && (TopBit(v1) != TopBit((byte)(v1 - v2))))
+            (_of, (TopBit(v1) != TopBit(v2)) && (TopBit(v1) != TopBit((byte)(v1 - v2)))),
+            (_pf, Par((uint)(byte)(v1 - v2))),
+            (_af, ((v1 ^ v2 ^ (v1 - v2)) & 0x10) != 0)
         );
 
     static public State<Unit> update_eflags_sub(uint v1, uint v2) =>
@@ -301,7 +314,9 @@ static public partial class Ext
             (_cf, v1 < v2),
             (_zf, v1 == v2),
             (_sf, TopBit(v1 - v2)),
-            (_of, (TopBit(v1) != TopBit(v2)) && (TopBit(v1) != TopBit(v1 - v2)))
+            (_of, (TopBit(v1) != TopBit(v2)) && (TopBit(v1) != TopBit(v1 - v2))),
+            (_pf, Par(v1 - v2)),
+            (_af, ((v1 ^ v2 ^ (v1 - v2)) & 0x10) != 0)
         );
 
     static public State<Unit> update_eflags_sub(ushort v1, ushort v2) =>
@@ -309,7 +324,9 @@ static public partial class Ext
             (_cf, v1 < v2),
             (_zf, v1 == v2),
             (_sf, TopBit((ushort)(v1 - v2))),
-            (_of, (TopBit(v1) != TopBit(v2)) && (TopBit(v1) != TopBit((ushort)(v1 - v2))))
+            (_of, (TopBit(v1) != TopBit(v2)) && (TopBit(v1) != TopBit((ushort)(v1 - v2)))),
+            (_pf, Par((uint)(ushort)(v1 - v2))),
+            (_af, ((v1 ^ v2 ^ (v1 - v2)) & 0x10) != 0)
         );
 
     // INC/DEC は CF を変更しない（ZF/SF/OF のみ更新）。
@@ -324,7 +341,9 @@ static public partial class Ext
         return SetCpu(
             (_zf, r == 0),
             (_sf, (r & msb) != 0),
-            (_of, v == (delta > 0 ? msb - 1 : msb))
+            (_of, v == (delta > 0 ? msb - 1 : msb)),
+            (_pf, Par(r)),
+            (_af, ((v ^ r) & 0x10) != 0)
         );
     }
 
@@ -436,7 +455,10 @@ public class CPU
     public uint ebp { get; set; }
     public uint esp { get; set; }
 
-    public uint eflags { get; set; }
+    // EFLAGS。bit1 は実 CPU では常に 1(PUSHF/トラップフレーム経由で見える。難読化コードが
+    // フラグ値を演算に使うことがあるため、読み書きの両方で強制する)。
+    uint eflags_ = 2;
+    public uint eflags { get => eflags_ | 2; set => eflags_ = value | 2; }
 
     private const uint CF = 1;
     private const uint PF = 4;

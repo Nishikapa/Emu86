@@ -477,6 +477,9 @@ static public partial class Ext
         let offset = (gateHi & 0xFFFF0000) | (gateLo & 0xFFFF)
         let sel = (ushort)(gateLo >> 16)
         let gateType = (int)(gateHi >> 8) & 0xF
+        // 特権レベルが上がる(例: ring3 のユーザーモードから ring0 へ)ときは TSS の SS0:ESP0 へ
+        // スタックを切り替え、旧 SS/ESP を先に積む(IRET で元へ戻る)。
+        from _sw in SwitchToInnerStack(sel)
         from fl in GetDataFromCpu(cpu => cpu.eflags)
         from _1 in Push(fl.ToTypeData())
         from cs in GetSRegData(1)
@@ -489,6 +492,38 @@ static public partial class Ext
         from _if in SetCpu(cpu => { if (gateType == 0xE) cpu.jf = false; cpu.tf = false; return cpu; })
         from _4 in _eip.Set(offset)
         from _5 in LoadSReg(1, sel)
+        select Unit.unit;
+
+    // 割り込み/例外配送での特権レベル変化: CPL(現在の CS の RPL)より目標 CS の RPL が小さければ
+    // TR が指す TSS から SS0/ESP0 を読んでスタックを切り替え、旧 SS と ESP を積む。
+    static State<Unit> SwitchToInnerStack(ushort targetCs) =>
+        from cpu0 in GetCpu
+        from _ in (cpu0.cs & 3) > (targetCs & 3)
+            ? (from ctx in GetDataFromEnvCpu((env, cpu) =>
+                  {
+                      var (tssBase, _) = EnvReadDescriptor(env, cpu, cpu.tr);
+                      var esp0 = EnvGetMemoryData32(env, tssBase + 4);
+                      var ss0 = (ushort)EnvGetMemoryData32(env, tssBase + 8);
+                      return (oldSs: cpu.ss, oldEsp: cpu.esp, ss0, esp0);
+                  })
+               from _1 in LoadSReg(2, ctx.ss0)
+               from _2 in SetCpu(cpu => { cpu.esp = ctx.esp0; return cpu; })
+               from _3 in Push(((uint)ctx.oldSs).ToTypeData())
+               from _4 in Push(ctx.oldEsp.ToTypeData())
+               select Unit.unit)
+            : Unit.unit.ToState()
+        select Unit.unit;
+
+    // 外側の特権レベル(例: ring0 → ring3)へ戻るときは、さらに ESP と SS を pop してスタックを切り替える。
+    static public State<Unit> ReturnToOuterStack(ushort targetCs) =>
+        from cpu0 in GetCpu
+        from _ in (targetCs & 3) > (cpu0.cs & 3)
+            ? (from sp in Pop(2)
+               from ss in Pop(2)
+               from _1 in LoadSReg(2, (ushort)ss.dd)
+               from _2 in SetCpu(cpu => { cpu.esp = sp.dd; return cpu; })
+               select Unit.unit)
+            : Unit.unit.ToState()
         select Unit.unit;
 
     // IRET: モードに応じて復帰する(リアル/16bit と プロテクト/32bit)。
@@ -510,6 +545,7 @@ static public partial class Ext
         from eip in Pop(2)
         from cs in Pop(2)
         from fl in Pop(2)
+        from _0 in ReturnToOuterStack((ushort)cs.dd) // 旧 SS で ESP/SS を pop してから CS をロードする
         from _1 in _eip.Set(eip.dd)
         from _2 in LoadSReg(1, (ushort)cs.dd)
         from _3 in SetCpu(cpu => { cpu.eflags = fl.dd; return cpu; })
@@ -1196,7 +1232,7 @@ public class EmuEnvironment
         var diskImage = sourceArray.FirstOrDefault(File.Exists);
         if (diskImage != null)
         {
-            var overlay = Path.ChangeExtension(diskImage, ".avhdx");
+            var overlay = OverlayPath;
             DiskImage.EnsureOverlay(overlay, diskImage);
             Ata = new AtaDevice(new DiskImage(overlay, writable: true));
         }
@@ -1321,6 +1357,16 @@ public class EmuEnvironment
     // 既存チェックポイントから --resume できなくなるため。再開後は次の OUT 0x43 で再設定される)。
     public bool PitStatusPending;
     private static readonly string[] sourceArray = ["sample.vhd", "sample.vhdx"];
+
+    // 差分オーバーレイのパス(ベースイメージが無ければ null)。スナップショットと組で保存/復元する。
+    public static string OverlayPath
+    {
+        get
+        {
+            var diskImage = sourceArray.FirstOrDefault(File.Exists);
+            return diskImage == null ? null : Path.ChangeExtension(diskImage, ".avhdx");
+        }
+    }
 
     // スナップショット保存/復元。ディスクの中身(DiskImage)は書き込みのたびに
     // ファイルへ反映済みなので、ここでは RAM/IOポート/CMOS/PIT/ATA レジスタのみを扱う。

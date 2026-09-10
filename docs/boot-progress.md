@@ -265,7 +265,7 @@ NTFS を読み書き中**(READ 2,599 LBA 以上、WRITE は差分 sample.avhdx �
 ### 次のブロッカー(ここから再開)
 約 576M 命令で `STOP at 0008:f9f64524 opcode 0f c7 c8` — **MSVMMOUF.SYS(Virtual PC 統合のマウスフィルタ)が VPC ハイパーコール命令
 `0F C7 C8`(レジスタ形式 CMPXCHG8B、実 CPU では #UD)を実行**。ドライバは例外を捕捉して VM 外と判断するはず。
-対処案(パッチ案は用意したが未適用): `Program.Runner.cs` のモナド版 `step` が失敗したとき、
+対処(適用・コミット済 d1f143d): `Program.Runner.cs` のモナド版 `step` が失敗したとき、
 `cpu.pe && idt_limit >= 6*8+7` なら `faultSave` から命令開始時の状態に戻して `Interrupt(6)` を配送する
 (`faultSave` のコピー条件を `env.PagingOn || cpu.pe` に広げる)。診断性を保つため配送時は `[cpu] #UD at cs:eip opcode …` を数十行までログ。
 注意: 未実装命令も #UD になって OS 側で不正命令例外になるため、STOP しなくなった代わりにログを必ず見ること。
@@ -287,3 +287,59 @@ dotnet build Emu86.sln -c Release
 - 実モードで `ret`/`jmp` 後も EIP の上位 16 ビットにゴミが残る(コードフェッチは `ip` を使うので実害なし)。
 - EFLAGS の予約ビット 1 が常に 0(実 CPU は 1)。今のところ問題なし。
 - PIC マスクの高速なトグル(fb↔fa、ff↔fe/fc)は XP HAL の割り込み処理中マスクで正常。
+
+## Windows XP: ユーザーモード到達と winlogon クラッシュ調査(2026-09-10)
+
+### 到達点
+- smss.exe → csrss.exe → winlogon.exe まで起動(プロセス一覧は `tools/win-debug/procs.py`)。sysprep 済みイメージなので
+  初回は setupcl.exe(ミニセットアップ)が走る。
+- winlogon.exe がアクセス違反(c0000005)で落ち、STATUS_SYSTEM_PROCESS_TERMINATED(c000021a)のバグチェックになる、が現在の壁。
+
+### 追加・修正(コミット d1f143d 以降)
+1. **特権レベル遷移**(`Environment.cs` `SwitchToInnerStack`/`ReturnToOuterStack`): 割り込み/例外配送で CPL が上がるとき
+   TR→TSS の SS0/ESP0 へスタックを切り替えて旧 SS/ESP を積む。IRET/RETF で外側へ戻るとき ESP/SS を pop。
+   これが無いと smss(ring3)が即死して SESSION5_INITIALIZATION_FAILED(0x71)。
+2. **#UD 配送**: モナド版 step が失敗した未定義/未対応命令を、プロテクトモードなら命令開始状態から IDT ベクタ 6 へ配送
+   (`[cpu] #UD at …` を先頭 40 件ログ)。Virtual PC 統合コンポーネント(MSVMMOUF.SYS 等)の VPC ハイパーコール
+   `0F C7 C8` / `0F 3F 07 0B` が #UD 前提で実行されるため。
+3. **スナップショットと差分ディスクの組保存**(`Program.Snapshot.cs`): 保存時に `sample.avhdx` を `<snap>.avhdx` へコピーし、
+   `--resume` 時に戻す。戻さないと以前のブートで書き換わったディスクとメモリが食い違い REGISTRY_ERROR(0x51)等になる。
+   **冷起動の再現性は差分ディスクを消してから**(`rm sample.avhdx`)。
+4. **PUSHAD/POPAD**: 0x60/0x61 が 16bit 版しかなく、32bit コードで 16 バイトしか積まなかった(Unicorn 突き合わせで発見)。
+5. **PF/AF フラグ**: 算術/論理/INC/DEC/シフトのどこでも PF/AF が更新されていなかった。Calc・update_eflags 系・FastCore の
+   FCalc/FSub/FLogic/FIncDec・Group2 に追加(`Par()` = 下位 8bit の偶数パリティ)。
+6. EFLAGS bit1 を常に 1、ring3 の POPF で IF/IOPL を保持。
+7. 調査フラグ: `--upflog [min]`(ユーザーモード #PF)、`--breakat <count>`、`--watchval <hex>`(汎用レジスタに値が現れたら停止)、
+   `--regtrace`(--trace-all にレジスタ列を付ける)、`--wlog lo hi` の内容を STOP 時に出力。
+
+### winlogon クラッシュの分析(途中)
+- winlogon は 0x01000000 にロード。`0100c963`/`0100c99f`/`0100cd66`/`0103328a` 付近は **難読化コード**
+  (SEH で意図的に AV を起こしハンドラで CONTEXT(Eax/Edx/Ebx/Ecx とデバッグレジスタ Dr0=0x45,Dr3=5,Dr7=0x155)を書き換えて継続、
+  `pushal/popal` と `sub esp,0x404` で死んだフレームから値を拾う、復号後に `[0x1072518]` 等のディスパッチポインタを書き換える)。
+  ExpandEnvironmentStringsW("%SystemRoot%\system32\sfc.dll") → `0103328a(path)` の返り値が本来はパス文字列のはずが
+  **7ffd8888** になり、LoadLibraryW → RtlInitUnicodeString で AV。
+- 復号処理本体(スナップショット `dec.snap`、0100ca1d〜0100c99e の約 5.4 万命令)を **Unicorn と 1 命令ずつ突き合わせ**
+  (`tools/win-debug/uc_user.py` + `cmp_trace.py`)、PUSHAD と PF/AF を直した後はレジスタ列が完全一致。
+  → 実機との差は復号処理の入力(それ以前の状態)にある。7ffd8888 はスタックスロット 0006f894 に既に入っていた値。
+- 気になる差: このプロセスの TEB が 7ffdf000、PEB が 7ffda000(実機の XP は PEB=7ffdf000、初期スレッド TEB=7ffde000)。
+  ユーザーモード FS セレクタが 0x38(実機は 0x3B)。難読化コードは fs:[0x18]/fs:[0x1c] を使う。
+
+### 手順メモ
+```
+# 冷起動(差分を消してから)。例外配送の入口(ntdll!KiUserExceptionDispatcher=7c90e47c)を記録
+rm sample.avhdx; ./bin/Release/net10.0/Emu86.exe --notrace --entrylog 7c90e47c 7c90e47d --limit 5600000000 --snapshot sample_vhd.snap
+# 停止点からの再開(差分も戻る)
+./bin/Release/net10.0/Emu86.exe --resume --snapshot X.snap --breakat <count> ...
+# 例外レコード: SNAP=X.snap python tools/win-debug/uc_user.py … / uexc.py … / procs.py …
+```
+
+### 結果(2026-09-10 夕方): ミニセットアップの入力待ちまで到達
+- PUSHAD/POPAD と PF/AF の修正で winlogon の難読化コードが正しい値を返すようになり、winlogon が生存。
+  さらに未実装だった **オペコード 0x82(0x80 の別名)** を追加(winlogon の難読化コードが使い、#UD で落ちていた)。
+- 140 億命令時点: System/smss/csrss/winlogon(8 threads)/services/lsass/setup.exe/svchost×2 が稼働、バグチェック無し。
+  **setup.exe(sysprep ミニセットアップ)の主スレッドが WrUserRequest 待ち** = GUI の入力待ちで静止。以降は例外配送も無い。
+- ユーザーモード例外の大半は RPC エラー(0x6ba/0x6b5/0x6d9、サービス起動中の再試行)と
+  DBG_PRINTEXCEPTION_C(0x40010006 = OutputDebugString、svchost)。`--entrylog 7c90e47c 7c90e47d` は 0x40010006 のとき
+  文字列も `dbg="…"` として出す(Windows のデバッグ出力を無料で覗ける)。
+- 次の壁: **表示と入力**。VGA(vga.sys の 640x480x16 プレーン書き込み)未実装のため画面は見えず、
+  入力は 8042 の `KbdOut` キューにスキャンコードを積めば注入できる(未実装)。sysprep.inf で無人化する手もあるが NTFS 書き込みが要る。

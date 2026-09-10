@@ -191,6 +191,8 @@ public class DiskImage
         file.Close();
     }
 
+    public void Flush() => file.Flush();
+
     // ============ 親解決 ============
 
     // 差分VHDの親を開く。候補: 子と同じフォルダの親ファイル名 → ロケータの絶対パス。
@@ -689,6 +691,8 @@ public class AtaDevice(DiskImage disk)
     // ランナーがこれを見て IRQ14(スレーブ PIC 入力6)を配送する。過渡的な状態なので
     // スナップショットには含めない(復元後 false でも検出には無害)。
     public bool IrqPending;
+
+    public void Flush() => disk.Flush();
 
     // --atalog: コマンド/制御レジスタ書き込みとデータ転送完了を標準エラーへ記録する(OS のプローブ手順の調査用)。
     public static bool Log;

@@ -39,6 +39,8 @@ static partial class Program
         if (snapIdx >= 0 && snapIdx + 1 < args.Length)
             SnapshotPath = args[snapIdx + 1];
 
+        if (args.Contains("--resume"))
+            RestoreOverlayForResume();
         var env = new EmuEnvironment();
 
         long count;
@@ -65,6 +67,7 @@ static partial class Program
         // --limit N   … N 命令で停止する(回帰比較などで決定的に打ち切るため)
         // --slow      … 高速コア(FastStep)を使わず全命令をモナド版で実行する(回帰比較の基準用)
         var traceAll = args.Contains("--trace-all");
+        var regTrace = args.Contains("--regtrace"); // --trace-all に汎用レジスタと EFLAGS を付ける(参照 CPU との突き合わせ用)
         var trace = traceAll || !args.Contains("--notrace");
         var slow = args.Contains("--slow");
         var limit = InstructionLimit;
@@ -80,6 +83,18 @@ static partial class Program
         var brHist = args.Contains("--brhist");
         var espTrap = args.Contains("--esptrap");
         var udLogLeft = 40; // #UD 配送ログの残り行数
+        // --watchval <hex> … いずれかの汎用レジスタがこの値になった最初の命令の直後で停止する(値の出所調査用)
+        uint watchVal = 0; var hasWatchVal = false;
+        var wvIdx = Array.IndexOf(args, "--watchval");
+        if (wvIdx >= 0 && wvIdx + 1 < args.Length) { watchVal = Convert.ToUInt32(args[wvIdx + 1], 16); hasWatchVal = true; }
+        // --breakat <count> … 通算命令数が count に達した時点で停止する(エントリログで見つけた瞬間の状態を採取する用)
+        long breakAt = 0;
+        var baIdx = Array.IndexOf(args, "--breakat");
+        if (baIdx >= 0 && baIdx + 1 < args.Length) breakAt = long.Parse(args[baIdx + 1]);
+        // --upflog [minCount] … ユーザーモード(CPL=3)で起きた #PF を記録する(プロセス落ちの原因調査用)
+        var upfIdx = Array.IndexOf(args, "--upflog");
+        var upfLog = upfIdx >= 0;
+        long upfMin = upfLog && upfIdx + 1 < args.Length && long.TryParse(args[upfIdx + 1], out var upfMinArg) ? upfMinArg : 0;
         // --entrylog <lo> <hi> … EIP が範囲外から [lo,hi) に入るたびに、入口・呼び出し元・引数(IRP なら major/minor)を記録する
         uint elLo = 0, elHi = 0; var entryLogLeft = 400; var wasInRange = false;
         var elIdx = Array.IndexOf(args, "--entrylog");
@@ -244,13 +259,24 @@ static partial class Program
                                     irpInfo = $" irp major={EnvGetMemoryData8(env, stk):x2} minor={EnvGetMemoryData8(env, stk + 1):x2}";
                                 }
                             }
-                            WriteLine($"ENTRY {count}: {beforeEip:x8} -> {cpu.eip:x8} ret={ret:x8} a1={a1:x8} a2={a2:x8}{irpInfo}");
+                            // KiUserExceptionDispatcher 入口で DBG_PRINTEXCEPTION_C(OutputDebugString)なら文字列も出す:
+                            // [esp]=EXCEPTION_RECORD*、Info[0]=長さ、Info[1]=ANSI 文字列ポインタ。
+                            var dbgStr = "";
+                            if (a2 == 0x40010006 && ret >= 0x1000 && ret < 0x80000000)
+                            {
+                                var len = (int)Math.Min(Rd32(ret + 0x14), 300);
+                                var ptr = Rd32(ret + 0x18);
+                                var sbs = new System.Text.StringBuilder();
+                                for (var k = 0; k < len; k++) { var ch = EnvGetMemoryData8(env, ptr + (uint)k); if (ch == 0) break; sbs.Append(ch is >= 0x20 and < 0x7f ? (char)ch : '.'); }
+                                dbgStr = " dbg=\"" + sbs + "\"";
+                            }
+                            WriteLine($"ENTRY {count}: {beforeEip:x8} -> {cpu.eip:x8} cr3={cpu.cr3:x8} ret={ret:x8} a1={a1:x8} a2={a2:x8}{irpInfo}{dbgStr}");
                         }
                         catch (Exception) { WriteLine($"ENTRY {count}: -> {cpu.eip:x8} (args unreadable)"); }
                     }
                     wasInRange = inRange;
                 }
-                if ((breakEip != 0 && cpu.eip == breakEip && (!hasBreakEax || cpu.eax == breakEax)) || (brHi != 0 && cpu.pe && cpu.eip >= brLo && cpu.eip < brHi))
+                if ((breakEip != 0 && cpu.eip == breakEip && (!hasBreakEax || cpu.eax == breakEax)) || (brHi != 0 && cpu.pe && cpu.eip >= brLo && cpu.eip < brHi) || (breakAt != 0 && count >= breakAt))
                 {
                     WriteLine($"BREAKEIP {cpu.eip:x8}: eax={cpu.eax:x8} ecx={cpu.ecx:x8} edx={cpu.edx:x8} ebx={cpu.ebx:x8} esi={cpu.esi:x8} edi={cpu.edi:x8} ebp={cpu.ebp:x8} esp={cpu.esp:x8}");
                     var sb2 = cpu.ss_base;
@@ -308,6 +334,8 @@ static partial class Program
                     // 命令前状態へ巻き戻してから #PF を IDT 経由で配送する。
                     // IDT が未整備(プロテクトモードでない/limit 不足)なら停止する。
                     faultSave.CopyTo(cpu);
+                    if (upfLog && (cpu.cs & 3) == 3 && count >= upfMin)
+                        WriteLine($"[upf] {count} cr3={cpu.cr3:x8} {cpu.cs:x4}:{cpu.eip:x8} cr2={pf.Linear:x8} err={pf.ErrorCode:x} esp={cpu.esp:x8}");
                     if (!cpu.pe || cpu.idt_limit < 14 * 8 + 7)
                     {
                         WriteLine($"EXCEPTION at {cpu.cs:x4}:{cpu.eip:x8}: {pf.Message}");
@@ -361,6 +389,12 @@ static partial class Program
                     break;
                 }
                 beforeEsp = cpu.esp;
+                if (hasWatchVal && (cpu.eax == watchVal || cpu.ebx == watchVal || cpu.ecx == watchVal || cpu.edx == watchVal
+                    || cpu.esi == watchVal || cpu.edi == watchVal || cpu.ebp == watchVal))
+                {
+                    WriteLine($"WATCHVAL {watchVal:x8} appeared after instruction at {beforeCs:x4}:{beforeEip:x8} (instr {count}): eax={cpu.eax:x8} ebx={cpu.ebx:x8} ecx={cpu.ecx:x8} edx={cpu.edx:x8} esi={cpu.esi:x8} edi={cpu.edi:x8} ebp={cpu.ebp:x8} esp={cpu.esp:x8}");
+                    break;
+                }
                 if (brHist)
                 {
                     // 制御転送(順次進行を外れた)命令を記録する。
@@ -384,7 +418,9 @@ static partial class Program
                     // 順次進行なら EIP は開始位置 +1〜+15。それを外れた/CS が変わった = 分岐。
                     var seq = cpu.cs == beforeCs && cpu.eip > beforeEip && cpu.eip <= beforeEip + 15;
                     if (traceAll || !seq)
-                        sw.WriteLine($"{cpu.cs:x4}:{cpu.eip:x8}");
+                        sw.WriteLine(regTrace
+                            ? $"{cpu.cs:x4}:{cpu.eip:x8} {cpu.eax:x8} {cpu.ebx:x8} {cpu.ecx:x8} {cpu.edx:x8} {cpu.esi:x8} {cpu.edi:x8} {cpu.ebp:x8} {cpu.esp:x8} {cpu.eflags:x8}"
+                            : $"{cpu.cs:x4}:{cpu.eip:x8}");
                 }
                 if (swatch.ElapsedMilliseconds >= 5000)
                 {
@@ -425,6 +461,11 @@ static partial class Program
             opbytes = "(unmapped)";
         }
         WriteLine($"STOP at {cpu.cs:x4}:{cpu.eip:x8} after {count} instructions, opcode: {opbytes}");
+        if (env.WriteLog != null)
+        {
+            WriteLine($"--- writes to [{env.WLogLo:x8},{env.WLogHi:x8}) (last 30 of {env.WriteLog.Count}) ---");
+            foreach (var e in env.WriteLog.TakeLast(30)) WriteLine("  " + e);
+        }
         if (env.IntLog != null)
         {
             WriteLine($"--- protected-mode interrupt deliveries (total {env.IntLog.Count}) ---");

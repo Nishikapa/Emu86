@@ -59,6 +59,7 @@ static partial class Program
         from ret in Pop(type)
         from _2 in (2 == type) ? _eip.Set(ret.dd) : _ip.Set(ret.dw)
         from cs in Pop(type)
+        from _r in (2 == type) ? ReturnToOuterStack((ushort)cs.Value()) : unit.ToState()
         from _3 in LoadSReg(1, (ushort)cs.Value())
         select unit;
 
@@ -70,8 +71,9 @@ static partial class Program
         from ret in Pop(type)
         from _2 in (2 == type) ? _eip.Set(ret.dd) : _ip.Set(ret.dw)
         from cs in Pop(type)
-        from _3 in LoadSReg(1, (ushort)cs.Value())
         from _4 in SetCpu(cpu => { if (cpu.stack32) cpu.esp += imm; else cpu.sp += imm; return cpu; })
+        from _r in (2 == type) ? ReturnToOuterStack((ushort)cs.Value()) : unit.ToState()
+        from _3 in LoadSReg(1, (ushort)cs.Value())
         select unit;
 
     // Group1 (0x83): r/m op imm8(符号拡張)
@@ -1062,26 +1064,29 @@ static partial class Program
         select unit;
 
     // PUSHA (0x60): AX,CX,DX,BX,(開始時SP),BP,SI,DI をこの順で push する。
+    // PUSHA/PUSHAD (0x60): AX,CX,DX,BX,(開始時 SP),BP,SI,DI をオペランドサイズ幅で push する。
     static State<Unit> Pusha_60 =>
         from _1 in SetLog("Pusha_60")
-        from sp0 in GetRegData16(4) // 開始時点の SP を退避(reg=4 はこの値を push する)
+        from type in OperandType(true)
+        from sp0 in type == 2 ? GetRegData32(4) : GetRegData16(4).Select(w => (uint)w) // 開始時点の (E)SP
         from _2 in Enumerable.Range(0, 8)
             .Select(reg =>
-                from v in reg == 4 ? sp0.ToState() : GetRegData16(reg)
-                from p in Push16(v)
+                from v in reg == 4 ? sp0.ToState() : (type == 2 ? GetRegData32(reg) : GetRegData16(reg).Select(w => (uint)w))
+                from p in Push(v.ToTypeData(type))
                 select unit)
             .Sequence()
             .Ignore()
         select unit;
 
-    // POPA (0x61): DI,SI,BP,(SP読み飛ばし),BX,DX,CX,AX の順で pop する。SP は破棄。
+    // POPA/POPAD (0x61): DI,SI,BP,(SP読み飛ばし),BX,DX,CX,AX の順でオペランドサイズ幅で pop する。SP は破棄。
     static State<Unit> Popa_61 =>
         from _1 in SetLog("Popa_61")
+        from type in OperandType(true)
         from _2 in new[] { 7, 6, 5, 4, 3, 2, 1, 0 }
             .Select(reg =>
-                from v in Pop16
+                from v in Pop(type)
                 // reg=4(元 SP)は読み飛ばして破棄する
-                from _ in reg == 4 ? unit.ToState() : SetRegData16(reg, v)
+                from _ in reg == 4 ? unit.ToState() : SetRegData(reg, v)
                 select unit)
             .Sequence()
             .Ignore()
@@ -1202,7 +1207,20 @@ static partial class Program
         from _1 in SetLog("Popf_9D")
         from type in OperandType(true)
         from fl in Pop(type)
-        from _2 in SetCpu(cpu => { cpu.eflags = type == 2 ? fl.dd : (cpu.eflags & 0xFFFF0000) | fl.dw; return cpu; })
+        from _2 in SetCpu(cpu =>
+        {
+            var nv = type == 2 ? fl.dd : (cpu.eflags & 0xFFFF0000) | fl.dw;
+            if (cpu.pe && (cpu.cs & 3) != 0)
+            {
+                // CPL>0: IOPL は変更不可。CPL>IOPL なら IF も変更不可。VM/RF は POPF では変わらない。
+                const uint IOPL = 0x3000, IF = 0x200, VM = 0x20000, RF = 0x10000;
+                var keep = IOPL | VM | RF;
+                if ((cpu.cs & 3) > ((cpu.eflags >> 12) & 3)) keep |= IF;
+                nv = (nv & ~keep) | (cpu.eflags & keep);
+            }
+            cpu.eflags = nv;
+            return cpu;
+        })
         select unit;
 
     // SAHF (0x9E): AH の下位8bit を FLAGS の下位8bit(SF/ZF/AF/PF/CF)へ転送する。

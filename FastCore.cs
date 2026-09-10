@@ -358,7 +358,7 @@ static public partial class Ext
                 {
                     cpu.cf = res.cf;
                     cpu.of = res.of;
-                    if (reg >= 4) { cpu.zf = res.result == 0; cpu.sf = (res.result & Msb(type)) != 0; }
+                    if (reg >= 4) { cpu.zf = res.result == 0; cpu.sf = (res.result & Msb(type)) != 0; cpu.pf = Par(res.result); }
                 }
                 RmSet(type, isMem, addr, res.result);
                 break;
@@ -796,6 +796,8 @@ static public partial class Ext
         c.sf = (fr & msb) != 0;
         c.of = isAdd ? ((a ^ b) & msb) == 0 && ((a ^ fr) & msb) != 0
                      : isSub && ((a ^ b) & msb) != 0 && ((a ^ fr) & msb) != 0;
+        c.pf = Par(fr);
+        c.af = (isAdd || isSub) && ((a ^ b ^ fr) & 0x10) != 0;
         return r;
     }
 
@@ -810,6 +812,8 @@ static public partial class Ext
         c.zf = v1 == v2;
         c.sf = (d & msb) != 0;
         c.of = ((v1 ^ v2) & msb) != 0 && ((v1 ^ d) & msb) != 0;
+        c.pf = Par(d);
+        c.af = ((v1 ^ v2 ^ d) & 0x10) != 0;
     }
 
     // 論理演算フラグ(update_eflags と同一: CF=OF=0, ZF/SF のみ)。
@@ -820,6 +824,8 @@ static public partial class Ext
         c.zf = r == 0;
         c.sf = (r & Msb(type)) != 0;
         c.of = false;
+        c.pf = Par(r);
+        c.af = false;
     }
 
     // INC/DEC フラグ(update_eflags_incdec と同一: CF は変更しない)。
@@ -830,6 +836,8 @@ static public partial class Ext
         c.zf = r == 0;
         c.sf = (r & msb) != 0;
         c.of = (v & Mask(type)) == (delta > 0 ? msb - 1 : msb);
+        c.pf = Par(r);
+        c.af = ((v ^ r) & 0x10) != 0;
     }
 
     // Jcc 条件(モナド版 Jcc と同一)。

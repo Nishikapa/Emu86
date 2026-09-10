@@ -54,6 +54,27 @@ static partial class Program
             w.Write(cpu.ldtr);
         }
         File.Move(tmp, SnapshotPath, overwrite: true);
+
+        // ディスクの差分オーバーレイも組で保存する。再開時にこれを戻さないと、その後のブートで
+        // 書き換わったディスク内容と復元したメモリ(ファイルキャッシュ/レジストリ)が食い違い、
+        // Windows は REGISTRY_ERROR 等でバグチェックする。
+        if (env.Ata != null && EmuEnvironment.OverlayPath is { } overlay)
+        {
+            env.Ata.Flush();
+            File.Copy(overlay, SnapshotPath + ".avhdx", overwrite: true);
+        }
+    }
+
+    // --resume 時、スナップショットと組の差分オーバーレイがあれば作業用オーバーレイへ戻す
+    // (EmuEnvironment がオーバーレイを開く前に呼ぶこと)。
+    static void RestoreOverlayForResume()
+    {
+        var saved = SnapshotPath + ".avhdx";
+        if (File.Exists(saved) && EmuEnvironment.OverlayPath is { } overlay)
+        {
+            File.Copy(saved, overlay, overwrite: true);
+            Console.Error.WriteLine($"[snapshot] restored overlay {overlay} from {saved}");
+        }
     }
 
     static (long count, CPU cpu) LoadSnapshot(EmuEnvironment env)
