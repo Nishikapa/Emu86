@@ -34,3 +34,6 @@ lba_dump.bin
 
 # Visual Studio local cache
 .vs/
+
+# Python bytecode from tools/
+__pycache__/

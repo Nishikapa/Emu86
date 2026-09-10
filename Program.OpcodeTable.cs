@@ -71,6 +71,7 @@ static partial class Program
         (0x6B, 1, Imul_69_6B),
         (0x70, 16, Jcc_70_7F),
         (0x80, 2, Group1_80_81),
+        (0x82, 1, Group1_80_81),  // 0x80 の別名(32bit モードでは有効。Windows の難読化コードが使う)
         (0x83, 1, Group1_83),
         (0x84, 2, Test_84_85),
         (0x86, 2, Xchg_86_87),
