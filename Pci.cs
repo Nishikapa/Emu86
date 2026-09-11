@@ -13,9 +13,9 @@ public class PciHost
     public uint Address;
 
     // --pcilog: コンフィグ空間アクセスを標準エラーへ記録する(OS の PCI 列挙手順の調査用)。
-    public static bool Log;
-    public static uint Eip; // ログ用: アクセス元の EIP(ランナーが命令ごとに更新)
-    public static Func<string> Caller = () => ""; // ログ用: EBP チェーンの戻り番地列(ランナーが設定)
+    public bool Log;
+    public uint Eip; // ログ用: アクセス元の EIP(ランナーが命令ごとに更新)
+    public Func<string> Caller = () => ""; // ログ用: EBP チェーンの戻り番地列(ランナーが設定)
 
     // 存在する各ファンクションの 256 バイト・コンフィグ空間。キー = dev<<3 | fn。
     readonly Dictionary<int, byte[]> cfg = new();
@@ -23,6 +23,32 @@ public class PciHost
     // 実装済み BAR の書き込み可能ビットマスク(サイズ問い合わせ用)。キー = (fn key, レジスタオフセット)。
     // 未登録の BAR / 拡張 ROM BAR(0x30)は読み取り専用 0(未実装)。
     readonly Dictionary<(int fn, int off), uint> barMask = new();
+
+    public void SaveState(BinaryWriter writer)
+    {
+        writer.Write(Address);
+        writer.Write(cfg.Count);
+        foreach (var entry in cfg.OrderBy(entry => entry.Key))
+        {
+            writer.Write(entry.Key);
+            writer.Write(entry.Value);
+        }
+    }
+
+    public void LoadState(BinaryReader reader)
+    {
+        Address = reader.ReadUInt32();
+        var count = SnapshotStore.ReadCount(reader, 256);
+        if (count != cfg.Count) throw new InvalidDataException("PCI topology differs from snapshot");
+        var restored = new HashSet<int>();
+        for (var index = 0; index < count; index++)
+        {
+            var key = reader.ReadInt32();
+            if (!cfg.TryGetValue(key, out var config) || !restored.Add(key))
+                throw new InvalidDataException("Invalid PCI function in snapshot");
+            reader.BaseStream.ReadExactly(config);
+        }
+    }
 
     // PIIX3 IDE のバスマスタ I/O ベース(BAR4)。SeaBIOS/OS が割り当て直す。
     public uint IdeBmBase

@@ -17,7 +17,7 @@ static public partial class Ext
         return (env, cpu1, ope) =>
         {
             var (f, value, cpu2, log) = stateA(env, cpu1, ope);
-            return (f, f ? selector(value) : default, f ? cpu2 : cpu1, log);
+            return (f, f ? selector(value) : default, cpu2, log);
         };
     }
 
@@ -35,11 +35,11 @@ static public partial class Ext
                 var (isSuccess2, valueB, cpu3, log2) = selector(valueA)(env, cpu2, ope);
                 // ログは捨てられることが多いので、片方が空なら連結を省いてアロケーションを避ける。
                 var log = log1.Length == 0 ? log2 : log2.Length == 0 ? log1 : log1 + "\r\n" + log2;
-                return (isSuccess2, isSuccess2 ? projector(valueA, valueB) : default, isSuccess2 ? cpu3 : cpu1, log);
+                return (isSuccess2, isSuccess2 ? projector(valueA, valueB) : default, cpu3, log);
             }
             else
             {
-                return (false, default, cpu1, log1);
+                return (false, default, cpu2, log1);
             }
         };
     }

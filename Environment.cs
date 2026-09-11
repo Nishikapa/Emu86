@@ -1,4 +1,4 @@
-using System.Reflection;
+using System.Runtime.CompilerServices;
 using static Emu86.CPU;
 
 namespace Emu86;
@@ -146,10 +146,16 @@ static public partial class Ext
     /// Mem /////////////////////////////////////
     // ArraySegment を使い、LINQ Skip の O(addr) 走査を避ける。
     // ページング有効時はページ境界を正しく跨ぐため 1 バイトずつ変換して読む遅延列挙に切り替える。
-    static public IEnumerable<byte> EnvGetMemoryDatas(EmuEnvironment env, uint addr) =>
-        env.PagingOn
-            ? EnumerateLinear(env, addr)
-            : new ArraySegment<byte>(env.OneMegaMemory_, (int)addr, env.OneMegaMemory_.Length - (int)addr);
+    // ページング無効時も BIOS 高位エイリアス(0xFFFxxxxx)を折り返し、RAM 外は 1 バイトずつ読む
+    // (SeaBIOS の 32bit 初期化コードは 0xFFFF1xxx で動くため、ここを直さないとモナド版の ModRM デコードが失敗する)。
+    static public IEnumerable<byte> EnvGetMemoryDatas(EmuEnvironment env, uint addr)
+    {
+        if (env.PagingOn) return EnumerateLinear(env, addr);
+        var physical = EnvAlias(addr);
+        return physical < (uint)env.OneMegaMemory_.Length
+            ? new ArraySegment<byte>(env.OneMegaMemory_, (int)physical, env.OneMegaMemory_.Length - (int)physical)
+            : EnumerateLinear(env, addr);
+    }
 
     static IEnumerable<byte> EnumerateLinear(EmuEnvironment env, uint addr)
     {
@@ -287,8 +293,8 @@ static public partial class Ext
         switch (size)
         {
             case 1: EnvWriteByte(env, addr, (byte)val); break;
-            case 2: EnvSetMemoryDatas(env, addr, ((ushort)val).ToByteArray()); break;
-            default: EnvSetMemoryDatas(env, addr, val.ToByteArray()); break;
+            case 2: EnvWriteWord(env, addr, (ushort)val); break;
+            default: EnvWriteDword(env, addr, val); break;
         }
     }
 
@@ -680,89 +686,6 @@ static public partial class Ext
         return (ovr ?? cpu.ds_base, ovr ?? cpu.ss_base);
     }
 
-    // ModRM 16ビットアドレッシング。実効オフセット・セグメントベース・消費した disp バイト数を返す。
-    static private (bool isMem, uint offset, uint segBase, int inc) EnvGetMemOrRegAddr16_(CPU cpu, int mod, int rm, IEnumerable<byte> disp)
-    {
-        if (mod == 3)
-            return (false, (uint)rm, 0, 0);
-
-        var (segment_base, ss_base) = EnvSegBases(cpu);
-
-        if (mod == 0 && rm == 6) // [d16]
-            return (true, disp.ToUint16(), segment_base, 2);
-
-        // rm ごとのレジスタ組み合わせ(BP を含む形は既定セグメントが SS)
-        uint[] regsum =
-        [
-            (uint)(cpu.bx + cpu.si), (uint)(cpu.bx + cpu.di), (uint)(cpu.bp + cpu.si), (uint)(cpu.bp + cpu.di),
-            cpu.si, cpu.di, cpu.bp, cpu.bx
-        ];
-        var segBase = rm is 2 or 3 or 6 ? ss_base : segment_base;
-
-        return mod switch
-        {
-            0 => (true, regsum[rm], segBase, 0),
-            1 => (true, (uint)(regsum[rm] + (sbyte)disp.ElementAt(0)), segBase, 1),
-            _ => (true, regsum[rm] + disp.ToUint16(), segBase, 2),
-        };
-    }
-    // ModRM 32ビットアドレッシング(SIB 対応)。実効オフセット・セグメントベース・消費 disp バイト数を返す。
-    static private (bool isMem, uint offset, uint segBase, int inc) EnvGetMemOrRegAddr32_(CPU cpu, int mod, int rm, IEnumerable<byte> disp)
-    {
-        if (mod == 3)
-            return (false, (uint)rm, 0, 0);
-
-        var (segment_base, ss_base) = EnvSegBases(cpu);
-
-        // SIB バイト(rm=4)。base=5 かつ mod=0 は「ベースなし、disp32 が続く」特殊ケース。
-        // ベースが ESP/EBP のときは既定セグメントが SS になる。
-        if (rm == 4)
-        {
-            var sib = disp.ElementAt(0);
-            var scaled = (uint)((1 << ((sib >> 6) & 3)) * EnvGetIndexRegData32(cpu, (sib >> 3) & 7));
-            var basef = sib & 7;
-            var sb = basef is 4 or 5 ? ss_base : segment_base;
-            return (mod, basef) switch
-            {
-                (0, 5) => (true, scaled + disp.Skip(1).ToUint32(), segment_base, 5),
-                (0, _) => (true, scaled + EnvGetReg32(cpu, basef), sb, 1),
-                (1, _) => (true, (uint)(scaled + EnvGetReg32(cpu, basef) + (sbyte)disp.ElementAt(1)), sb, 2),
-                _ => (true, scaled + EnvGetReg32(cpu, basef) + disp.Skip(1).ToUint32(), sb, 5),
-            };
-        }
-
-        if (mod == 0 && rm == 5) // [d32]
-            return (true, disp.ToUint32(), segment_base, 4);
-
-        // ベースレジスタ(EBP ベースは SS)
-        var segBase = rm == 5 ? ss_base : segment_base;
-        var reg = EnvGetReg32(cpu, rm);
-        return mod switch
-        {
-            0 => (true, reg, segBase, 0),
-            1 => (true, (uint)(reg + (sbyte)disp.ElementAt(0)), segBase, 1),
-            _ => (true, reg + disp.ToUint32(), segBase, 4),
-        };
-    }
-
-    static private (bool isMem, uint offset, uint segBase, int inc) EnvGetMemOrRegAddr_(EmuEnvironment env, CPU cpu, int mod, int rm) =>
-        // 32ビットコードではデフォルトが32ビットModRMになり、address_size_prefix(0x67)で反転する
-        (cpu.code32 != cpu.address_size_prefix) ?
-        EnvGetMemOrRegAddr32_(cpu, mod, rm, EnvGetMemoryDatas(env, GetCodeAddr(cpu).addr)) :
-        EnvGetMemOrRegAddr16_(cpu, mod, rm, EnvGetMemoryDatas(env, GetCodeAddr(cpu).addr));
-
-    // 物理アドレス(セグメントベース + 実効オフセット)を返す通常版。
-    static public State<MemAddr> GetMemOrRegAddr(int mod, int rm) =>
-        from data in GetDataFromEnvCpu((env, cpu) => EnvGetMemOrRegAddr_(env, cpu, mod, rm))
-        from _ in IpInc(data.inc)
-        select (data.isMem, data.offset + data.segBase);
-
-    // 実効オフセットのみを返す版(LEA 用: セグメントベースを加算しない)。
-    static public State<MemAddr> GetMemOrRegOffset(int mod, int rm) =>
-        from data in GetDataFromEnvCpu((env, cpu) => EnvGetMemOrRegAddr_(env, cpu, mod, rm))
-        from _ in IpInc(data.inc)
-        select (data.isMem, data.offset);
-
     static public State<byte> GetMemOrRegData8(MemAddr t) =>
         GetDataFromEnvCpu((env, cpu) => t.isMem ? EnvGetMemoryData8(env, t.addr) : EnvGetDataFromCPU(ArrayReg8)((int)t.addr)(cpu));
 
@@ -786,8 +709,8 @@ static public partial class Ext
         (
             data,
             db => (env, addr) => { EnvWriteByte(env, addr, db); },
-            dw => (env, addr) => { EnvSetMemoryDatas(env, addr, dw.ToByteArray()); },
-            dd => (env, addr) => { EnvSetMemoryDatas(env, addr, dd.ToByteArray()); }
+            dw => (env, addr) => { EnvWriteWord(env, addr, dw); },
+            dd => (env, addr) => { EnvWriteDword(env, addr, dd); }
         );
 
     static public State<Unit> SetMemOrRegData(
@@ -840,14 +763,6 @@ static public partial class Ext
         select (data, addr);
 
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-    // 32ビット汎用レジスタを番号で読む。
-    static private uint EnvGetReg32(CPU cpu, int reg) =>
-        new[] { cpu.eax, cpu.ecx, cpu.edx, cpu.ebx, cpu.esp, cpu.ebp, cpu.esi, cpu.edi }[reg];
-
-    // SIB の index(4=なし)。
-    static private uint EnvGetIndexRegData32(CPU cpu, int reg) =>
-        reg == 4 ? 0 : EnvGetReg32(cpu, reg);
-
     static private Func<T, Func<int, Func<CPU, CPU>>> EnvSetDataFromCPU<T>(Accessor<CPU, T>[] array) =>
         data => reg => cpu => array[reg].setter(cpu)(data);
 
@@ -864,96 +779,32 @@ static public partial class Ext
     // 特別扱いする以外は IoPort 配列を素通しする。
     // ACPI PM I/O ブロック(0xB000 起点、dword 単位で値を返す)。
     //   +0x00 PM1a_STS / +0x02 PM1a_EN / +0x04 PM1a_CNT / +0x08 PM_TMR(24bit)
-    static uint EnvPmRead(EmuEnvironment env, int port)
-    {
-        switch ((port - 0xB000) & ~3)
-        {
-            case 0x00: return (uint)env.Pm1Sts | ((uint)env.Pm1En << 16);
-            case 0x04: return env.Pm1Cnt;
-            case 0x08: return env.PmTimer;
-            default: return 0;
-        }
-    }
-
-    static void EnvPmWrite(EmuEnvironment env, int port, byte val)
-    {
-        int off = port - 0xB000;
-        switch (off)
-        {
-            case 0x00: env.Pm1Sts &= (ushort)~val; break;                          // W1C
-            case 0x01: env.Pm1Sts &= (ushort)~(val << 8); break;
-            case 0x02: env.Pm1En = (ushort)((env.Pm1En & 0xFF00) | val); break;
-            case 0x03: env.Pm1En = (ushort)((env.Pm1En & 0x00FF) | (val << 8)); break;
-            case 0x04: env.Pm1Cnt = (ushort)((env.Pm1Cnt & 0xFF00) | val); break;
-            case 0x05:
-                env.Pm1Cnt = (ushort)((env.Pm1Cnt & 0x00FF) | (val << 8));
-                if ((env.Pm1Cnt & 0x2000) != 0) // SLP_EN
-                    System.Console.Error.WriteLine($"[acpi] sleep requested: SLP_TYP={(env.Pm1Cnt >> 10) & 7} (PM1_CNT={env.Pm1Cnt:x4})");
-                env.Pm1Cnt &= 0xDFFF; // SLP_EN は書き込み専用で読み戻しは 0
-                break;
-            default: break; // タイマ等は読み取り専用
-        }
-    }
-
     static public byte EnvInPort(EmuEnvironment env, int port)
     {
         switch (port & 0xFFFF)
         {
             case 0x71: // CMOS データ
-                return env.Cmos[env.CmosIndex];
+                return env.CmosRtc.Read();
             case 0x21: // PIC マスタ: マスク読み出し
-                return env.PicMasterMask;
+                return env.PicMaster.Mask;
             case 0xA1: // PIC スレーブ: マスク読み出し
-                return env.PicSlaveMask;
+                return env.PicSlave.Mask;
             case 0x20: // マスタ IRR/ISR 読み(in-service ビットを返す)
-                return env.PicMasterIsr;
+                return env.PicMaster.Isr;
             case 0xA0: // スレーブ IRR/ISR 読み
-                return env.PicSlaveIsr;
-            case 0x61: // システム制御ポートB(NMI/PIT ch2 ゲート・スピーカ)
-                // bit4 = リフレッシュタイマ(読むたびにトグルさせて DRAM リフレッシュ
-                //         監視のディレイループを進める)。
-                // bit5 = PIT ch2 の OUT。ゲート有効かつ ch2 がプログラム済みなら、
-                //         数回読んだ後に High にして TSC 校正のウェイトを抜けさせる。
-                env.Port61Refresh ^= 0x10;
-                byte out2 = 0;
-                if ((env.Port61 & 1) != 0 && env.Pit2Armed)
-                {
-                    if (env.Pit2Wait > 0) env.Pit2Wait--;
-                    else out2 = 0x20;
-                }
-                return (byte)((env.Port61 & 0x0F) | env.Port61Refresh | out2);
-            case 0x42: // PIT チャネル2 データ(読み出しはラッチ値を返す)
-                byte c2 = (byte)(env.Pit2ReadPhase == 0 ? env.Pit2Counter : env.Pit2Counter >> 8);
-                env.Pit2ReadPhase ^= 1;
-                return c2;
-            case 0x40: // PIT チャネル0
-                // リードバックでステータスがラッチされていれば、まずそれを返す。
-                //   0x36 = OUT=0, NULL COUNT=0(カウント有効), lo/hi アクセス, モード3, 二進
-                // Linux の i8254 エントロピー読み(KASLR)は NULL COUNT ビットが
-                // 落ちるまでポーリングするため、これがないと無限ループになる。
-                if (env.PitStatusPending)
-                {
-                    env.PitStatusPending = false;
-                    return 0x36;
-                }
-                byte b = (byte)(env.PitReadPhase == 0 ? env.PitLatched : env.PitLatched >> 8);
-                env.PitReadPhase ^= 1;
-                return b;
-            case >= 0xB000 and <= 0xB03F: // ACPI PM I/O ブロック(バイト単位)
-                return (byte)(EnvPmRead(env, port & 0xFFFF) >> (8 * ((port & 0xFFFF) & 3)));
-            case 0xAFE0 or 0xAFE1: return (byte)(env.Gpe0Sts >> (8 * (port & 1)));
-            case 0xAFE2 or 0xAFE3: return (byte)(env.Gpe0En >> (8 * (port & 1)));
+                return env.PicSlave.Isr;
+            case 0x40 or 0x42 or 0x61:
+                return env.Pit.Read(port & 0xFFFF);
+            case (>= 0xB000 and <= 0xB03F) or (>= 0xAFE0 and <= 0xAFE3):
+                return env.Acpi.Read(port & 0xFFFF, env.Tsc);
             case >= 0xB100 and <= 0xB10F: // SMBus: デバイス無し(ホストステータス=アイドル)
                 return 0;
             case var bm when env.Pci.IdeBmBase != 0 && bm >= env.Pci.IdeBmBase && bm < env.Pci.IdeBmBase + 16:
                 // バスマスタ IDE(BMIDE)レジスタ: DMA は未実装。ステータスは常に「非活性・割り込みなし」。
                 // ディスクの IDENTIFY も DMA 非対応を報告するので、ドライバは PIO を使う。
                 return 0;
-            case 0x60: // 8042 出力バッファ(読むと OBF が落ちる)
-                if (env.KbdOut.Count > 0) env.KbdLast = env.KbdOut.Dequeue();
-                return env.KbdLast;
-            case 0x64: // 8042 ステータス: bit0=OBF, bit1=IBF(常に0), bit2=システムフラグ, bit4=キーボード非禁止
-                return (byte)(0x14 | (env.KbdOut.Count > 0 ? 1 : 0));
+            case 0x60 or 0x64:
+                return env.Keyboard.Read(port & 0xFFFF);
             case 0x1F0 when env.Ata != null:
                 return (byte)env.Ata.ReadData(1);
             case (>= 0x1F1 and <= 0x1F7) or 0x3F6 when env.Ata != null:
@@ -973,7 +824,7 @@ static public partial class Ext
         if (p >= 0xCF8 && p <= 0xCFB) return env.Pci.Address >> (8 * (p - 0xCF8));
         if (p >= 0xCFC && p <= 0xCFF) return env.Pci.DataRead(p - 0xCFC, size);
         if (p >= 0xB000 && p <= 0xB03F && (p & 3) == 0)
-            return size >= 4 ? EnvPmRead(env, p) : EnvPmRead(env, p) & ((1u << (8 * size)) - 1);
+            return size >= 4 ? env.Acpi.ReadWord(p, env.Tsc) : env.Acpi.ReadWord(p, env.Tsc) & ((1u << (8 * size)) - 1);
         // セカンダリ IDE チャネル(ディスク無し)はフローティングバス 0xFF を返し、
         // libata に「デバイス無し」と即断させる。
         if ((p >= 0x170 && p <= 0x177) || p == 0x376)
@@ -1007,140 +858,55 @@ static public partial class Ext
 
     static public void EnvOutPort(EmuEnvironment env, int port, byte val)
     {
-        switch (port & 0xFFFF)
+        port &= 0xFFFF;
+        switch (port)
         {
-            case 0x70: // インデックス選択(bit7 は NMI 禁止フラグなので落とす)
-                env.CmosIndex = val & 0x7F;
+            case 0x70:
+                env.CmosRtc.Select(val);
                 break;
-            case 0x71: // 選択中の CMOS レジスタへ書き込み
-                env.Cmos[env.CmosIndex] = val;
+            case 0x71:
+                env.CmosRtc.Write(val);
                 break;
-            case 0x43: // PIT コントロール: ラッチ/リードバックでカウンタを捕捉し時刻を進める
-                //   カウンタラッチ  : bit5-4 = 00
-                //   リードバック    : bit7-6 = 11。bit5=0 でカウント、bit4=0 でステータスをラッチ
-                int channel = (val >> 6) & 3;
-                if (channel == 2)
-                {
-                    // ch2 のプログラム開始。lo/hi 書き込みの位相をリセットする。
-                    env.Pit2WritePhase = 0;
-                    env.Pit2Armed = false;
-                    break;
-                }
-                bool readback = (val & 0xC0) == 0xC0;
-                bool latch = (val & 0x30) == 0 || (readback && (val & 0x20) == 0);
-                if (latch)
-                {
-                    env.PitLatched = env.PitCounter;
-                    env.PitReadPhase = 0;
-                    env.PitCounter -= 0x100; // 経過時間の代用として下向きに減算する
-                }
-                if (readback && (val & 0x10) == 0)
-                    env.PitStatusPending = true;
-                break;
-            case 0x42: // PIT チャネル2 カウント(lo→hi)。全部書けたら「短時間で満了」として武装する。
-                if (env.Pit2WritePhase == 0) { env.Pit2Counter = val; env.Pit2WritePhase = 1; }
-                else
-                {
-                    env.Pit2Counter = (ushort)((env.Pit2Counter & 0xFF) | (val << 8));
-                    env.Pit2WritePhase = 0;
-                    env.Pit2Armed = true;
-                    env.Pit2Wait = 2; // 数回 0x61 を読んだら OUT2 を立てる(ウェイトを抜けさせる)
-                }
-                break;
-            case 0x61: // システム制御ポートB。低位ビット(ゲート/スピーカ)を保持する。
-                env.Port61 = val;
-                if ((val & 1) == 0) env.Pit2Armed = false; // ゲート断で武装解除
+            case 0x42 or 0x43 or 0x61:
+                env.Pit.Write(port, val);
                 break;
             case 0x402:
                 System.Console.Error.Write((char)val);
                 break;
-            // 8259 PIC(マスタ 0x20/0x21、スレーブ 0xA0/0xA1)。
-            // ICW1-4 の初期化シーケンスとマスク、ベクタベース(ICW2)のみ追跡する。
-            // EOI(OCW2)は、割り込みキューを持たないため無視してよい。
             case 0x20:
-                if ((val & 0x10) != 0) { env.PicMasterInit = 1; env.PicMasterIcw4 = (val & 1) != 0; }
-                else if ((val & 0x08) == 0) // OCW2
-                {
-                    // EOI(非特定 0x20 / 特定 0x60|irq)で in-service を降ろす。
-                    if ((val & 0x20) != 0)
-                        env.PicMasterIsr = (val & 0x40) != 0 ? (byte)(env.PicMasterIsr & ~(1 << (val & 7))) : (byte)0;
-                }
+                env.PicMaster.WriteCommand(val);
                 break;
             case 0x21:
-                if (env.PicMasterInit == 1) { env.PicMasterBase = val; env.PicMasterInit = 2; }
-                else if (env.PicMasterInit == 2) { env.PicMasterInit = env.PicMasterIcw4 ? 3 : 0; }
-                else if (env.PicMasterInit == 3) { env.PicMasterInit = 0; }
-                else { if (EmuEnvironment.PicLog && env.PicMasterMask != val) System.Console.Error.WriteLine($"[pic] master mask {env.PicMasterMask:x2} -> {val:x2}"); env.PicMasterMask = val; }
+                env.PicMaster.WriteData(val, env.PicLog);
                 break;
             case 0xA0:
-                if ((val & 0x10) != 0) { env.PicSlaveInit = 1; env.PicSlaveIcw4 = (val & 1) != 0; }
-                else if ((val & 0x08) == 0) // OCW2
-                {
-                    if ((val & 0x20) != 0)
-                        env.PicSlaveIsr = (val & 0x40) != 0 ? (byte)(env.PicSlaveIsr & ~(1 << (val & 7))) : (byte)0;
-                }
+                env.PicSlave.WriteCommand(val);
                 break;
             case 0xA1:
-                if (env.PicSlaveInit == 1) { env.PicSlaveBase = val; env.PicSlaveInit = 2; }
-                else if (env.PicSlaveInit == 2) { env.PicSlaveInit = env.PicSlaveIcw4 ? 3 : 0; }
-                else if (env.PicSlaveInit == 3) { env.PicSlaveInit = 0; }
-                else { if (EmuEnvironment.PicLog && env.PicSlaveMask != val) System.Console.Error.WriteLine($"[pic] slave mask {env.PicSlaveMask:x2} -> {val:x2}"); env.PicSlaveMask = val; }
+                env.PicSlave.WriteData(val, env.PicLog);
                 break;
-            case >= 0xB000 and <= 0xB03F: // ACPI PM I/O ブロック
-                EnvPmWrite(env, port & 0xFFFF, val);
+            case 0xB2:
+                env.Acpi.Write(port, val);
+                env.IoPort[port] = val;
                 break;
-            case 0xB2: // APM コマンド(FADT の SMI_CMD)。SMM の代わりに直接 SCI_EN を操作する。
-                       // ACPI_ENABLE(0xF1) で PM1_CNT.SCI_EN=1、ACPI_DISABLE(0xF0) で 0(QEMU の PIIX4 と同じ)。
-                if (val == 0xF1) env.Pm1Cnt |= 1;
-                else if (val == 0xF0) env.Pm1Cnt &= 0xFFFE;
-                env.IoPort[0xB2] = val;
-                System.Console.Error.WriteLine($"[acpi] APMC=0x{val:x2} -> SCI_EN={env.Pm1Cnt & 1}");
+            case (>= 0xB000 and <= 0xB03F) or (>= 0xAFE0 and <= 0xAFE3):
+                env.Acpi.Write(port, val);
                 break;
-            case 0xAFE0: env.Gpe0Sts &= (ushort)~val; break;                       // GPE0_STS: W1C
-            case 0xAFE1: env.Gpe0Sts &= (ushort)~(val << 8); break;
-            case 0xAFE2: env.Gpe0En = (ushort)((env.Gpe0En & 0xFF00) | val); break;
-            case 0xAFE3: env.Gpe0En = (ushort)((env.Gpe0En & 0x00FF) | (val << 8)); break;
-            case >= 0xB100 and <= 0xB10F: break;                                    // SMBus: 無視
+            case >= 0xB100 and <= 0xB10F:
+                break;
             case var bm when env.Pci.IdeBmBase != 0 && bm >= env.Pci.IdeBmBase && bm < env.Pci.IdeBmBase + 16:
-                break;                                                              // BMIDE: 無視
-            case 0x64: // 8042 コントローラコマンド
-                env.KbdPendingCmd = 0;
-                switch (val)
-                {
-                    case 0x20: env.KbdOut.Enqueue(env.KbdCmdByte); break;       // コマンドバイト読み出し
-                    case 0x60: env.KbdPendingCmd = 0x60; break;                  // 次の 0x60 書き込みがコマンドバイト
-                    case 0xAA: env.KbdOut.Enqueue(0x55); break;                  // 自己診断 OK
-                    case 0xAB: env.KbdOut.Enqueue(0x00); break;                  // インタフェース試験 OK
-                    case 0xA9: env.KbdOut.Enqueue(0x00); break;                  // マウスポート試験 OK
-                    case 0xD0: env.KbdOut.Enqueue(0x03); break;                  // 出力ポート読み(A20 有効・リセット非活性)
-                    case 0xD1 or 0xD2 or 0xD3 or 0xD4: env.KbdPendingCmd = val; break; // 次の 0x60 書き込みが引数
-                    default: break;                                              // AD/AE(禁止/許可)、A7/A8、FE(リセット)等は無視
-                }
                 break;
-            case 0x60: // 8042 データ: 保留コマンドの引数、またはキーボードへのコマンド
-                switch (env.KbdPendingCmd)
-                {
-                    case 0x60: env.KbdCmdByte = val; break;
-                    case 0xD1: break; // 出力ポート書き込み(A20 等)は無視
-                    case 0xD2: env.KbdOut.Enqueue(val); break; // 出力バッファへ書き込み
-                    case 0xD3 or 0xD4: break;                   // マウス関連は未接続
-                    default:
-                        // キーボードコマンド: ACK を返し、必要な追加応答を積む。
-                        env.KbdOut.Enqueue(0xFA);
-                        if (val == 0xFF) env.KbdOut.Enqueue(0xAA);                          // リセット → BAT OK
-                        else if (val == 0xF2) { env.KbdOut.Enqueue(0xAB); env.KbdOut.Enqueue(0x83); } // ID
-                        break;
-                }
-                env.KbdPendingCmd = 0;
+            case 0x60 or 0x64:
+                env.Keyboard.Write(port, val);
                 break;
             case 0x1F0 when env.Ata != null:
                 env.Ata.WriteData(1, val);
                 break;
             case (>= 0x1F1 and <= 0x1F7) or 0x3F6 when env.Ata != null:
-                env.Ata.WriteReg(port & 0xFFFF, val);
+                env.Ata.WriteReg(port, val);
                 break;
             default:
-                env.IoPort[port & 0xFFFF] = val;
+                env.IoPort[port] = val;
                 break;
         }
     }
@@ -1164,6 +930,49 @@ static public partial class Ext
         if (env.WriteLog != null && addr >= env.WLogLo && addr < env.WLogHi)
             env.WriteLog.Add($"{env.CurEip:x8}: [{addr:x8}]={val:x2}");
         if (addr < (uint)env.OneMegaMemory_.Length) env.OneMegaMemory_[addr] = val;
+    }
+
+    static void EnvWriteWord(EmuEnvironment env, uint addr, ushort value) =>
+        EnvWriteValue(env, addr, value, 2);
+
+    static void EnvWriteDword(EmuEnvironment env, uint addr, uint value) =>
+        EnvWriteValue(env, addr, value, 4);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    static void EnvWriteValue(EmuEnvironment env, uint addr, uint value, int size)
+    {
+        if ((addr & 0xFFF) > 0x1000 - size || env.WriteLog != null)
+        {
+            for (var byteIndex = 0; byteIndex < size; byteIndex++)
+                EnvWriteByte(env, addr + (uint)byteIndex, (byte)(value >> (8 * byteIndex)));
+            return;
+        }
+
+        if (env.PagingOn) addr = EnvTranslate(env, addr, write: true);
+        addr = EnvAlias(addr);
+        if (env.PagingOn && (ulong)addr + (uint)size > env.WatchLo && addr < env.WatchHi)
+            env.WatchTriggered = true;
+
+        var memory = env.OneMegaMemory_;
+        if ((ulong)addr + (uint)size <= (uint)memory.Length)
+        {
+            memory[addr] = (byte)value;
+            memory[addr + 1] = (byte)(value >> 8);
+            if (size == 4)
+            {
+                memory[addr + 2] = (byte)(value >> 16);
+                memory[addr + 3] = (byte)(value >> 24);
+            }
+        }
+        else
+        {
+            for (var byteIndex = 0; byteIndex < size; byteIndex++)
+            {
+                var physical = addr + (uint)byteIndex;
+                if (physical < (uint)memory.Length)
+                    memory[physical] = (byte)(value >> (8 * byteIndex));
+            }
+        }
     }
 
     static public byte EnvGetMemoryData8(EmuEnvironment env, uint addr)
@@ -1201,42 +1010,29 @@ static public partial class Ext
     }
 }
 
-public class EmuEnvironment
+public partial class EmuEnvironment : IDisposable
 {
     // --piclog: PIC マスクの変化を記録する。
-    public static bool PicLog;
+    public bool PicLog;
 
     // 搭載RAM量。SeaBIOS の init 再配置は 1MB 超のRAMを要求するため、
     // 1MBちょうどではなく拡張メモリを持たせる。BIOS(bios.bin)は先頭1MBの末尾に配置される。
     public const int RamSize = 256 * 1024 * 1024; // 256MB(Debian の initramfs をロードするには 32MB では不足)
 
-    public EmuEnvironment()
+    public EmuEnvironment(byte[] memory = null, byte[] bios = null, AtaDevice ata = null)
     {
-        // bios: 埋め込みリソース "bios.bin" が存在すれば先頭1MB空間の末尾に配置する。
-        //       リソースが無い場合はゼロ初期化のまま起動する。
-        var asm = Assembly.GetExecutingAssembly();
-        var resName = asm.GetManifestResourceNames()
-            .FirstOrDefault(n => n.EndsWith("bios.bin", StringComparison.OrdinalIgnoreCase));
-        if (resName != null)
+        OneMegaMemory_ = memory ?? new byte[RamSize];
+        if (bios is { Length: > 0 })
         {
-            using var stream = asm.GetManifestResourceStream(resName);
-            var biosdata = new byte[stream.Length];
-            stream.ReadExactly(biosdata);
-            Array.Copy(biosdata, 0, OneMegaMemory_, 0x100000 - biosdata.Length, biosdata.Length);
+            if (bios.Length > 0x100000 || OneMegaMemory_.Length < 0x100000)
+                throw new ArgumentException("BIOS must fit in the first megabyte of RAM", nameof(bios));
+            bios.CopyTo(OneMegaMemory_, 0x100000 - bios.Length);
         }
-
-        InitCmos();
-
-        // ディスク: sample.vhd / sample.vhdx があればプライマリ ATA マスタとして接続する(vhd 優先)。
-        // 書き込みは差分 VHDX(sample.avhdx)へ蓄積され、ベースイメージ自体は変更されない。
-        var diskImage = sourceArray.FirstOrDefault(File.Exists);
-        if (diskImage != null)
-        {
-            var overlay = OverlayPath;
-            DiskImage.EnsureOverlay(overlay, diskImage);
-            Ata = new AtaDevice(new DiskImage(overlay, writable: true));
-        }
+        CmosRtc = new CmosDevice(OneMegaMemory_.Length);
+        Ata = ata;
     }
+
+    public void Dispose() => Ata?.Dispose();
 
     // プライマリ ATA チャネルのマスタドライブ(未接続なら null)。
     public AtaDevice Ata;
@@ -1244,34 +1040,10 @@ public class EmuEnvironment
     // PCI ホスト(コンフィグ機構 #1)。ata_piix を bind させるため PIIX3 IDE を露出する。
     public PciHost Pci = new();
 
-    // SeaBIOS が CMOS(RTC)経由でメモリ量を検出できるよう、メモリサイズレジスタを設定する。
-    //   0x15/0x16: ベースメモリ(KB)          … 640KB
-    //   0x17/0x18, 0x30/0x31: 1-16MB の拡張メモリ(KB、最大15MB)
-    //   0x34/0x35: 16MB超のメモリ(64KB単位)
-    private void InitCmos()
-    {
-        int baseKB = 640;
-        int extKB = Math.Min((RamSize - 0x100000) / 1024, 15 * 1024); // 1-16MB窓(KB)
-        int ext64 = RamSize > 0x1000000 ? (RamSize - 0x1000000) / (64 * 1024) : 0; // 16MB超(64KB単位)
-
-        Cmos[0x15] = (byte)baseKB; Cmos[0x16] = (byte)(baseKB >> 8);
-        Cmos[0x17] = (byte)extKB; Cmos[0x18] = (byte)(extKB >> 8);
-        Cmos[0x30] = (byte)extKB; Cmos[0x31] = (byte)(extKB >> 8);
-        Cmos[0x34] = (byte)ext64; Cmos[0x35] = (byte)(ext64 >> 8);
-    }
-
-    // 名前は歴史的経緯で OneMegaMemory_ のままだが、実サイズは RamSize。
-    public byte[] OneMegaMemory_ = new byte[RamSize];
+    public byte[] OneMegaMemory_;
 
     public byte[] IoPort = new byte[0x10000];
 
-    // CMOS/RTC: 0x70 でインデックス選択、0x71 でデータ read/write。
-    public byte[] Cmos = new byte[128];
-    public int CmosIndex;
-
-    // 仮想 8254 PIT(チャネル0)。実時間を持たないため、カウンタをラッチのたびに
-    // 減算して単調に時刻が進むようにする。SeaBIOS は下向きカウンタからラップを
-    // 検出して 32bit の単調時刻を作るので、これで遅延ループが完了する。
     // ページング変換状態(CPU の CR0.PG/CR3 のミラー。EnvSyncPaging で同期)。
     // TLB は直結マップ(tag = 0x80000000 | vpn、0 は無効)。読み取り用と、
     // Dirty ビット設定済みを保証する書き込み用を分けて持つ。
@@ -1301,18 +1073,8 @@ public class EmuEnvironment
     public Dictionary<uint, ulong> Msrs = new();
 
     // デバッグレジスタ DR0-DR7(保持のみ。ブレークポイント機能はなし)。
-    // 過渡的な診断用途のためスナップショットには保存しない。
     public uint[] Dr = new uint[8];
 
-    // 8259 PIC の状態。ベクタベース(ICW2)とマスク(OCW1)のみ。
-    // BIOS 既定はマスタ=0x08(タイマは INT 08h)。Linux は再プログラムする。
-    public byte PicMasterBase = 0x08, PicSlaveBase = 0x70;
-    public byte PicMasterMask, PicSlaveMask;
-    public int PicMasterInit, PicSlaveInit;   // ICW シーケンス位置(0=通常)
-    public bool PicMasterIcw4, PicSlaveIcw4;
-    // in-service ビット。IRQ 配送で立ち、ハンドラの EOI(OCW2)で降りる。
-    // これが立っている間は同じ IRQ を再配送しない(多重ネスト=割り込みストーム防止)。
-    public byte PicMasterIsr, PicSlaveIsr;
     public const int TlbSize = 4096;
     public uint[] TlbTagR = new uint[TlbSize], TlbPhysR = new uint[TlbSize];
     public uint[] TlbTagW = new uint[TlbSize], TlbPhysW = new uint[TlbSize];
@@ -1320,52 +1082,6 @@ public class EmuEnvironment
     {
         Array.Clear(TlbTagR);
         Array.Clear(TlbTagW);
-    }
-
-    public ushort PitCounter = 0xFFFF;
-    public ushort PitLatched = 0xFFFF;
-    public int PitReadPhase; // 0=下位バイト, 1=上位バイト
-
-    // PIT チャネル2 + システム制御ポートB(0x61)。TSC/遅延校正で使われる。
-    // 実時間を持たないため、ゲート有効かつ ch2 プログラム済みなら数回の 0x61 読みで
-    // OUT2(bit5)を立てて校正ウェイトを終わらせる。値の正確さより「ループが抜けること」を優先。
-    // 8042 キーボードコントローラ(最小実装)。キーボード本体は接続されていない扱いだが、
-    // コントローラ/キーボードコマンドへの応答(ACK・自己診断結果・コマンドバイト)を
-    // 出力バッファに積み、0x64 の OBF(bit0) を読み出しに合わせて上下させる。
-    // これがないと 0x64 が最後に書いたコマンド値(0xAD 等)をそのまま返し、
-    // NTLDR/SeaBIOS の「OBF が落ちるまで 0x60 を読む」フラッシュが無限ループになる。
-    // (過渡状態なのでスナップショットには保存しない)
-    public readonly Queue<byte> KbdOut = new();
-    public byte KbdLast;         // 0x60 の直近読み出し値(空読み時に返す)
-    public byte KbdCmdByte = 0x45; // コマンドバイト(初期値: 変換有効・IRQ1 有効)
-    public int KbdPendingCmd;    // 次の 0x60 書き込みを引数として受け取る 0x64 コマンド(0=なし)
-    // PIIX4 ACPI 電源管理レジスタ(I/O 0xB000-)。Windows の halacpi は PM タイマ(0xB008)を
-    // QueryPerformanceCounter に使い、acpi.sys は PM1 イベント/制御と GPE を操作する。
-    // タイマは 3.579545MHz。仮想時間は IRQ0 周期(10,000 命令 = 10ms)から 1 秒 = 100 万命令とみなす。
-    public ushort Pm1Sts, Pm1En, Pm1Cnt;
-    public ushort Gpe0Sts, Gpe0En;
-    public uint PmTimer => (uint)(Tsc * 3579545UL / 1_000_000UL) & 0xFFFFFF;
-    public byte Port61;          // 0x61 の書き込み値(bit0=ch2ゲート, bit1=スピーカ)
-    public byte Port61Refresh;   // bit4 のリフレッシュトグル
-    public ushort Pit2Counter = 0xFFFF;
-    public int Pit2WritePhase;   // 0x42 書き込み位相(0=lo,1=hi)
-    public int Pit2ReadPhase;    // 0x42 読み出し位相
-    public bool Pit2Armed;       // ch2 がプログラムされゲート有効
-    public int Pit2Wait;         // OUT2 を立てるまでの残り 0x61 読み回数
-    // リードバックでラッチされたステータスバイトが未読かどうか。
-    // 意図的にスナップショットへは保存しない(過渡状態であり、保存形式を変えると
-    // 既存チェックポイントから --resume できなくなるため。再開後は次の OUT 0x43 で再設定される)。
-    public bool PitStatusPending;
-    private static readonly string[] sourceArray = ["sample.vhd", "sample.vhdx"];
-
-    // 差分オーバーレイのパス(ベースイメージが無ければ null)。スナップショットと組で保存/復元する。
-    public static string OverlayPath
-    {
-        get
-        {
-            var diskImage = sourceArray.FirstOrDefault(File.Exists);
-            return diskImage == null ? null : Path.ChangeExtension(diskImage, ".avhdx");
-        }
     }
 
     // スナップショット保存/復元。ディスクの中身(DiskImage)は書き込みのたびに
@@ -1392,7 +1108,15 @@ public class EmuEnvironment
         PitCounter = r.ReadUInt16();
         PitLatched = r.ReadUInt16();
         PitReadPhase = r.ReadInt32();
-        if (r.ReadBoolean() && Ata != null)
+        if (r.ReadBoolean())
+        {
+            Ata ??= new AtaDevice(null);
             Ata.LoadState(r);
+        }
+        else
+        {
+            Ata?.Dispose();
+            Ata = null;
+        }
     }
 }

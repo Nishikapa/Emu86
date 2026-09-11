@@ -3,8 +3,6 @@ namespace Emu86;
 // 方針B: 命令的な高速実行コア。
 // モナド版(Program.Execute2)と 1 命令単位で完全に同じ状態遷移を行う「速い写像」であり、
 // 意味論の正は常にモナド版に置く(分岐トレースのバイト一致で回帰検証する)。
-// そのため x86 の仕様に照らして不正確な挙動(PF/AF を更新しない、PUSHF/LEAVE が 16bit 固定、
-// JL/JLE の条件式など)も、意図的にモナド版と同一にしてある。
 // 未対応の命令は CPU を一切変更せずに false を返し、呼び出し側がモナド版へフォールバックする。
 static public partial class Ext
 {
@@ -94,12 +92,12 @@ static public partial class Ext
             {
                 var sib = F8();
                 var idx = (sib >> 3) & 7;
-                var scaled = (uint)((1 << ((sib >> 6) & 3)) * (idx == 4 ? 0 : FReg32(cpu, idx)));
+                var scaled = (uint)((1 << ((sib >> 6) & 3)) * (idx == 4 ? 0 : ReadRegister32(cpu, idx)));
                 var basef = sib & 7;
                 var sb = basef is 4 or 5 ? ssSegBase : segBase;
                 if (mod == 0 && basef == 5) // ベースなし + disp32
                     return (true, scaled + F32(), segBase, reg);
-                var bval = FReg32(cpu, basef);
+                var bval = ReadRegister32(cpu, basef);
                 return mod switch
                 {
                     0 => (true, scaled + bval, sb, reg),
@@ -111,7 +109,7 @@ static public partial class Ext
             if (mod == 0 && rm == 5) // [d32]
                 return (true, F32(), segBase, reg);
             var sb2 = rm == 5 ? ssSegBase : segBase;
-            var rv = FReg32(cpu, rm);
+            var rv = ReadRegister32(cpu, rm);
             return mod switch
             {
                 0 => (true, rv, sb2, reg),
@@ -120,7 +118,7 @@ static public partial class Ext
             };
         }
 
-        uint RegGet(int type, int r) => type == 0 ? FReg8(cpu, r) : type == 1 ? FReg16(cpu, r) : FReg32(cpu, r);
+        uint RegGet(int type, int r) => type == 0 ? FReg8(cpu, r) : type == 1 ? FReg16(cpu, r) : ReadRegister32(cpu, r);
         void RegSet(int type, int r, uint v)
         {
             if (type == 0) FReg8Set(cpu, r, (byte)v);
@@ -135,9 +133,9 @@ static public partial class Ext
         {
             if (isMem)
             {
-                if (type == 0) FWrite8(env, a, (byte)v);
-                else if (type == 1) FWrite16(env, a, (ushort)v);
-                else FWrite32(env, a, v);
+                if (type == 0) EnvWriteByte(env, a, (byte)v);
+                else if (type == 1) EnvWriteWord(env, a, (ushort)v);
+                else EnvWriteDword(env, a, v);
             }
             else
                 RegSet(type, (int)a, v);
@@ -159,7 +157,7 @@ static public partial class Ext
                     var addr = isMem ? off + segB : off;
                     var rmVal = RmGet(type, isMem, addr);
                     var regVal = RegGet(type, reg);
-                    var r = FCalc(cpu, type, d ? regVal : rmVal, d ? rmVal : regVal, kind);
+                    var r = CalculateAlu(cpu, type, d ? regVal : rmVal, d ? rmVal : regVal, kind);
                     // CMP は結果を書き戻さない(モナド版は元の値を書き戻すが、状態としては同一)。
                     if (kind != 7)
                     {
@@ -171,7 +169,7 @@ static public partial class Ext
                 {
                     var type = (form & 1) != 0 ? typeW : 0;
                     var imm = FImm(type);
-                    var r = FCalc(cpu, type, RegGet(type, 0), imm, kind);
+                    var r = CalculateAlu(cpu, type, RegGet(type, 0), imm, kind);
                     if (kind != 7) RegSet(type, 0, r);
                 }
                 break;
@@ -181,7 +179,7 @@ static public partial class Ext
                 var reg = op & 7;
                 var delta = op < 0x48 ? 1 : -1;
                 var v = RegGet(typeW, reg);
-                FIncDec(cpu, typeW, v, delta);
+                SetIncDecFlags(cpu, typeW, v, delta);
                 RegSet(typeW, reg, (uint)(v + delta));
                 break;
             }
@@ -217,7 +215,7 @@ static public partial class Ext
             }
             case >= 0x70 and <= 0x7F: // Jcc rel8
             {
-                var f = FCond(cpu, op & 0xF);
+                var f = EvaluateCondition(cpu, op & 0xF);
                 int off = (sbyte)F8();
                 cpu.eip = (uint)(startEip + len + (f ? off : 0));
                 return true;
@@ -229,7 +227,7 @@ static public partial class Ext
                 var addr = isMem ? off + segB : off;
                 var a = RmGet(type, isMem, addr);
                 var imm = FImm(type);
-                var r = FCalc(cpu, type, a, imm, reg);
+                var r = CalculateAlu(cpu, type, a, imm, reg);
                 if (reg != 7) RmSet(type, isMem, addr, r);
                 break;
             }
@@ -239,7 +237,7 @@ static public partial class Ext
                 var addr = isMem ? off + segB : off;
                 var imm = (uint)(sbyte)F8();
                 var a = RmGet(typeW, isMem, addr);
-                var r = FCalc(cpu, typeW, a, imm, reg);
+                var r = CalculateAlu(cpu, typeW, a, imm, reg);
                 if (reg != 7) RmSet(typeW, isMem, addr, r);
                 break;
             }
@@ -248,7 +246,7 @@ static public partial class Ext
                 var type = (op & 1) != 0 ? typeW : 0;
                 var (isMem, off, segB, reg) = ReadModRM();
                 var addr = isMem ? off + segB : off;
-                FLogic(cpu, type, RmGet(type, isMem, addr) & RegGet(type, reg));
+                SetLogicFlags(cpu, type, RmGet(type, isMem, addr) & RegGet(type, reg));
                 break;
             }
             case 0x86 or 0x87: // XCHG r/m, r
@@ -322,9 +320,9 @@ static public partial class Ext
                 }
                 else
                 {
-                    if (type == 0) FWrite8(env, addr, cpu.al);
-                    else if (type == 1) FWrite16(env, addr, cpu.ax);
-                    else FWrite32(env, addr, cpu.eax);
+                    if (type == 0) EnvWriteByte(env, addr, cpu.al);
+                    else if (type == 1) EnvWriteWord(env, addr, cpu.ax);
+                    else EnvWriteDword(env, addr, cpu.eax);
                 }
                 break;
             }
@@ -336,7 +334,7 @@ static public partial class Ext
                 var type = (op & 1) != 0 ? typeW : 0;
                 var acc = RegGet(type, 0);
                 var imm = FImm(type);
-                FLogic(cpu, type, acc & imm);
+                SetLogicFlags(cpu, type, acc & imm);
                 break;
             }
             case >= 0xB0 and <= 0xBF: // MOV r, imm
@@ -445,6 +443,7 @@ static public partial class Ext
                 {
                     FStrOne(env, cpu, op2, size, a32);
                     if (a32) cpu.ecx -= 1; else cpu.cx = (ushort)(cpu.cx - 1);
+                    cpu.Decode.CommitRepeat(cpu);
                     if (checkZf && cpu.zf != repZf) break;
                 }
                 break;
@@ -461,13 +460,13 @@ static public partial class Ext
                 switch (reg)
                 {
                     case 0 or 1: // TEST r/m, imm
-                        FLogic(cpu, type, v & FImm(type));
+                        SetLogicFlags(cpu, type, v & FImm(type));
                         break;
                     case 2: // NOT
                         RmSet(type, isMem, addr, ~v);
                         break;
                     case 3: // NEG
-                        FSub(cpu, type, 0, v);
+                        SetSubtractionFlags(cpu, type, 0, v);
                         RmSet(type, isMem, addr, 0u - v);
                         break;
                     case 4: // MUL
@@ -523,7 +522,7 @@ static public partial class Ext
                 var addr = isMem ? off + segB : off;
                 var v = RmGet(0, isMem, addr);
                 var delta = reg == 0 ? 1 : -1;
-                FIncDec(cpu, 0, v, delta);
+                SetIncDecFlags(cpu, 0, v, delta);
                 RmSet(0, isMem, addr, (uint)(v + delta));
                 break;
             }
@@ -538,7 +537,7 @@ static public partial class Ext
                     case 0 or 1:
                     {
                         var delta = reg == 0 ? 1 : -1;
-                        FIncDec(cpu, typeW, v, delta);
+                        SetIncDecFlags(cpu, typeW, v, delta);
                         RmSet(typeW, isMem, addr, (uint)(v + delta));
                         break;
                     }
@@ -563,7 +562,7 @@ static public partial class Ext
                 {
                     case >= 0x80 and <= 0x8F: // Jcc rel16/32
                     {
-                        var f = FCond(cpu, op2 & 0xF);
+                        var f = EvaluateCondition(cpu, op2 & 0xF);
                         int off = typeW == 2 ? (int)F32() : (short)F16();
                         cpu.eip = (uint)(startEip + len + (f ? off : 0));
                         return true;
@@ -572,7 +571,7 @@ static public partial class Ext
                     {
                         var (isMem, off, segB, _) = ReadModRM();
                         var addr = isMem ? off + segB : off;
-                        RmSet(0, isMem, addr, FCond(cpu, op2 & 0xF) ? 1u : 0u);
+                        RmSet(0, isMem, addr, EvaluateCondition(cpu, op2 & 0xF) ? 1u : 0u);
                         break;
                     }
                     case 0xAF: // IMUL r, r/m
@@ -626,28 +625,28 @@ static public partial class Ext
             {
                 var src = c.ds_base + (a32 ? c.esi : c.si);
                 var dst = c.es_base + (a32 ? c.edi : c.di);
-                FWriteN(env, dst, size, FReadN(env, src, size));
+                EnvWriteN(env, dst, size, EnvReadN(env, src, size));
                 FStrAdvance(c, size, a32, si: true, di: true);
                 break;
             }
             case 0xA6 or 0xA7: // CMPS
             {
-                var s = FReadN(env, c.ds_base + (a32 ? c.esi : c.si), size);
-                var d = FReadN(env, c.es_base + (a32 ? c.edi : c.di), size);
-                FSub(c, size == 1 ? 0 : size == 2 ? 1 : 2, s, d);
+                var s = EnvReadN(env, c.ds_base + (a32 ? c.esi : c.si), size);
+                var d = EnvReadN(env, c.es_base + (a32 ? c.edi : c.di), size);
+                SetSubtractionFlags(c, size == 1 ? 0 : size == 2 ? 1 : 2, s, d);
                 FStrAdvance(c, size, a32, si: true, di: true);
                 break;
             }
             case 0xAA or 0xAB: // STOS
             {
                 var dst = c.es_base + (a32 ? c.edi : c.di);
-                FWriteN(env, dst, size, size == 1 ? c.al : size == 2 ? c.ax : c.eax);
+                EnvWriteN(env, dst, size, size == 1 ? c.al : size == 2 ? c.ax : c.eax);
                 FStrAdvance(c, size, a32, si: false, di: true);
                 break;
             }
             case 0xAC or 0xAD: // LODS
             {
-                var v = FReadN(env, c.ds_base + (a32 ? c.esi : c.si), size);
+                var v = EnvReadN(env, c.ds_base + (a32 ? c.esi : c.si), size);
                 if (size == 1) c.al = (byte)v; else if (size == 2) c.ax = (ushort)v; else c.eax = v;
                 FStrAdvance(c, size, a32, si: true, di: false);
                 break;
@@ -655,8 +654,8 @@ static public partial class Ext
             case 0xAE or 0xAF: // SCAS
             {
                 uint a = size == 1 ? c.al : size == 2 ? c.ax : c.eax;
-                var m = FReadN(env, c.es_base + (a32 ? c.edi : c.di), size);
-                FSub(c, size == 1 ? 0 : size == 2 ? 1 : 2, a, m);
+                var m = EnvReadN(env, c.es_base + (a32 ? c.edi : c.di), size);
+                SetSubtractionFlags(c, size == 1 ? 0 : size == 2 ? 1 : 2, a, m);
                 FStrAdvance(c, size, a32, si: false, di: true);
                 break;
             }
@@ -671,81 +670,6 @@ static public partial class Ext
         if (di) { if (a32) c.edi = (uint)(c.edi + delta); else c.di = (ushort)(c.di + delta); }
     }
 
-    static uint FReadN(EmuEnvironment env, uint addr, int size) =>
-        size == 1 ? EnvGetMemoryData8(env, addr) : size == 2 ? EnvGetMemoryData16(env, addr) : EnvGetMemoryData32(env, addr);
-
-    static void FWriteN(EmuEnvironment env, uint addr, int size, uint v)
-    {
-        if (size == 1) FWrite8(env, addr, (byte)v);
-        else if (size == 2) FWrite16(env, addr, (ushort)v);
-        else FWrite32(env, addr, v);
-    }
-
-    // メモリ書き込み。RAM 外は 1 バイト単位で無視する(EnvSetMemoryDatas と同じ挙動)。
-    // アドレスは線形。ページング有効時は変換し、境界跨ぎは 1 バイトずつ書く。
-    static void FWrite8(EmuEnvironment env, uint a, byte v)
-    {
-        if (env.PagingOn) a = EnvTranslate(env, a, write: true);
-        if (env.PagingOn && a >= env.WatchLo && a < env.WatchHi) env.WatchTriggered = true;
-        if (env.WriteLog != null && a >= env.WLogLo && a < env.WLogHi)
-            env.WriteLog.Add($"{env.CurEip:x8}: [{a:x8}]={v:x2}");
-        var m = env.OneMegaMemory_;
-        if (a < (uint)m.Length) m[a] = v;
-    }
-
-    static void FWrite16(EmuEnvironment env, uint a, ushort v)
-    {
-        if (env.PagingOn)
-        {
-            if ((a & 0xFFF) >= 0xFFF)
-            {
-                FWrite8(env, a, (byte)v); FWrite8(env, a + 1, (byte)(v >> 8));
-                return;
-            }
-            a = EnvTranslate(env, a, write: true);
-        }
-        if (env.PagingOn && a >= env.WatchLo - 1 && a < env.WatchHi) env.WatchTriggered = true;
-        if (env.WriteLog != null && a + 2 > env.WLogLo && a < env.WLogHi)
-            env.WriteLog.Add($"{env.CurEip:x8}: [{a:x8}]={v:x4} (w16)");
-        var m = env.OneMegaMemory_;
-        if (a <= (uint)m.Length - 2) { m[a] = (byte)v; m[a + 1] = (byte)(v >> 8); }
-        else { FWritePhys8(env, a, (byte)v); FWritePhys8(env, a + 1, (byte)(v >> 8)); }
-    }
-
-    static void FWrite32(EmuEnvironment env, uint a, uint v)
-    {
-        if (env.PagingOn)
-        {
-            if ((a & 0xFFF) > 0xFFC)
-            {
-                FWrite8(env, a, (byte)v); FWrite8(env, a + 1, (byte)(v >> 8));
-                FWrite8(env, a + 2, (byte)(v >> 16)); FWrite8(env, a + 3, (byte)(v >> 24));
-                return;
-            }
-            a = EnvTranslate(env, a, write: true);
-        }
-        if (env.PagingOn && a >= env.WatchLo - 3 && a < env.WatchHi) env.WatchTriggered = true;
-        if (env.WriteLog != null && a + 4 > env.WLogLo && a < env.WLogHi)
-            env.WriteLog.Add($"{env.CurEip:x8}: [{a:x8}]={v:x8} (w32)");
-        var m = env.OneMegaMemory_;
-        if (a <= (uint)m.Length - 4)
-        {
-            m[a] = (byte)v; m[a + 1] = (byte)(v >> 8); m[a + 2] = (byte)(v >> 16); m[a + 3] = (byte)(v >> 24);
-        }
-        else
-        {
-            FWritePhys8(env, a, (byte)v); FWritePhys8(env, a + 1, (byte)(v >> 8));
-            FWritePhys8(env, a + 2, (byte)(v >> 16)); FWritePhys8(env, a + 3, (byte)(v >> 24));
-        }
-    }
-
-    // 物理アドレス直書き(変換済み・RAM 外は無視)。
-    static void FWritePhys8(EmuEnvironment env, uint a, byte v)
-    {
-        var m = env.OneMegaMemory_;
-        if (a < (uint)m.Length) m[a] = v;
-    }
-
     // PUSH: SP/ESP を減らしてからスタックトップへ書く(Push と同一)。
     // スタック幅は SS.B(stack32)で決まる(CS.D ではない)。
     static void FPush(EmuEnvironment env, CPU c, int type, uint v)
@@ -753,9 +677,9 @@ static public partial class Ext
         var size = type == 0 ? 1 : type == 1 ? 2 : 4;
         if (c.stack32) c.esp = (uint)(c.esp - size); else c.sp = (ushort)(c.sp - size);
         var addr = c.ss_base + (c.stack32 ? c.esp : c.sp);
-        if (type == 0) FWrite8(env, addr, (byte)v);
-        else if (type == 1) FWrite16(env, addr, (ushort)v);
-        else FWrite32(env, addr, v);
+        if (type == 0) EnvWriteByte(env, addr, (byte)v);
+        else if (type == 1) EnvWriteWord(env, addr, (ushort)v);
+        else EnvWriteDword(env, addr, v);
     }
 
     // POP: スタックトップから読んでから SP/ESP を増やす(Pop と同一)。
@@ -769,97 +693,6 @@ static public partial class Ext
         if (c.stack32) c.esp = (uint)(c.esp + size); else c.sp = (ushort)(c.sp + size);
         return v;
     }
-
-    // 算術/論理グループ(Calc と同一の計算とフラグ更新。PF/AF は更新しない)。
-    // ADC/SBB のキャリー入力はオペランドに畳み込まず個別に扱う(Calc と同一)。
-    static uint FCalc(CPU c, int type, uint a, uint b0, int kind)
-    {
-        var mask = Mask(type);
-        var msb = Msb(type);
-        a &= mask;
-        var b = b0 & mask;
-        var cin = kind is 2 or 3 && c.cf ? 1u : 0u;
-        var r = kind switch
-        {
-            0 or 2 => (a + b + cin) & mask,   // ADD/ADC
-            1 => a | b,                       // OR
-            3 or 5 => (a - b - cin) & mask,   // SBB/SUB
-            4 => a & b,                       // AND
-            6 => a ^ b,                       // XOR
-            _ => a,                           // CMP
-        };
-        var isAdd = kind is 0 or 2;
-        var isSub = kind is 3 or 5 or 7;
-        var fr = isSub ? (a - b - cin) & mask : r;
-        c.cf = isAdd ? (ulong)a + b + cin > mask : isSub && (ulong)b + cin > a;
-        c.zf = fr == 0;
-        c.sf = (fr & msb) != 0;
-        c.of = isAdd ? ((a ^ b) & msb) == 0 && ((a ^ fr) & msb) != 0
-                     : isSub && ((a ^ b) & msb) != 0 && ((a ^ fr) & msb) != 0;
-        c.pf = Par(fr);
-        c.af = (isAdd || isSub) && ((a ^ b ^ fr) & 0x10) != 0;
-        return r;
-    }
-
-    // 減算フラグ(update_eflags_sub と同一)。NEG/CMPS/SCAS 用。
-    static void FSub(CPU c, int type, uint v1, uint v2)
-    {
-        var mask = Mask(type);
-        var msb = Msb(type);
-        v1 &= mask; v2 &= mask;
-        var d = (v1 - v2) & mask;
-        c.cf = v1 < v2;
-        c.zf = v1 == v2;
-        c.sf = (d & msb) != 0;
-        c.of = ((v1 ^ v2) & msb) != 0 && ((v1 ^ d) & msb) != 0;
-        c.pf = Par(d);
-        c.af = ((v1 ^ v2 ^ d) & 0x10) != 0;
-    }
-
-    // 論理演算フラグ(update_eflags と同一: CF=OF=0, ZF/SF のみ)。
-    static void FLogic(CPU c, int type, uint r)
-    {
-        r &= Mask(type);
-        c.cf = false;
-        c.zf = r == 0;
-        c.sf = (r & Msb(type)) != 0;
-        c.of = false;
-        c.pf = Par(r);
-        c.af = false;
-    }
-
-    // INC/DEC フラグ(update_eflags_incdec と同一: CF は変更しない)。
-    static void FIncDec(CPU c, int type, uint v, int delta)
-    {
-        var msb = Msb(type);
-        var r = (uint)(v + delta) & Mask(type);
-        c.zf = r == 0;
-        c.sf = (r & msb) != 0;
-        c.of = (v & Mask(type)) == (delta > 0 ? msb - 1 : msb);
-        c.pf = Par(r);
-        c.af = ((v ^ r) & 0x10) != 0;
-    }
-
-    // Jcc 条件(モナド版 Jcc と同一)。
-    static bool FCond(CPU c, int t) => t switch
-    {
-        0 => c.of,
-        1 => !c.of,
-        2 => c.cf,
-        3 => !c.cf,
-        4 => c.zf,
-        5 => !c.zf,
-        6 => c.cf || c.zf,
-        7 => !c.cf && !c.zf,
-        8 => c.sf,
-        9 => !c.sf,
-        10 => c.pf,
-        11 => !c.pf,
-        12 => c.sf != c.of,
-        13 => c.sf == c.of,
-        14 => c.zf || c.sf != c.of,
-        _ => c.sf == c.of && !c.zf,
-    };
 
     static byte FReg8(CPU c, int r) => r switch
     {
@@ -902,12 +735,6 @@ static public partial class Ext
             default: c.di = v; break;
         }
     }
-
-    static uint FReg32(CPU c, int r) => r switch
-    {
-        0 => c.eax, 1 => c.ecx, 2 => c.edx, 3 => c.ebx,
-        4 => c.esp, 5 => c.ebp, 6 => c.esi, _ => c.edi,
-    };
 
     static void FReg32Set(CPU c, int r, uint v)
     {
