@@ -15,9 +15,7 @@ static public partial class Ext
         from _ in IpInc(arrLen[data.type])
         select (data, (addr.isMem, addr.addr));
 
-    static public State<Data> GetMemoryDataIp_(int type) =>
-        from data in GetMemoryDataIp(arrLen[type])
-        select ToTypeData(data, type);
+    static public State<Data> GetMemoryDataIp_(int type) => MemoryDataIpByType[type];
 
     static public State<(int mod, int reg, int rm)> ModRegRm() =>
         from value in GetMemoryDataIp8
@@ -70,35 +68,7 @@ static public partial class Ext
     {
         if (d1.type != d2.type)
             throw new Exception();
-        return
-            from cf0 in Get(_cf)
-            let mask = Mask(d1.type)
-            let msb = Msb(d1.type)
-            let a = d1.Value()
-            let b = d2.Value() & mask
-            let cin = kind is 2 or 3 && cf0 ? 1u : 0u
-            let r = kind switch
-            {
-                0 or 2 => (a + b + cin) & mask,   // ADD/ADC
-                1 => a | b,                       // OR
-                3 or 5 => (a - b - cin) & mask,   // SBB/SUB
-                4 => a & b,                       // AND
-                6 => a ^ b,                       // XOR
-                _ => a,                           // CMP は結果を捨てて a を返す
-            }
-            let isAdd = kind is 0 or 2
-            let isSub = kind is 3 or 5 or 7
-            let fr = isSub ? (a - b - cin) & mask : r  // フラグ計算の対象(CMP は減算結果)
-            from _ in SetCpu(
-                (_cf, isAdd ? (ulong)a + b + cin > mask : isSub && (ulong)b + cin > a),
-                (_zf, fr == 0),
-                (_sf, (fr & msb) != 0),
-                (_of, isAdd ? ((a ^ b) & msb) == 0 && ((a ^ fr) & msb) != 0
-                    : isSub && ((a ^ b) & msb) != 0 && ((a ^ fr) & msb) != 0),
-                (_pf, Par(fr)),
-                (_af, (isAdd || isSub) && ((a ^ b ^ fr) & 0x10) != 0) // 論理演算では 0(実 CPU は未定義だがクリアされる)
-            )
-            select r.ToTypeData(d1.type);
+        return GetDataFromCpu(cpu => CalculateAlu(cpu, d1.type, d1.Value(), d2.Value(), kind).ToTypeData(d1.type));
     }
 
     // Group2 シフト/ローテートを 1bit ずつ count 回適用する。
@@ -186,27 +156,7 @@ static public partial class Ext
         s.Select(b => !b);
 
     static public State<bool> Jcc(int type) =>
-        GetDataFromCpu(
-            cpu => new[]
-            {
-                cpu.of,                           // JO
-                !cpu.of,                          // JNO
-                cpu.cf,                           // JB
-                !cpu.cf,                          // JNB
-                cpu.zf,                           // JE
-                !cpu.zf,                          // JNE
-                cpu.cf || cpu.zf,                 // JBE
-                (!cpu.cf) && (!cpu.zf),           // JNBE
-                cpu.sf,                           // JS
-                !cpu.sf,                          // JNS
-                cpu.pf,                           // JP
-                !cpu.pf,                          // JNP
-                cpu.sf != cpu.of,                 // JL
-                cpu.sf == cpu.of,                 // JNL
-                cpu.zf || (cpu.sf != cpu.of),     // JLE
-                (cpu.sf == cpu.of) && (!cpu.zf),  // JNLE
-            }[type]
-        );
+        GetDataFromCpu(cpu => EvaluateCondition(cpu, type));
 
     static private Func<int, Func<CPU, T>> EnvGetDataFromCPU<T>(this Accessor<CPU, T>[] array) =>
         reg => array[reg].getter;
@@ -248,104 +198,72 @@ static public partial class Ext
 
     // ホットパスで毎命令アクセスされるため、プロパティではなくキャッシュ済みフィールドにする
     // (プロパティだと参照のたびに SelectMany のデリゲート鎖を再構築してしまう)。
-    static public readonly State<byte> GetMemoryDataIp8 =
-        from data in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryData8(env, GetCodeAddr(cpu).addr))
-        from _ in IpInc(1)
-        select data;
-
-    static public readonly State<ushort> GetMemoryDataIp16 =
-        from data in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryData16(env, GetCodeAddr(cpu).addr))
-        from _ in IpInc(2)
-        select data;
-
-    static public readonly State<uint> GetMemoryDataIp32 =
-        from data in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryData32(env, GetCodeAddr(cpu).addr))
-        from _ in IpInc(4)
-        select data;
-
-    static public State<Unit> update_eflags(byte v) =>
-        SetCpu(
-            (_cf, false),
-            (_zf, 0 == v),
-            (_sf, 0 != (v & 0x80)),
-            (_of, false),
-            (_pf, Par(v)),
-            (_af, false)
-        );
-
-    static public State<Unit> update_eflags(ushort v) =>
-        SetCpu(
-            (_cf, false),
-            (_zf, 0 == v),
-            (_sf, 0 != (v & 0x8000)),
-            (_of, false),
-            (_pf, Par(v)),
-            (_af, false)
-        );
-
-    static public State<Unit> update_eflags(uint v) =>
-        SetCpu(
-            (_cf, false),
-            (_zf, 0 == v),
-            (_sf, 0 != (v & 0x80000000)),
-            (_of, false),
-            (_pf, Par(v)),
-            (_af, false)
-        );
-
-    // type(0=byte,1=word,2=dword) に応じて幅ごとの update_eflags を呼ぶ。
-    static public State<Unit> update_eflags(Data d) =>
-        d.type == 0 ? update_eflags(d.db)
-      : d.type == 1 ? update_eflags(d.dw)
-      : update_eflags(d.dd);
-
-    static public State<Unit> update_eflags_sub(byte v1, byte v2) =>
-        SetCpu(
-            (_cf, v1 < v2),
-            (_zf, v1 == v2),
-            (_sf, TopBit((byte)(v1 - v2))),
-            (_of, (TopBit(v1) != TopBit(v2)) && (TopBit(v1) != TopBit((byte)(v1 - v2)))),
-            (_pf, Par((uint)(byte)(v1 - v2))),
-            (_af, ((v1 ^ v2 ^ (v1 - v2)) & 0x10) != 0)
-        );
-
-    static public State<Unit> update_eflags_sub(uint v1, uint v2) =>
-        SetCpu(
-            (_cf, v1 < v2),
-            (_zf, v1 == v2),
-            (_sf, TopBit(v1 - v2)),
-            (_of, (TopBit(v1) != TopBit(v2)) && (TopBit(v1) != TopBit(v1 - v2))),
-            (_pf, Par(v1 - v2)),
-            (_af, ((v1 ^ v2 ^ (v1 - v2)) & 0x10) != 0)
-        );
-
-    static public State<Unit> update_eflags_sub(ushort v1, ushort v2) =>
-        SetCpu(
-            (_cf, v1 < v2),
-            (_zf, v1 == v2),
-            (_sf, TopBit((ushort)(v1 - v2))),
-            (_of, (TopBit(v1) != TopBit(v2)) && (TopBit(v1) != TopBit((ushort)(v1 - v2)))),
-            (_pf, Par((uint)(ushort)(v1 - v2))),
-            (_af, ((v1 ^ v2 ^ (v1 - v2)) & 0x10) != 0)
-        );
-
-    // INC/DEC は CF を変更しない（ZF/SF/OF のみ更新）。
-    static public State<Unit> update_eflags_inc(Data d) => update_eflags_incdec(d, +1);
-    static public State<Unit> update_eflags_dec(Data d) => update_eflags_incdec(d, -1);
-
-    static State<Unit> update_eflags_incdec(Data d, int delta)
+    static public readonly State<byte> GetMemoryDataIp8 = (env, cpu, opcodes) =>
     {
-        var msb = Msb(d.type);
-        var v = d.Value();
-        var r = (uint)(v + delta) & Mask(d.type);
-        return SetCpu(
-            (_zf, r == 0),
-            (_sf, (r & msb) != 0),
-            (_of, v == (delta > 0 ? msb - 1 : msb)),
-            (_pf, Par(r)),
-            (_af, ((v ^ r) & 0x10) != 0)
-        );
-    }
+        var data = EnvGetMemoryData8(env, GetCodeAddr(cpu).addr);
+        cpu.eip += 1;
+        return (true, data, cpu, string.Empty);
+    };
+
+    static public readonly State<ushort> GetMemoryDataIp16 = (env, cpu, opcodes) =>
+    {
+        var data = EnvGetMemoryData16(env, GetCodeAddr(cpu).addr);
+        cpu.eip += 2;
+        return (true, data, cpu, string.Empty);
+    };
+
+    static public readonly State<uint> GetMemoryDataIp32 = (env, cpu, opcodes) =>
+    {
+        var data = EnvGetMemoryData32(env, GetCodeAddr(cpu).addr);
+        cpu.eip += 4;
+        return (true, data, cpu, string.Empty);
+    };
+
+    static readonly State<Data>[] MemoryDataIpByType =
+    [
+        GetMemoryDataIp8.Select(ToTypeData),
+        GetMemoryDataIp16.Select(ToTypeData),
+        GetMemoryDataIp32.Select(ToTypeData)
+    ];
+
+    static public State<Unit> update_eflags(byte value) => update_eflags(value.ToTypeData());
+
+    static public State<Unit> update_eflags(ushort value) => update_eflags(value.ToTypeData());
+
+    static public State<Unit> update_eflags(uint value) => update_eflags(value.ToTypeData());
+
+    static public State<Unit> update_eflags(Data data) =>
+        SetCpu(cpu =>
+        {
+            SetLogicFlags(cpu, data.type, data.Value());
+            return cpu;
+        });
+
+    static public State<Unit> update_eflags_sub(byte left, byte right) =>
+        UpdateSubtractionFlags(0, left, right);
+
+    static public State<Unit> update_eflags_sub(uint left, uint right) =>
+        UpdateSubtractionFlags(2, left, right);
+
+    static public State<Unit> update_eflags_sub(ushort left, ushort right) =>
+        UpdateSubtractionFlags(1, left, right);
+
+    static State<Unit> UpdateSubtractionFlags(int type, uint left, uint right) =>
+        SetCpu(cpu =>
+        {
+            SetSubtractionFlags(cpu, type, left, right);
+            return cpu;
+        });
+
+    static public State<Unit> update_eflags_inc(Data data) => update_eflags_incdec(data, +1);
+    static public State<Unit> update_eflags_dec(Data data) => update_eflags_incdec(data, -1);
+
+    static State<Unit> update_eflags_incdec(Data data, int delta) =>
+        SetCpu(cpu =>
+        {
+            SetIncDecFlags(cpu, data.type, data.Value(), delta);
+            return cpu;
+        });
 
     static public readonly State<CPU> GetCpu = GetDataFromEnvCpu((env, cpu) => cpu);
 
@@ -369,7 +287,7 @@ public class Accessor<O, P>(Func<O, P> g, Func<O, Func<P, O>> s)
 // State モナドの各バインドを CPU の実体コピーではなく参照の受け渡しで通すことで、
 // 1命令あたり数十回発生していた大きな構造体コピーをなくしている。
 // アクセサの setter は同一インスタンスをその場で書き換えて返す。
-public class CPU
+public partial class CPU
 {
     // セグメントレジスタのセッタは、リアルモードの基底(セレクタ*16)もあわせて更新する。
     // プロテクトモードでは LoadSReg が GDT 記述子から読んだ基底で上書きする(記述子キャッシュ相当)。
@@ -487,17 +405,18 @@ public class CPU
     // 書き込み保護(CR0.WP)。リング0 でも読み取り専用ページへの書き込みを #PF にする。
     public bool wp => 0 != (this.cr0 & 0x10000);
 
-    public bool cs_prefix;
-    public bool es_prefix;
-    public bool ss_prefix;
-    public bool ds_prefix;
-    public bool fs_prefix;
-    public bool gs_prefix;
-    public bool operand_size_prefix;
-    public bool address_size_prefix;
+    public DecodeContext Decode;
+    public bool cs_prefix { get => Decode.Cs; set => Decode.Cs = value; }
+    public bool es_prefix { get => Decode.Es; set => Decode.Es = value; }
+    public bool ss_prefix { get => Decode.Ss; set => Decode.Ss = value; }
+    public bool ds_prefix { get => Decode.Ds; set => Decode.Ds = value; }
+    public bool fs_prefix { get => Decode.Fs; set => Decode.Fs = value; }
+    public bool gs_prefix { get => Decode.Gs; set => Decode.Gs = value; }
+    public bool operand_size_prefix { get => Decode.OperandSize; set => Decode.OperandSize = value; }
+    public bool address_size_prefix { get => Decode.AddressSize; set => Decode.AddressSize = value; }
     // LOCK (F0)。単一CPUなのでアトミック性は自明に満たされ、実質無視でよい。
     // 命令間では常に false のためスナップショットには保存しない。
-    public bool lock_prefix;
+    public bool lock_prefix { get => Decode.Lock; set => Decode.Lock = value; }
     static public readonly Accessor<CPU, bool> _lock_prefix = new(c => c.lock_prefix, c => v => { c.lock_prefix = v; return c; });
     static public readonly Accessor<CPU, bool> _cs_prefix = new(c => c.cs_prefix, c => v => { c.cs_prefix = v; return c; });
     static public readonly Accessor<CPU, bool> _es_prefix = new(c => c.es_prefix, c => v => { c.es_prefix = v; return c; });
@@ -582,9 +501,6 @@ public class CPU
     public uint esi { get; set; }
     public uint edi { get; set; }
 
-    // レジスタ状態を dest へ丸ごとコピーする。ページフォルトはメモリアクセスの
-    // 途中(命令の中間)で起きうるため、Runner はページング有効時に命令前状態を
-    // ここへ退避し、フォルト配送時に巻き戻して命令を再開可能にする。
     public void CopyTo(CPU d)
     {
         d.cs = cs; d.ds = ds; d.es = es; d.ss = ss; d.fs = fs; d.gs = gs;
@@ -601,6 +517,7 @@ public class CPU
         d.ebp = ebp; d.esp = esp; d.eflags = eflags;
         d.eax = eax; d.ebx = ebx; d.ecx = ecx; d.edx = edx;
         d.esi = esi; d.edi = edi;
+        d.Decode = Decode;
     }
 
     // スナップショット保存/復元。導出プロパティ(ip/bp/sp/al/ah 等)は元の

@@ -12,9 +12,11 @@
 
   <!--
     BIOS イメージを同梱する場合は bios.bin をプロジェクト直下に置けば自動で埋め込まれ、
-    EmuEnvironment が起動時に 1MB メモリ空間の末尾へ配置する。
+    EnvironmentFactory が読み込み、EmuEnvironment の 1MB メモリ空間の末尾へ配置する。
   -->
   <ItemGroup>
+    <Compile Remove="tests/**/*.cs" />
+    <InternalsVisibleTo Include="Emu86.Tests" />
     <EmbeddedResource Include="bios.bin" Condition="Exists('bios.bin')" />
   </ItemGroup>
 

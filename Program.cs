@@ -193,6 +193,7 @@ static partial class Program
             if (!ok2)
                 return (false, default, cpu1, log);
             cpu = a32 ? _ecx.setter(cpuN)(cpuN.ecx - 1) : _cx.setter(cpuN)((ushort)(cpuN.cx - 1));
+            cpu.Decode.CommitRepeat(cpu);
 
             if (checkZf && _zf.getter(cpu) != repZf.Value)
                 break;

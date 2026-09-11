@@ -12,7 +12,7 @@ struct OpecodeDic
 
 static partial class Program
 {
-    static Dictionary<int, Accessor<CPU, bool>> PrefixStates =>
+    static readonly Dictionary<int, Accessor<CPU, bool>> PrefixStates =
         new()
         {
             { 0x26, _es_prefix },
@@ -33,12 +33,6 @@ static partial class Program
                 new OpecodeDic() { state = acc.Set(true) } :
                 default
         )];
-
-    static State<Unit> ClearPrefixes =>
-        PrefixStates.Values
-        .Select(acc => acc.Set(false))
-        .Sequence()
-        .Ignore();
 
     static (byte ope, int len, State<Unit> state)[] OneByteStates =>
     [
@@ -248,15 +242,11 @@ static partial class Program
 
     static public State<Unit> Execute => (env, cpu1, ope) =>
     {
-        // 未実装オペコードで失敗したとき STOP 診断が正しい位置を指すよう、
-        // フェッチ前の EIP を覚えておき、失敗時に戻す(CPU は参照型なので明示的に戻す)。
-        var startEip = cpu1.eip;
-
         var (IsSuccess1, op1, cpu2, log1) = GetMemoryDataIp8(env, cpu1, ope);
 
         if (!IsSuccess1)
         {
-            return (false, default, Rewind(cpu1, startEip), log1);
+            return (false, default, cpu1, log1);
         }
 
         var data1 = dic[op1];
@@ -264,19 +254,19 @@ static partial class Program
         if (default != data1.state)
         {
             var ret = data1.state(env, cpu2, [(byte)op1]);
-            return ret.IsSuccess ? ret : (false, default, Rewind(ret.cpu, startEip), ret.log);
+            return ret.IsSuccess ? ret : (false, default, ret.cpu, ret.log);
         }
 
         if (default == data1.next)
         {
-            return (false, default, Rewind(cpu2, startEip), log1);
+            return (false, default, cpu2, log1);
         }
 
         var (IsSuccess2, op2, cpu3, log2) = GetMemoryDataIp8(env, cpu2, ope);
 
         if (!IsSuccess2)
         {
-            return (false, default, Rewind(cpu2, startEip), log1);
+            return (false, default, cpu2, log1);
         }
 
         var data2 = data1.next[op2];
@@ -284,17 +274,23 @@ static partial class Program
         if (default != data2.state)
         {
             var ret = data2.state(env, cpu3, [(byte)op1, (byte)op2]);
-            return ret.IsSuccess ? ret : (false, default, Rewind(ret.cpu, startEip), ret.log);
+            return ret.IsSuccess ? ret : (false, default, ret.cpu, ret.log);
         }
 
-        return (false, default, Rewind(cpu3, startEip), log1 + log2);
+        return (false, default, cpu3, log1 + log2);
     };
 
-    static CPU Rewind(CPU cpu, uint eip) => _eip.setter(cpu)(eip);
-
-    static public State<Unit> Execute2 =>
-        from _1 in CheckPrefixes
-        from _2 in Execute
-        from _3 in ClearPrefixes
+    internal static readonly State<Unit> ExecuteDecoded =
+        from prefixes in CheckPrefixes
+        from instruction in Execute
         select unit;
+
+    static public State<Unit> Execute2
+    {
+        get
+        {
+            var executor = new InstructionExecutor(useFast: false);
+            return (env, cpu, opcodes) => executor.Step(env, cpu);
+        }
+    }
 }

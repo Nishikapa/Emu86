@@ -343,3 +343,21 @@ rm sample.avhdx; ./bin/Release/net10.0/Emu86.exe --notrace --entrylog 7c90e47c 7
   文字列も `dbg="…"` として出す(Windows のデバッグ出力を無料で覗ける)。
 - 次の壁: **表示と入力**。VGA(vga.sys の 640x480x16 プレーン書き込み)未実装のため画面は見えず、
   入力は 8042 の `KbdOut` キューにスキャンコードを積めば注入できる(未実装)。sysprep.inf で無人化する手もあるが NTFS 書き込みが要る。
+
+## リファクタ検証(2026-09-11)
+`Alu.cs`/`InstructionExecutor.cs`/`SnapshotStore.cs`(v7: ディスク差分を内包・SHA-256)等の整理後の確認結果。
+- 高速コアの分岐トレース(先頭 10M 命令)は整理前(eeeae9f)とバイト一致。冷起動 8 億命令の停止位置も一致。
+- Windows 冷起動 56 億命令: 整理前と同じくミニセットアップ入力待ち(winlogon/lsass/setup.exe 稼働、バグチェック無し)。
+  v7 スナップショットからの再開(58 億→59 億命令)も正常。
+- 直したもの: (1) `EnvGetMemoryDatas` が BIOS 高位エイリアス(0xFFFxxxxx)を折り返しておらず、`--slow`(モナド版のみ)が
+  2,736 命令目の ModRM デコードで落ちていた(高位エイリアス導入以来の既存バグ)。直して `--slow` と高速コアのトレース一致を確認。
+  (2) `InstructionExecutor.Restore` が毎回 `EnvSyncPaging`(TLB 全消去)を呼んでいて、#PF の多い Windows 区間で定常速度が
+  約 13→7.5M 命令/秒に落ちていた。CR0.PG/WP・CR3・CR4 が変わったときだけ同期するように変更(冷起動 1〜2B 区間で 13.0M/s に回復)。
+- 参考: v7 スナップショット 1 個は差分ディスク込みで 588MB(5.6B 時点)。保存は 100M 命令ごとに約 1 秒の停止。
+- 第 2 弾(ランナー分割: `EmulationRunner`/`RunOptions`/`RunDiagnostics`/`WindowsDiagnostics`/`DiskConfiguration`/`EnvironmentFactory`、
+  `--disk`/`--overlay`/`--help`)も同様に検証: 高速コア・`--slow` とも 10M 命令トレースが eeeae9f と一致、`--dumplba` 正常、
+  Windows 冷起動 56 億命令は 475 秒(1〜5B 区間 11.7M 命令/秒、整理前と同等)で同じ入力待ち状態、v7 再開(56→58 億)も正常。
+- 第 3 弾(デバイス分割: `PicDevice`/`PitDevice`/`CmosDevice`/`KeyboardController`/`AcpiPmDevice`、`InstructionDecoding`/`Registers`/
+  `VhdxBatLayout`、`tests/Emu86.Tests` 追加、PF 配送後の上限判定修正)も検証: テストスイート全 7 種 PASS、
+  高速コア・`--slow` とも 10M 命令トレースが eeeae9f と一致、旧ビルド製 v7 スナップショット(差分ディスク内包)からの再開も
+  同じ停止位置(77dfd771@5.9B)、Windows 冷起動 56 億命令は 426 秒(1〜5B 区間 13.1M 命令/秒)で同じ入力待ち、新スナップショットの再開も正常。

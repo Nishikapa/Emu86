@@ -5,6 +5,8 @@ VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Emu86", "Emu86.csproj", "{44F5FF9B-4CAD-4F71-8496-17B4CFE56047}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Emu86.Tests", "tests\Emu86.Tests\Emu86.Tests.csproj", "{A5D18B75-2C7C-41CB-A14A-560997F94B16}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -15,6 +17,18 @@ Global
 		Release|x86 = Release|x86
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{A5D18B75-2C7C-41CB-A14A-560997F94B16}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A5D18B75-2C7C-41CB-A14A-560997F94B16}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A5D18B75-2C7C-41CB-A14A-560997F94B16}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{A5D18B75-2C7C-41CB-A14A-560997F94B16}.Debug|x64.Build.0 = Debug|Any CPU
+		{A5D18B75-2C7C-41CB-A14A-560997F94B16}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{A5D18B75-2C7C-41CB-A14A-560997F94B16}.Debug|x86.Build.0 = Debug|Any CPU
+		{A5D18B75-2C7C-41CB-A14A-560997F94B16}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A5D18B75-2C7C-41CB-A14A-560997F94B16}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A5D18B75-2C7C-41CB-A14A-560997F94B16}.Release|x64.ActiveCfg = Release|Any CPU
+		{A5D18B75-2C7C-41CB-A14A-560997F94B16}.Release|x64.Build.0 = Release|Any CPU
+		{A5D18B75-2C7C-41CB-A14A-560997F94B16}.Release|x86.ActiveCfg = Release|Any CPU
+		{A5D18B75-2C7C-41CB-A14A-560997F94B16}.Release|x86.Build.0 = Release|Any CPU
 		{44F5FF9B-4CAD-4F71-8496-17B4CFE56047}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{44F5FF9B-4CAD-4F71-8496-17B4CFE56047}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{44F5FF9B-4CAD-4F71-8496-17B4CFE56047}.Debug|x64.ActiveCfg = Debug|Any CPU

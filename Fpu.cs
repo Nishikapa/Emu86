@@ -94,8 +94,8 @@ static public partial class Ext
 
     static void FpuW64(EmuEnvironment env, uint a, ulong v)
     {
-        FWrite32(env, a, (uint)v);
-        FWrite32(env, a + 4, (uint)(v >> 32));
+        EnvWriteDword(env, a, (uint)v);
+        EnvWriteDword(env, a + 4, (uint)(v >> 32));
     }
 
     static double FpuReadF32(EmuEnvironment env, uint a) =>
@@ -105,7 +105,7 @@ static public partial class Ext
         BitConverter.Int64BitsToDouble((long)FpuR64(env, a));
 
     static void FpuWriteF32(EmuEnvironment env, uint a, double v) =>
-        FWrite32(env, a, (uint)BitConverter.SingleToInt32Bits((float)v));
+        EnvWriteDword(env, a, (uint)BitConverter.SingleToInt32Bits((float)v));
 
     static void FpuWriteF64(EmuEnvironment env, uint a, double v) =>
         FpuW64(env, a, (ulong)BitConverter.DoubleToInt64Bits(v));
@@ -163,13 +163,13 @@ static public partial class Ext
 
     static void FpuStEnv(EmuEnvironment env, CPU c, uint a)
     {
-        FWrite32(env, a + 0, c.fpu_cw);
-        FWrite32(env, a + 4, FpuSw(c));
-        FWrite32(env, a + 8, FpuTagWord(c));
-        FWrite32(env, a + 12, 0); // fip(未追跡)
-        FWrite32(env, a + 16, 0); // fcs/opcode
-        FWrite32(env, a + 20, 0); // fdp
-        FWrite32(env, a + 24, 0); // fds
+        EnvWriteDword(env, a + 0, c.fpu_cw);
+        EnvWriteDword(env, a + 4, FpuSw(c));
+        EnvWriteDword(env, a + 8, FpuTagWord(c));
+        EnvWriteDword(env, a + 12, 0); // fip(未追跡)
+        EnvWriteDword(env, a + 16, 0); // fcs/opcode
+        EnvWriteDword(env, a + 20, 0); // fdp
+        EnvWriteDword(env, a + 24, 0); // fds
     }
 
     static void FpuLdEnv(EmuEnvironment env, CPU c, uint a)
@@ -192,7 +192,7 @@ static public partial class Ext
         {
             var (mant, se) = DoubleToF80(St(c, i));
             FpuW64(env, a + 28 + (uint)i * 10, mant);
-            FWrite16(env, a + 28 + (uint)i * 10 + 8, se);
+            EnvWriteWord(env, a + 28 + (uint)i * 10 + 8, se);
         }
         FpuInit(c); // FNSAVE は保存後に初期化する
     }
@@ -259,10 +259,10 @@ static public partial class Ext
                 case (0xD9, 4): FpuLdEnv(env, cpu, a); return Ok();
                 case (0xD9, 5): cpu.fpu_cw = EnvGetMemoryData16(env, a); return Ok();   // FLDCW
                 case (0xD9, 6): FpuStEnv(env, cpu, a); cpu.fpu_cw |= 0x3F; return Ok(); // FNSTENV(例外を全マスク)
-                case (0xD9, 7): FWrite16(env, a, cpu.fpu_cw); return Ok();              // FNSTCW
+                case (0xD9, 7): EnvWriteWord(env, a, cpu.fpu_cw); return Ok();              // FNSTCW
                 case (0xDB, 0): FpuPush(cpu, (int)EnvGetMemoryData32(env, a)); return Ok();  // FILD m32
-                case (0xDB, 2): FWrite32(env, a, FpuToInt32(cpu, St(cpu, 0))); return Ok();  // FIST m32
-                case (0xDB, 3): FWrite32(env, a, FpuToInt32(cpu, St(cpu, 0))); FpuPop(cpu); return Ok();
+                case (0xDB, 2): EnvWriteDword(env, a, FpuToInt32(cpu, St(cpu, 0))); return Ok();  // FIST m32
+                case (0xDB, 3): EnvWriteDword(env, a, FpuToInt32(cpu, St(cpu, 0))); FpuPop(cpu); return Ok();
                 case (0xDB, 5): // FLD m80
                     FpuPush(cpu, F80ToDouble(FpuR64(env, a), EnvGetMemoryData16(env, a + 8)));
                     return Ok();
@@ -270,7 +270,7 @@ static public partial class Ext
                 {
                     var (mant, se) = DoubleToF80(St(cpu, 0));
                     FpuW64(env, a, mant);
-                    FWrite16(env, a + 8, se);
+                    EnvWriteWord(env, a + 8, se);
                     FpuPop(cpu);
                     return Ok();
                 }
@@ -279,10 +279,10 @@ static public partial class Ext
                 case (0xDD, 3): FpuWriteF64(env, a, St(cpu, 0)); FpuPop(cpu); return Ok();
                 case (0xDD, 4): FpuRstor(env, cpu, a); return Ok();                     // FRSTOR
                 case (0xDD, 6): FpuSave(env, cpu, a); return Ok();                      // FNSAVE
-                case (0xDD, 7): FWrite16(env, a, FpuSw(cpu)); return Ok();              // FNSTSW m16
+                case (0xDD, 7): EnvWriteWord(env, a, FpuSw(cpu)); return Ok();              // FNSTSW m16
                 case (0xDF, 0): FpuPush(cpu, (short)EnvGetMemoryData16(env, a)); return Ok(); // FILD m16
-                case (0xDF, 2): FWrite16(env, a, FpuToInt16(cpu, St(cpu, 0))); return Ok();
-                case (0xDF, 3): FWrite16(env, a, FpuToInt16(cpu, St(cpu, 0))); FpuPop(cpu); return Ok();
+                case (0xDF, 2): EnvWriteWord(env, a, FpuToInt16(cpu, St(cpu, 0))); return Ok();
+                case (0xDF, 3): EnvWriteWord(env, a, FpuToInt16(cpu, St(cpu, 0))); FpuPop(cpu); return Ok();
                 case (0xDF, 5): FpuPush(cpu, (long)FpuR64(env, a)); return Ok();        // FILD m64
                 case (0xDF, 7): FpuW64(env, a, FpuToInt64(cpu, St(cpu, 0))); FpuPop(cpu); return Ok(); // FISTP m64
                 default:
