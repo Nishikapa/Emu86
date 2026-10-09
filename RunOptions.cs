@@ -21,6 +21,7 @@ internal sealed class DiagnosticOptions
     public bool PicLog { get; set; }
     public bool VgaLog { get; set; }
     public bool IntLog { get; set; }
+    public int IntLogLast { get; set; } = 4;
     public uint? WatchValue { get; set; }
     public uint? BreakEax { get; set; }
     public uint BreakEip { get; set; }
@@ -108,7 +109,15 @@ internal sealed class RunOptions
                 case "--pcilog": diagnostics.PciLog = true; break;
                 case "--piclog": diagnostics.PicLog = true; break;
                 case "--vgalog": diagnostics.VgaLog = true; break;
-                case "--intlog": diagnostics.IntLog = true; break;
+                case "--intlog":
+                    diagnostics.IntLog = true;
+                    if (index + 1 < args.Length && !args[index + 1].StartsWith("--"))
+                    {
+                        var last = Decimal();
+                        if (last is < 1 or > 100000) throw new ArgumentException("--intlog: expected 1..100000");
+                        diagnostics.IntLogLast = (int)last;
+                    }
+                    break;
                 case "--watchval": diagnostics.WatchValue = Hex(); break;
                 case "--breakeax": diagnostics.BreakEax = Hex(); break;
                 case "--breakeip": diagnostics.BreakEip = Hex(); break;
@@ -134,7 +143,7 @@ internal sealed class RunOptions
           --disk path [--overlay path]   Select a base image and writable overlay
           --dumplba start count         Dump sectors from the existing overlay to lba_dump.bin
           --trace-all --regtrace --notrace --brhist --esptrap --pftrap
-          --atalog --pcilog --piclog --vgalog --intlog --upflog [minCount]
+          --atalog --pcilog --piclog --vgalog --intlog [lastCount] --upflog [minCount]
           --breakeip hex [--breakeax hex] --breakat count --watchval hex
           --entrylog lo hi --breakrange lo hi --wlog lo hi --watch lo hi
         Counts/LBAs are decimal; addresses and range bounds are hexadecimal (optional 0x).

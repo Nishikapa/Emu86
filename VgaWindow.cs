@@ -5,43 +5,111 @@ using System.Text;
 
 namespace Emu86;
 
-// VGA 出力を表示する WinForms ウィンドウ。クライアント領域は VGA サイズ(640×480)で開き、
+// VGA 出力を表示する WinForms ウィンドウ。表示領域は VGA サイズ(640×480)で開き、
 // 現在のビデオモードの解像度(テキスト 640×400、mode 12h 640×480、mode 13h 320×200 など)を
 // 最近傍補間で引き伸ばして描く。キー入力は WM_KEYDOWN/UP のハードウェアスキャンコード
 // (セット 1)をそのまま 8042 へ注入する。描画は約 30fps のタイマで VgaDevice.Dirty を見て更新する。
+// 下部のボタンで実行の中断・再開ができ、中断中(および停止後)は CPU レジスタのダイアログを開ける。
 internal sealed class VgaWindow : Form
 {
-    const int WM_KEYDOWN = 0x0100, WM_KEYUP = 0x0101, WM_SYSKEYDOWN = 0x0104, WM_SYSKEYUP = 0x0105;
+    const int ToolbarHeight = 34;
 
     readonly EmuEnvironment env;
+    readonly EmulationControl control;
     readonly System.Windows.Forms.Timer timer = new() { Interval = 33 };
+    readonly DisplayPanel display;
+    readonly ToolButton pauseButton = new() { Text = "中断", Width = 90 };
+    readonly ToolButton resumeButton = new() { Text = "再開", Width = 90, Enabled = false };
+    readonly ToolButton registersButton = new() { Text = "レジスタ表示", Width = 110, Enabled = false };
+    readonly Label statusLabel = new() { AutoSize = true, ForeColor = Color.Gainsboro, TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(8, 8, 0, 0) };
+    readonly RegisterDialog registers = new();
     Bitmap frame;
     uint[] pixels = [];
     string status = "running";
 
-    public VgaWindow(EmuEnvironment env)
+    public VgaWindow(EmuEnvironment env, EmulationControl control)
     {
         this.env = env;
+        this.control = control;
         Text = "Emu86";
-        ClientSize = new Size(640, 480);
-        MinimumSize = new Size(320, 240);
-        BackColor = Color.Black;
-        DoubleBuffered = true;
+        ClientSize = new Size(640, 480 + ToolbarHeight);
+        MinimumSize = new Size(360, 240 + ToolbarHeight);
+        BackColor = Color.FromArgb(32, 32, 32);
         ImeMode = ImeMode.Disable;
-        KeyPreview = true;
-        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
+
+        display = new DisplayPanel(env) { Dock = DockStyle.Fill };
+        var toolbar = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = ToolbarHeight, FlowDirection = FlowDirection.LeftToRight, Padding = new Padding(4, 3, 4, 3), BackColor = BackColor };
+        pauseButton.Click += (_, _) => SetPaused(true);
+        resumeButton.Click += (_, _) => SetPaused(false);
+        registersButton.Click += (_, _) => ShowRegisters();
+        toolbar.Controls.Add(pauseButton);
+        toolbar.Controls.Add(resumeButton);
+        toolbar.Controls.Add(registersButton);
+        toolbar.Controls.Add(statusLabel);
+        Controls.Add(display);
+        Controls.Add(toolbar);
+        registers.Owner = this;
+
         env.Vga.FallbackFont ??= BuildFallbackFont();
+        control.StateChanged += () => { try { BeginInvoke(UpdateControls); } catch (InvalidOperationException) { } };
         timer.Tick += (_, _) => Refresh(force: false);
         timer.Start();
         Refresh(force: true);
+        UpdateControls();
+    }
+
+    protected override void OnShown(EventArgs e)
+    {
+        base.OnShown(e);
+        display.Focus();
     }
 
     // 実行スレッドから: 実行が終わった(上限到達・停止)ことをタイトルに反映する。
     public void EmulationStopped(string reason)
     {
         if (IsDisposed) return;
-        try { BeginInvoke(() => { status = reason; Refresh(force: true); }); }
+        try { BeginInvoke(() => { status = reason; Refresh(force: true); UpdateControls(); }); }
         catch (InvalidOperationException) { }
+    }
+
+    void SetPaused(bool pause)
+    {
+        if (control.HasStopped) return;
+        if (pause) control.Pause();
+        else control.Resume();
+        UpdateControls();
+        display.Focus();
+    }
+
+    void ShowRegisters()
+    {
+        var cpu = control.Snapshot();
+        if (cpu == null) return;
+        try
+        {
+            registers.Update(cpu, control.Count, control.HasStopped ? "stopped" : "paused");
+            if (!registers.Visible) registers.Show(this);
+            else registers.Activate();
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine($"[window] register dialog failed: {exception}");
+        }
+    }
+
+    void UpdateControls()
+    {
+        var stopped = control.HasStopped;
+        var paused = control.IsPaused;
+        Refresh(force: true);
+        pauseButton.Enabled = !stopped && !paused && !control.PauseRequested;
+        resumeButton.Enabled = !stopped && (paused || control.PauseRequested);
+        registersButton.Enabled = (paused || stopped) && control.Snapshot() != null;
+        statusLabel.Text = stopped ? $"{status} ({control.Count:N0} instructions)"
+            : paused ? $"paused at {control.Count:N0} instructions"
+            : control.PauseRequested ? "pausing..." : "running";
+        if (registers.Visible && (paused || stopped))
+            registers.Update(control.Snapshot(), control.Count, stopped ? "stopped" : "paused");
     }
 
     void Refresh(bool force)
@@ -64,27 +132,13 @@ internal sealed class VgaWindow : Form
                 Marshal.Copy(MemoryMarshal.Cast<uint, int>(pixels.AsSpan(y * width, width)).ToArray(), 0, data.Scan0 + y * data.Stride, width);
         }
         finally { frame.UnlockBits(data); }
-        Text = $"Emu86 - {vga.ModeDescription()} - {status}";
-        Invalidate();
+        Text = $"Emu86 - {vga.ModeDescription()} - {(control.IsPaused && !control.HasStopped ? "paused" : status)}";
+        display.Frame = frame;
+        display.Invalidate();
     }
 
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        e.Graphics.Clear(Color.Black);
-        if (frame == null) return;
-        e.Graphics.InterpolationMode = InterpolationMode.NearestNeighbor;
-        e.Graphics.PixelOffsetMode = PixelOffsetMode.Half;
-        e.Graphics.DrawImage(frame, ClientRectangle);
-    }
-
-    protected override void OnResize(EventArgs e)
-    {
-        base.OnResize(e);
-        Invalidate();
-    }
-
-    // モニタ間で DPI が変わっても物理ピクセル数(既定 640×480)を保つ。基底クラスは Windows が提案する
-    // 拡大縮小後の矩形を適用するので、その後で元のクライアントサイズへ戻す。
+    // モニタ間で DPI が変わっても物理ピクセル数(既定 640×480 + ツールバー)を保つ。基底クラスは Windows が
+    // 提案する拡大縮小後の矩形を適用するので、その後で元のクライアントサイズへ戻す。
     protected override void OnDpiChanged(DpiChangedEventArgs e)
     {
         var client = ClientSize;
@@ -92,42 +146,93 @@ internal sealed class VgaWindow : Form
         ClientSize = client;
     }
 
-    protected override void WndProc(ref Message m)
-    {
-        if (m.Msg is WM_KEYDOWN or WM_KEYUP or WM_SYSKEYDOWN or WM_SYSKEYUP)
-        {
-            var lParam = (long)m.LParam;
-            var scancode = (byte)((lParam >> 16) & 0xFF);
-            var extended = ((lParam >> 24) & 1) != 0;
-            var release = m.Msg is WM_KEYUP or WM_SYSKEYUP;
-            if (scancode != 0)
-            {
-                var code = (byte)(scancode | (release ? 0x80 : 0));
-                if (extended) env.Keyboard.Inject(0xE0, code);
-                else env.Keyboard.Inject(code);
-            }
-            // F10 や Alt 系がメニューとして解釈されないよう、キー入力はここで消費する。
-            m.Result = IntPtr.Zero;
-            return;
-        }
-        base.WndProc(ref m);
-    }
-
-    protected override bool ProcessDialogKey(Keys keyData) => true;
-
     protected override void Dispose(bool disposing)
     {
         if (disposing)
         {
             timer.Dispose();
             frame?.Dispose();
+            registers.Dispose();
         }
         base.Dispose(disposing);
     }
 
+    // フォーカスを奪わないボタン(キー入力は常に表示領域へ届く)。
+    sealed class ToolButton : Button
+    {
+        public ToolButton()
+        {
+            SetStyle(ControlStyles.Selectable, false);
+            TabStop = false;
+            FlatStyle = FlatStyle.System;
+            Height = ToolbarHeight - 8;
+        }
+    }
+
+    // VGA のフレームを描き、キー入力をスキャンコードとして 8042 へ注入する表示領域。
+    sealed class DisplayPanel : Control
+    {
+        const int WM_KEYDOWN = 0x0100, WM_KEYUP = 0x0101, WM_SYSKEYDOWN = 0x0104, WM_SYSKEYUP = 0x0105;
+        readonly EmuEnvironment env;
+        public Bitmap Frame;
+
+        public DisplayPanel(EmuEnvironment env)
+        {
+            this.env = env;
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.Selectable, true);
+            TabStop = true;
+            BackColor = Color.Black;
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.Clear(Color.Black);
+            if (Frame == null) return;
+            e.Graphics.InterpolationMode = InterpolationMode.NearestNeighbor;
+            e.Graphics.PixelOffsetMode = PixelOffsetMode.Half;
+            e.Graphics.DrawImage(Frame, ClientRectangle);
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            Invalidate();
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            Focus();
+        }
+
+        // Tab や方向キーもダイアログキーとして処理させず、WM_KEYDOWN として受け取る。
+        protected override bool IsInputKey(Keys keyData) => true;
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg is WM_KEYDOWN or WM_KEYUP or WM_SYSKEYDOWN or WM_SYSKEYUP)
+            {
+                var lParam = (long)m.LParam;
+                var scancode = (byte)((lParam >> 16) & 0xFF);
+                var extended = ((lParam >> 24) & 1) != 0;
+                var release = m.Msg is WM_KEYUP or WM_SYSKEYUP;
+                if (scancode != 0)
+                {
+                    var code = (byte)(scancode | (release ? 0x80 : 0));
+                    if (extended) env.Keyboard.Inject(0xE0, code);
+                    else env.Keyboard.Inject(code);
+                }
+                // F10 や Alt 系がメニューとして解釈されないよう、キー入力はここで消費する。
+                m.Result = IntPtr.Zero;
+                return;
+            }
+            base.WndProc(ref m);
+        }
+    }
+
     // VGA BIOS が無くフォントが VRAM に無いときのための 8×16 フォント。
     // CP437 の 256 文字を等幅フォントで描き、2 値化してビットパターンにする。
-    static byte[] BuildFallbackFont()
+    internal static byte[] BuildFallbackFont()
     {
         var font8x16 = new byte[256 * 16];
         Encoding cp437;

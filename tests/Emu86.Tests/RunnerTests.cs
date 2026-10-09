@@ -51,13 +51,15 @@ static class RunnerTests
         Equal(new AddressRange(0x50, 0x60), parsed.Diagnostics.WriteLog.Value, "write range");
         Equal(new AddressRange(0x70, 0x80), parsed.Diagnostics.Watch, "watch range");
         Equal(0L, RunOptions.Parse(["--upflog", "--slow"]).Diagnostics.UserPageFaultMin.Value, "optional minimum omitted");
+        Equal(4, RunOptions.Parse(["--intlog", "--slow"]).Diagnostics.IntLogLast, "default interrupt log tail");
+        Equal(60, RunOptions.Parse(["--intlog", "60"]).Diagnostics.IntLogLast, "interrupt log tail");
         Equal(false, RunOptions.Parse(["--notrace"]).Diagnostics.Trace, "trace disabled");
         Equal(true, RunOptions.Parse(["--help"]).Help, "help");
         string[][] invalid = [
             ["--bogus"], ["--limit"], ["--limit", "--slow"], ["--limit", "-1"], ["--limit", "abc"],
             ["--limit", "9223372036854775808"], ["--snapshot", ""], ["--breakeip", "100000000"],
             ["--breakeip", "-1"], ["--watch", "20"], ["--watch", "20", "10"], ["--watch", "10", "10"],
-            ["--upflog", "oops"], ["--dumplba", "1"], ["--dumplba", "0", "0"],
+            ["--upflog", "oops"], ["--intlog", "0"], ["--intlog", "oops"], ["--dumplba", "1"], ["--dumplba", "0", "0"],
             ["--dumplba", "9223372036854775807", "2"], ["--dumplba", "0", "2147483648"],
             ["--overlay", "overlay.avhdx"]
         ];
@@ -200,9 +202,54 @@ static class RunnerTests
         Equal(false, right.Ata.Log || right.Pci.Log || right.PicLog, "no global diagnostic leakage");
     }
 
+    // 中断要求はタイマ周期(1 万命令)の境界で受け付けられ、その時点の CPU のコピーが公開される。
+    // 再開すると上限まで走り、停止時にも最終状態が公開される。
+    static void PauseResume()
+    {
+        using var env = new EmuEnvironment(memory: new byte[0x10000]);
+        var cpu = new CPU { eip = 0x100, code32 = true, stack32 = true, esp = 0x8000, eflags = 2 };
+        byte[] code = [0x40, 0xEB, 0xFD]; // inc eax; jmp $-3
+        code.CopyTo(env.OneMegaMemory_, 0x100);
+        var control = new EmulationControl();
+        var changes = new List<(bool paused, bool stopped, long count)>();
+        using var paused = new ManualResetEventSlim();
+        control.StateChanged += () => { lock (changes) changes.Add((control.IsPaused, control.HasStopped, control.Count)); if (control.IsPaused) paused.Set(); };
+        control.Pause();
+        var worker = new Thread(() => EmulationRunner.Run(RunOptions.Parse(["--limit", "25000", "--noirq", "--notrace"]), env, cpu, 0, null, TextWriter.Null, TextWriter.Null, control: control));
+        worker.Start();
+        Equal(true, paused.Wait(TimeSpan.FromSeconds(30)), "pause reached");
+        var snapshot = control.Snapshot();
+        Equal(10000L, control.Count, "paused at the service tick");
+        Equal(5000u, snapshot.eax, "published CPU reflects executed instructions");
+        Equal(true, snapshot.eip is 0x100 or 0x101, "published EIP inside the loop");
+        Equal(0u, new CPU().eax, "snapshot is a copy");
+        Thread.Sleep(50);
+        Equal(10000L, control.Count, "no progress while paused");
+        control.Resume();
+        Equal(true, worker.Join(TimeSpan.FromSeconds(30)), "resumed to the limit");
+        Equal(true, control.HasStopped && !control.IsPaused, "stopped state");
+        Equal(25000L, control.Count, "final count published");
+        Equal(12500u, control.Snapshot().eax, "final CPU published");
+        Equal("True,False,10000;False,False,10000;False,True,25000", string.Join(";", changes.Select(change => $"{change.paused},{change.stopped},{change.count}")), "state change sequence");
+        using var cancelled = new EmuEnvironment(memory: new byte[0x10000]);
+        code.CopyTo(cancelled.OneMegaMemory_, 0x100);
+        var stop = new CancellationTokenSource();
+        var cancelControl = new EmulationControl();
+        cancelControl.Pause();
+        using var output = new StringWriter();
+        var cancelWorker = new Thread(() => EmulationRunner.Run(RunOptions.Parse(["--limit", "25000", "--noirq", "--notrace"]), cancelled,
+            new CPU { eip = 0x100, code32 = true, stack32 = true, esp = 0x8000, eflags = 2 }, 0, null, output, TextWriter.Null, stop: stop.Token, control: cancelControl));
+        cancelWorker.Start();
+        while (!cancelControl.IsPaused) Thread.Sleep(1);
+        stop.Cancel();
+        Equal(true, cancelWorker.Join(TimeSpan.FromSeconds(30)), "cancellation wakes a paused run");
+        Equal(true, output.ToString().Contains("stopped by request"), "cancelled run reports the stop");
+        Equal(10000L, cancelControl.Count, "cancelled while paused keeps the pause count");
+    }
+
     public static void Run()
     {
-        Options(); Runners(); Environments(); CommandLine();
+        Options(); Runners(); Environments(); CommandLine(); PauseResume();
         Console.WriteLine($"Runner/environment checks passed: {assertions} assertions");
     }
 

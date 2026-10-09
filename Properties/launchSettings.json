@@ -1,6 +1,11 @@
 {
   "profiles": {
-    "Emu86": {
+    "Emu86 (window)": {
+      "commandName": "Project",
+      "commandLineArgs": "--window --notrace",
+      "workingDirectory": "$(ProjectDir)"
+    },
+    "Emu86 (console)": {
       "commandName": "Project",
       "workingDirectory": "$(ProjectDir)"
     }

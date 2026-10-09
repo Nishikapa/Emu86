@@ -393,3 +393,33 @@ rm sample.avhdx; ./bin/Release/net10.0/Emu86.exe --notrace --entrylog 7c90e47c 7
   1 億 400 万命令付近から Windows XP のブートロゴ(640×480×16 色)が出る。
 - 既知の制限: マウス未実装、VESA 非対応(4Fh は失敗を返す)、フォント転送(11h)未対応(VRAM にフォントが無ければホストの等幅
   フォントで描く)、V86 の IOPL<3 のときの PUSHF/POPF/CLI/STI/IRET の #GP 化は未実装(NT は IOPL=3 で呼ぶ)。
+
+### PCI VGA デバイスと BIOS 画面(2026-10-09 夜)
+- VGA BIOS スタブを INT 19h 時に差し込む方式から、PCI の VGA 互換デバイス(00:02.0、1234:1111)の拡張 ROM BAR(64KB 窓)に
+  載せる方式へ変更。SeaBIOS が `init_pcirom` で ROM(PCIR 構造付き)を 0xC0000 へ取り込み init を呼ぶので、
+  「Turning on vga text mode console」以降のバナー・「Booting from Hard Disk...」が画面に出る。INT 19h の導入は保険として残した。
+- RAM 外の読み出しは、ROM BAR が有効ならスタブ ROM の内容を返す(`EnvReadOutsideRam`)。通常のメモリアクセス経路には分岐を足していない。
+- 退行: VGA コンソールが有効になると SeaBIOS のブートメニュー待ち(`get_keystroke_full`)がほぼ IF=0 のポーリングになり、
+  「ティック時点で IF=0 なら IRQ0 を捨てる」実装では BDA のティックが進まず起動しなかった。IRQ0 を保留(`timerPending`)して
+  配送可能になり次第配送するように修正。
+- 旧スナップショット(PCI 関数 4 つ)も読めるよう `PciHost.LoadState` は関数数が少ない分を初期値のままにする。
+- テストの固定ハッシュ(DeviceTests、runner-golden の State)は PCI コンフィグ空間が増えた分だけ採り直した。
+
+### BSOD 0x4000008A(THREAD_TERMINATE_HELD_MUTEX)の解決(2026-10-10)
+- 症状: 冷起動 5,215,361,514 命令目で VIDEOPRT のミューテックスを持った csrss のスレッドが終了してバグチェック。
+  原因の連鎖: csrss のユーザーモード例外(C0000005)→ `KiDispatchException` が第 2 チャンスで配送できず `ZwTerminateProcess(-1)`。
+  その例外は vga.sys の `VideoPortInt10`(`Ke386CallBios`、CS=1000 の V86 コード)からの復帰で起きていた。
+- 仕組み: NT の `KiTrap06` には V86 の BOP(`C4 C4 xx`)を C 関数を介さず処理する高速経路があり、TEB->Vdm(BIOS 呼び出し中は
+  0x13000 の偽 TEB → 0x12000 の偽 VDM TIB)の MonitorContext をユーザーモード用に正規化(CS |= 3)してトラップフレームへ書き、
+  `iretd` する。BIOS 呼び出しでは MonitorContext が {Eip=`Ki386BiosCallReturnAddress`, CS=0008h} なので正規化後の CS=000Bh
+  (ring0 コードに RPL 3)の IRET は実機では #GP になり、`KiTrap0D` が「IRET 命令、復帰先 EIP=`Ki386BiosCallReturnAddress`、CS=0Bh」
+  の枠を認識して ring0 のまま `Ki386BiosCallReturnAddress` へ飛ぶ(804e116e 付近)。エミュレータの IRET に特権検査が無く、
+  CS=000Bh のまま CPL 3 として復帰していたため、直後のカーネルコードが #PF → ユーザー例外として csrss に配送されていた。
+- 修正: 32 ビット IRET でスタックを動かさずに復帰先 CS を検査し、非適合コードで DPL≠RPL(適合コードで DPL>RPL)、RPL<CPL、
+  null セレクタのときは EIP を IRET 命令に戻して #GP(セレクタ)を配送する(`IretTargetFault`)。V86 への復帰は対象外。
+- 切り分けの記録: PCI VGA を隠しても、V86 中のタイマ IRQ を止めても同じ地点で再現。`--intlog 100000` と `--entrylog 7c90e47c 7c90e47d`
+  で「直前 6,500 万命令にタイマ以外の配送が無い」「csrss の KiUserExceptionDispatcher 入口が V86 スタック(0x11d14)付近」を確認し、
+  BIOS 呼び出し直前のスナップショットから 3 万命令のレジスタトレースで CS=000Bh への IRET を特定した。
+- 朝の時点で同じ経路が通っていたように見えたのは、タイマ IRQ を取りこぼしていた頃は vga.sys の INT 10h がこの高速経路に
+  入らなかった(ミニセットアップの進行が遅かった)ためと考えられる。
+

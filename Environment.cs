@@ -489,7 +489,12 @@ static public partial class Ext
         from _log in GetDataFromEnvCpu((env, cpu) =>
         {
             if (env.IntLog != null && cpu.pg)
-                env.IntLog.Add($"vec={vector:x2} err={(hasError ? errorCode.ToString("x") : "-")} at cs:eip={cpu.cs:x4}:{cpu.eip:x8} esp={cpu.esp:x8}");
+            {
+                var entry = $"vec={vector:x2} err={(hasError ? errorCode.ToString("x") : "-")} at cs:eip={cpu.cs:x4}:{cpu.eip:x8} esp={cpu.esp:x8}";
+                env.IntLog.Add(entry);
+                // V86 モード(NT の BIOS 呼び出し中)からの配送は件数が少ないので全件を別に残す。
+                if (cpu.vm) env.IntLogV86.Add($"{entry} (instr {env.Tsc}, cr3={cpu.cr3:x8})");
+            }
             return Unit.unit;
         })
         from gateLo in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryData32(env, cpu.idt_base + (uint)vector * 8))
@@ -591,18 +596,43 @@ static public partial class Ext
         select Unit.unit;
 
     static State<Unit> Iret32 =>
-        from eip in Pop(2)
-        from cs in Pop(2)
-        from fl in Pop(2)
-        from cpu0 in GetCpu
-        from _ in (fl.dd & 0x20000) != 0 && cpu0.cpl == 0
-            ? IretToV86(eip.dd, (ushort)cs.dd, fl.dd)
-            : (from _0 in ReturnToOuterStack((ushort)cs.dd) // 旧 SS で ESP/SS を pop してから CS をロードする
-               from _1 in _eip.Set(eip.dd)
-               from _2 in LoadSReg(1, (ushort)cs.dd)
-               from _3 in SetCpu(cpu => { cpu.eflags = fl.dd; return cpu; })
+        from fault in GetDataFromEnvCpu(IretTargetFault)
+        from _ in fault is uint selector
+            ? GeneralProtection(selector, 1)
+            : (from eip in Pop(2)
+               from cs in Pop(2)
+               from fl in Pop(2)
+               from cpu0 in GetCpu
+               from _v in (fl.dd & 0x20000) != 0 && cpu0.cpl == 0
+                   ? IretToV86(eip.dd, (ushort)cs.dd, fl.dd)
+                   : (from _0 in ReturnToOuterStack((ushort)cs.dd) // 旧 SS で ESP/SS を pop してから CS をロードする
+                      from _1 in _eip.Set(eip.dd)
+                      from _2 in LoadSReg(1, (ushort)cs.dd)
+                      from _3 in SetCpu(cpu => { cpu.eflags = fl.dd; return cpu; })
+                      select Unit.unit)
                select Unit.unit)
         select Unit.unit;
+
+    // 32 ビット IRET の復帰先 CS をスタックを動かさずに検査し、違反なら #GP のエラーコード(セレクタ)を返す。
+    // 非適合コードセグメントは DPL=RPL、適合コードは DPL<=RPL が必要で、RPL<CPL も不可。V86 への復帰は対象外。
+    // NT はこれを意図的に使う: V86 の BIOS 呼び出しから戻る高速 BOP 経路は CS=000Bh(ring0 コードに RPL 3)の
+    // IRET で #GP を起こし、KiTrap0D がその枠を認識して Ki386BiosCallReturnAddress へ ring0 のまま飛ぶ。
+    static uint? IretTargetFault(EmuEnvironment env, CPU cpu)
+    {
+        if (!cpu.pe || cpu.vm) return null;
+        var stack = cpu.ss_base + (cpu.stack32 ? cpu.esp : cpu.sp);
+        var cs = (ushort)EnvGetMemoryData32(env, stack + 4);
+        var flags = EnvGetMemoryData32(env, stack + 8);
+        if ((flags & 0x20000) != 0 && cpu.cpl == 0) return null;
+        if ((cs & 0xFFFC) == 0) return 0;
+        var hi = EnvGetMemoryData32(env, cpu.gdt_base + (uint)(cs & 0xFFF8) + 4);
+        var type = (int)(hi >> 8) & 0x1F; // bit4=S, bit3=code, bit2=conforming
+        var dpl = (int)(hi >> 13) & 3;
+        var rpl = cs & 3;
+        if ((type & 0x18) != 0x18 || rpl < cpu.cpl) return (uint)(cs & 0xFFFC);
+        var conforming = (type & 0x04) != 0;
+        return (conforming ? dpl > rpl : dpl != rpl) ? (uint)(cs & 0xFFFC) : null;
+    }
 
     // ring0 からの IRET で EFLAGS.VM=1 を積んでいた場合は V86 モードへ入る: さらに ESP, SS, ES, DS, FS, GS を
     // pop し、全セグメントを セレクタ*16 基底の 16 ビットセグメントとしてロードする(NT の HAL は
@@ -1036,8 +1066,12 @@ static public partial class Ext
         if (env.PagingOn) addr = EnvTranslate(env, addr, write: false);
         addr = EnvAlias(addr);
         if (VgaDevice.Contains(addr)) return env.Vga.Read(addr);
-        return addr < (uint)env.OneMegaMemory_.Length ? env.OneMegaMemory_[addr] : (byte)0xFF;
+        return addr < (uint)env.OneMegaMemory_.Length ? env.OneMegaMemory_[addr] : EnvReadOutsideRam(env, addr);
     }
+
+    // RAM 外の読み出し: PCI の拡張 ROM 窓(VGA BIOS)なら ROM の内容、それ以外はオープンバス 0xFF。
+    static byte EnvReadOutsideRam(EmuEnvironment env, uint addr) =>
+        env.Pci.RomContains(addr) ? env.Pci.RomRead(addr) : (byte)0xFF;
 
     static private ushort EnvGetMemoryData16(EmuEnvironment env, uint addr)
     {
@@ -1049,7 +1083,8 @@ static public partial class Ext
         }
         addr = EnvAlias(addr);
         if (VgaDevice.Contains(addr)) return (ushort)(env.Vga.Read(addr) | (env.Vga.Read(addr + 1) << 8));
-        return addr + 2 <= (uint)env.OneMegaMemory_.Length ? BitConverter.ToUInt16(env.OneMegaMemory_, (int)addr) : (ushort)0xFFFF;
+        return addr + 2 <= (uint)env.OneMegaMemory_.Length ? BitConverter.ToUInt16(env.OneMegaMemory_, (int)addr)
+            : (ushort)(EnvReadOutsideRam(env, addr) | (EnvReadOutsideRam(env, addr + 1) << 8));
     }
 
     static private uint EnvGetMemoryData32(EmuEnvironment env, uint addr)
@@ -1066,7 +1101,9 @@ static public partial class Ext
         addr = EnvAlias(addr);
         if (VgaDevice.Contains(addr))
             return (uint)(env.Vga.Read(addr) | (env.Vga.Read(addr + 1) << 8) | (env.Vga.Read(addr + 2) << 16) | (env.Vga.Read(addr + 3) << 24));
-        return addr + 4 <= (uint)env.OneMegaMemory_.Length ? BitConverter.ToUInt32(env.OneMegaMemory_, (int)addr) : 0xFFFFFFFF;
+        return addr + 4 <= (uint)env.OneMegaMemory_.Length ? BitConverter.ToUInt32(env.OneMegaMemory_, (int)addr)
+            : (uint)(EnvReadOutsideRam(env, addr) | (EnvReadOutsideRam(env, addr + 1) << 8)
+                | (EnvReadOutsideRam(env, addr + 2) << 16) | (EnvReadOutsideRam(env, addr + 3) << 24));
     }
 }
 
@@ -1120,6 +1157,7 @@ public partial class EmuEnvironment : IDisposable
 
     // プロテクトモード(ページング有効)割り込み配送のログ(デバッグ用、null で無効)。
     public System.Collections.Generic.List<string> IntLog;
+    public System.Collections.Generic.List<string> IntLogV86 = [];
 
     // 物理アドレス範囲への書き込みを値付きでログする(デバッグ用)。
     public uint WLogLo, WLogHi;

@@ -18,6 +18,7 @@ public static class VgaBiosStub
     public const uint RomBase = 0xC0000;
     public const int RomSize = 2048;
     const int InitOffset = 0x20;
+    const int PcirOffset = 0x40;
     public const int ServiceOffset = 0x60;
 
     public static readonly byte[] Rom = BuildRom();
@@ -27,6 +28,25 @@ public static class VgaBiosStub
         var rom = new byte[RomSize];
         rom[0] = 0x55; rom[1] = 0xAA; rom[2] = RomSize / 512;
         rom[3] = 0xEB; rom[4] = (byte)(InitOffset - 5); // jmp short init
+        // PCI データ構造(オフセット 0x18 のポインタから)。SeaBIOS は ROM のベンダ/デバイス ID が
+        // 取り込み元の PCI デバイスと一致することを確認してから init を呼ぶ。
+        rom[0x18] = PcirOffset; rom[0x19] = 0x00;
+        byte[] pcir =
+        [
+            (byte)'P', (byte)'C', (byte)'I', (byte)'R',
+            0x34, 0x12,             // ベンダ 1234
+            0x11, 0x11,             // デバイス 1111
+            0x00, 0x00,             // VPD ポインタ
+            0x18, 0x00,             // 構造体長
+            0x00,                   // リビジョン
+            0x00, 0x00, 0x03,       // クラス: VGA 互換(prog-if, sub, base)
+            RomSize / 512, 0x00,    // イメージ長(512 バイト単位)
+            0x00, 0x00,             // コードリビジョン
+            0x00,                   // コード種別: x86
+            0x80,                   // 最後のイメージ
+            0x00, 0x00,
+        ];
+        pcir.CopyTo(rom, PcirOffset);
         byte[] init =
         [
             0x1E,                               // push ds
@@ -43,7 +63,7 @@ public static class VgaBiosStub
         byte[] handler = [0x0F, 0x0B, 0xCF];    // ud2 (サービス呼び出し); iret
         handler.CopyTo(rom, ServiceOffset);
         var text = System.Text.Encoding.ASCII.GetBytes("Emu86 VGA BIOS stub");
-        text.CopyTo(rom, 0x80);
+        text.CopyTo(rom, 0x100);
         var sum = 0;
         for (var index = 0; index < RomSize - 1; index++) sum += rom[index];
         rom[RomSize - 1] = (byte)(-sum);

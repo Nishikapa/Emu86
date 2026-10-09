@@ -67,13 +67,14 @@ static partial class Program
         System.Windows.Forms.Application.SetHighDpiMode(System.Windows.Forms.HighDpiMode.PerMonitorV2);
         System.Windows.Forms.Application.EnableVisualStyles();
         using var stop = new CancellationTokenSource();
-        using var window = new VgaWindow(env);
+        var control = new EmulationControl();
+        using var window = new VgaWindow(env, control);
         Exception failure = null;
         var worker = new Thread(() =>
         {
             try
             {
-                EmulationRunner.Run(options, env, cpu, count, trace, saveSnapshot: saveSnapshot, stop: stop.Token);
+                EmulationRunner.Run(options, env, cpu, count, trace, saveSnapshot: saveSnapshot, stop: stop.Token, control: control);
                 window.EmulationStopped("stopped");
             }
             catch (Exception exception)
@@ -82,10 +83,11 @@ static partial class Program
                 window.EmulationStopped("error: " + exception.Message);
             }
         }) { IsBackground = true, Name = "emulation" };
-        window.FormClosing += (_, _) => stop.Cancel();
+        window.FormClosing += (_, _) => { stop.Cancel(); control.Resume(); };
         worker.Start();
         System.Windows.Forms.Application.Run(window);
         stop.Cancel();
+        control.Resume();
         worker.Join();
         if (failure != null) throw failure;
     }
