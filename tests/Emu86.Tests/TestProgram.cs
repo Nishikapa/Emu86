@@ -9,7 +9,9 @@ static class TestProgram
         (string Name, Action Run)[] suites =
         [
             ("core", CoreTests.Run),
+            ("state", StateTests.Run),
             ("devices", DeviceTests.Run),
+            ("vga", VgaTests.Run),
             ("decode", DecodeTests.Run),
             ("snapshot", SnapshotTests.Run),
             ("runner", RunnerTests.Run),
@@ -18,7 +20,7 @@ static class TestProgram
         ];
         if (args.Any(argument => !suites.Any(suite => suite.Name == argument)))
         {
-            Console.Error.WriteLine("Usage: dotnet run --project tests/Emu86.Tests -- [core devices decode snapshot runner completion disk]");
+            Console.Error.WriteLine("Usage: dotnet run --project tests/Emu86.Tests -- [core state devices vga decode snapshot runner completion disk]");
             return 2;
         }
         var failed = 0;

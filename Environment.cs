@@ -202,7 +202,6 @@ static public partial class Ext
         _es_base, _cs_base, _ss_base, _ds_base, _fs_base, _gs_base
     ];
 
-    static private readonly Func<int, Func<CPU, ushort>> GetSReg3 = EnvGetDataFromCPU(ArraySreg);
     static public readonly Func<byte, Func<int, Func<CPU, CPU>>> EnvSetRegData8 = EnvSetDataFromCPU(ArrayReg8);
     static public readonly Func<ushort, Func<int, Func<CPU, CPU>>> EnvSetRegData16 = EnvSetDataFromCPU(ArrayReg16);
     static public readonly Func<uint, Func<int, Func<CPU, CPU>>> EnvSetRegData32 = EnvSetDataFromCPU(ArrayReg32);
@@ -220,24 +219,18 @@ static public partial class Ext
 
     // CR 書き込み後はページング状態を env へ同期する(PG 切替・CR3 変更で TLB もフラッシュ)。
     static public State<Unit> SetCrReg(int reg, uint data) =>
-        from _1 in Choice(
-            reg,
-            (0, _cr0),
-            (2, _cr2),
-            (3, _cr3),
-            (4, _cr4)
-        ).Set(data)
+        from _1 in GetControlRegister(reg).Set(data)
         from _2 in SetCpu((env, cpu) => { EnvSyncPaging(env, cpu); return cpu; })
         select Unit.unit;
 
     static public State<Unit> SetRegData(int reg, Data data) =>
-        SetCpu(EnvSetRegData(data)(reg));
+        SetCpu(cpu => SetRegisterValue(cpu, reg, data));
 
     static public State<ushort> GetRegData16(int reg) =>
-        GetDataFromCpu(EnvGetDataFromCPU(ArrayReg16)(reg));
+        GetDataFromCpu(ArrayReg16[reg].getter);
 
     static public State<uint> GetRegData32(int reg) =>
-        GetDataFromCpu(EnvGetDataFromCPU(ArrayReg32)(reg));
+        GetDataFromCpu(ArrayReg32[reg].getter);
 
     /// Stack ////////////////////////////////////
     // スタックトップの物理アドレス。SS の基底 + SP/ESP。
@@ -449,13 +442,34 @@ static public partial class Ext
         from _ in cpu0.pe ? InterruptProtected(vector, hasError: false, 0) : InterruptReal(vector)
         select Unit.unit;
 
+    // V86 モードの INT n: IOPL<3 なら #GP(0)。IOPL=3 でも IDT ゲートの DPL が 3 未満なら
+    // #GP(vector*8+2) になる(NT はこれを KiTrap0D で受けて IVT 経由の反射をソフトウェアで行う)。
+    // #GP はフォルトなので、EIP を INT 命令の先頭(2 バイト前)へ戻してから配送する。
+    static public State<Unit> InterruptFromV86(int vector) =>
+        from gateHi in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryData32(env, cpu.idt_base + (uint)vector * 8 + 4))
+        from cpu in GetCpu
+        let iopl = (cpu.eflags >> 12) & 3
+        let dpl = (gateHi >> 13) & 3
+        from _ in iopl < 3 ? GeneralProtection(0, 2)
+                : dpl < 3 ? GeneralProtection(((uint)vector << 3) | 2, 2)
+                : Interrupt(vector)
+        select Unit.unit;
+
+    static public State<Unit> GeneralProtection(uint errorCode, int instructionLength) =>
+        from _1 in IpInc(-instructionLength)
+        from _2 in InterruptProtected(13, hasError: true, errorCode)
+        select Unit.unit;
+
     // #PF(ベクタ 14): CR2 にフォルトアドレスを設定し、エラーコードを push して配送する。
     static public State<Unit> PageFault(uint linear, uint errorCode) =>
         from _1 in SetCpu(cpu => { cpu.cr2 = linear; return cpu; })
         from _2 in InterruptProtected(14, hasError: true, errorCode)
         select Unit.unit;
 
+    // リアルモードの INT 19h(SeaBIOS の POST 完了後のブート)で VGA BIOS スタブを導入する
+    // (SeaBIOS はレガシー ROM 領域を走査しないため、この時点で IVT 10h を差し替える)。
     static State<Unit> InterruptReal(int vector) =>
+        from _stub in SetCpu((env, cpu) => { if (vector == 0x19) VgaBiosStub.Install(env); return cpu; })
         from fl in GetDataFromCpu(cpu => (ushort)cpu.eflags)
         from _1 in Push16(fl)
         from cs in GetSRegData(1)
@@ -485,8 +499,14 @@ static public partial class Ext
         let gateType = (int)(gateHi >> 8) & 0xF
         // 特権レベルが上がる(例: ring3 のユーザーモードから ring0 へ)ときは TSS の SS0:ESP0 へ
         // スタックを切り替え、旧 SS/ESP を先に積む(IRET で元へ戻る)。
-        from _sw in SwitchToInnerStack(sel)
-        from fl in GetDataFromCpu(cpu => cpu.eflags)
+        // V86 モードからの配送は VM を先に落として(以降のセグメントロードを記述子経由にする)、
+        // 積む EFLAGS には VM=1 の元の値を使う。
+        from cpu0 in GetCpu
+        let fromVm = cpu0.vm
+        let cpl = cpu0.cpl // VM を落とす前に評価する(V86 なら 3)
+        let fl = cpu0.eflags
+        from _vm in fromVm ? SetCpu(cpu => { cpu.eflags &= ~0x20000u; return cpu; }) : Unit.unit.ToState()
+        from _sw in SwitchToInnerStack(sel, cpl, fromVm)
         from _1 in Push(fl.ToTypeData())
         from cs in GetSRegData(1)
         from _2 in Push(((uint)cs).ToTypeData())
@@ -500,30 +520,47 @@ static public partial class Ext
         from _5 in LoadSReg(1, sel)
         select Unit.unit;
 
-    // 割り込み/例外配送での特権レベル変化: CPL(現在の CS の RPL)より目標 CS の RPL が小さければ
+    // 割り込み/例外配送での特権レベル変化: CPL より目標 CS の RPL が小さければ
     // TR が指す TSS から SS0/ESP0 を読んでスタックを切り替え、旧 SS と ESP を積む。
-    static State<Unit> SwitchToInnerStack(ushort targetCs) =>
-        from cpu0 in GetCpu
-        from _ in (cpu0.cs & 3) > (targetCs & 3)
+    // V86 モードから(fromVm)は、さらにその前に GS/FS/DS/ES を積み、これらを null にする
+    // (ハンドラ側は KiTrap の冒頭でカーネル用セレクタをロードし直す)。
+    static State<Unit> SwitchToInnerStack(ushort targetCs, int cpl, bool fromVm) =>
+        from _ in cpl > (targetCs & 3)
             ? (from ctx in GetDataFromEnvCpu((env, cpu) =>
                   {
                       var (tssBase, _) = EnvReadDescriptor(env, cpu, cpu.tr);
                       var esp0 = EnvGetMemoryData32(env, tssBase + 4);
                       var ss0 = (ushort)EnvGetMemoryData32(env, tssBase + 8);
-                      return (oldSs: cpu.ss, oldEsp: cpu.esp, ss0, esp0);
+                      return (oldSs: cpu.ss, oldEsp: cpu.esp, ss0, esp0, cpu.es, cpu.ds, cpu.fs, cpu.gs);
                   })
                from _1 in LoadSReg(2, ctx.ss0)
                from _2 in SetCpu(cpu => { cpu.esp = ctx.esp0; return cpu; })
+               from _v in fromVm
+                   ? (from a in Push(((uint)ctx.gs).ToTypeData())
+                      from b in Push(((uint)ctx.fs).ToTypeData())
+                      from c in Push(((uint)ctx.ds).ToTypeData())
+                      from d in Push(((uint)ctx.es).ToTypeData())
+                      select Unit.unit)
+                   : Unit.unit.ToState()
                from _3 in Push(((uint)ctx.oldSs).ToTypeData())
                from _4 in Push(ctx.oldEsp.ToTypeData())
+               from _n in fromVm
+                   ? SetCpu(cpu =>
+                     {
+                         foreach (var reg in new[] { 0, 3, 4, 5 })
+                             cpu = EnvSetSReg3(0)(reg)(cpu);
+                         return cpu;
+                     })
+                   : Unit.unit.ToState()
                select Unit.unit)
             : Unit.unit.ToState()
         select Unit.unit;
 
     // 外側の特権レベル(例: ring0 → ring3)へ戻るときは、さらに ESP と SS を pop してスタックを切り替える。
+    // V86 モード内の far 復帰はリアルモード同様で、セレクタの下位ビットは特権を意味しない。
     static public State<Unit> ReturnToOuterStack(ushort targetCs) =>
         from cpu0 in GetCpu
-        from _ in (targetCs & 3) > (cpu0.cs & 3)
+        from _ in !cpu0.vm && (targetCs & 3) > (cpu0.cs & 3)
             ? (from sp in Pop(2)
                from ss in Pop(2)
                from _1 in LoadSReg(2, (ushort)ss.dd)
@@ -538,23 +575,54 @@ static public partial class Ext
         from _ in cpu0.pe && cpu0.code32 ? Iret32 : Iret16
         select Unit.unit;
 
+    // 16 ビット IRET。V86 モード(IOPL=3 で実行可)では IOPL を変更できない(VM は上位ワードなので保たれる)。
     static State<Unit> Iret16 =>
         from ip in Pop16
         from _1 in _ip.Set(ip)
         from cs in Pop16
         from _2 in LoadSReg(1, cs)
         from fl in Pop16
-        from _3 in SetCpu(cpu => { cpu.eflags = (cpu.eflags & 0xFFFF0000) | fl; return cpu; })
+        from _3 in SetCpu(cpu =>
+        {
+            var keep = cpu.vm ? 0x3000u : 0u;
+            cpu.eflags = (cpu.eflags & (0xFFFF0000 | keep)) | (fl & ~keep);
+            return cpu;
+        })
         select Unit.unit;
 
     static State<Unit> Iret32 =>
         from eip in Pop(2)
         from cs in Pop(2)
         from fl in Pop(2)
-        from _0 in ReturnToOuterStack((ushort)cs.dd) // 旧 SS で ESP/SS を pop してから CS をロードする
-        from _1 in _eip.Set(eip.dd)
-        from _2 in LoadSReg(1, (ushort)cs.dd)
-        from _3 in SetCpu(cpu => { cpu.eflags = fl.dd; return cpu; })
+        from cpu0 in GetCpu
+        from _ in (fl.dd & 0x20000) != 0 && cpu0.cpl == 0
+            ? IretToV86(eip.dd, (ushort)cs.dd, fl.dd)
+            : (from _0 in ReturnToOuterStack((ushort)cs.dd) // 旧 SS で ESP/SS を pop してから CS をロードする
+               from _1 in _eip.Set(eip.dd)
+               from _2 in LoadSReg(1, (ushort)cs.dd)
+               from _3 in SetCpu(cpu => { cpu.eflags = fl.dd; return cpu; })
+               select Unit.unit)
+        select Unit.unit;
+
+    // ring0 からの IRET で EFLAGS.VM=1 を積んでいた場合は V86 モードへ入る: さらに ESP, SS, ES, DS, FS, GS を
+    // pop し、全セグメントを セレクタ*16 基底の 16 ビットセグメントとしてロードする(NT の HAL は
+    // この経路で BIOS(INT 10h 等)を V86 で呼ぶ)。
+    static State<Unit> IretToV86(uint eip, ushort cs, uint flags) =>
+        from sp in Pop(2)
+        from ss in Pop(2)
+        from es in Pop(2)
+        from ds in Pop(2)
+        from fs in Pop(2)
+        from gs in Pop(2)
+        from _f in SetCpu(cpu => { cpu.eflags = flags; return cpu; }) // 以降のセグメントロードは V86 規則
+        from _1 in _eip.Set(eip)
+        from _2 in LoadSReg(1, cs)
+        from _3 in LoadSReg(2, (ushort)ss.dd)
+        from _4 in SetCpu(cpu => { cpu.esp = sp.dd; return cpu; })
+        from _5 in LoadSReg(0, (ushort)es.dd)
+        from _6 in LoadSReg(3, (ushort)ds.dd)
+        from _7 in LoadSReg(4, (ushort)fs.dd)
+        from _8 in LoadSReg(5, (ushort)gs.dd)
         select Unit.unit;
 
     // XLAT: AL <- [DS:BX + AL]（バイト変換テーブル参照）。
@@ -586,14 +654,7 @@ static public partial class Ext
     static public State<Unit> MovMoffsFromAcc(int type, uint offset) =>
         SetCpu((env, cpu) =>
         {
-            var addr = EnvMoffsAddr(cpu, offset);
-            var bytes = type switch
-            {
-                0 => _al.getter(cpu).ToByteArray(),
-                1 => _ax.getter(cpu).ToByteArray(),
-                _ => _eax.getter(cpu).ToByteArray(),
-            };
-            EnvSetMemoryDatas(env, addr, bytes);
+            EnvWriteN(env, EnvMoffsAddr(cpu, offset), Bits(type) / 8, cpu.eax);
             return cpu;
         });
 
@@ -613,25 +674,28 @@ static public partial class Ext
 
     // セグメントレジスタ(ES/CS/SS/DS/FS/GS)を reg 番号で読み出す。
     static public State<ushort> GetSRegData(int reg) =>
-        GetDataFromCpu(GetSReg3(reg));
+        GetDataFromCpu(ArraySreg[reg].getter);
 
     static public State<Data> GetRegData(int reg, int type) =>
         GetDataFromCpu(GetTypeData_(
             type,
-            EnvGetDataFromCPU(ArrayReg8)(reg),
-            EnvGetDataFromCPU(ArrayReg16)(reg),
-            EnvGetDataFromCPU(ArrayReg32)(reg)
+            ArrayReg8[reg].getter,
+            ArrayReg16[reg].getter,
+            ArrayReg32[reg].getter
             )
         );
 
     static public State<uint> GetCrReg(int reg) =>
-        Choice(
-            reg,
-            (0, Get(_cr0)),
-            (2, Get(_cr2)),
-            (3, Get(_cr3)),
-            (4, Get(_cr4))
-        );
+        GetControlRegister(reg).Get();
+
+    static Accessor<CPU, uint> GetControlRegister(int register) => register switch
+    {
+        0 => _cr0,
+        2 => _cr2,
+        3 => _cr3,
+        4 => _cr4,
+        _ => throw new KeyNotFoundException()
+    };
 
     // GDT からセグメント記述子を読み、基底アドレスと D/B ビットを返す。
     static (uint base_, bool d) EnvReadDescriptor(EmuEnvironment env, CPU cpu, ushort sel)
@@ -650,7 +714,7 @@ static public partial class Ext
         SetCpu((env, cpu) =>
         {
             cpu = EnvSetSReg3(sel)(reg)(cpu);
-            if (cpu.pe)
+            if (cpu.pe && !cpu.vm) // V86 モードはリアルモードと同じく セレクタ*16(セッタが設定済み)
             {
                 var (base_, d) = EnvReadDescriptor(env, cpu, sel);
                 cpu = ArraySregBase[reg].setter(cpu)(base_);
@@ -687,31 +751,21 @@ static public partial class Ext
     }
 
     static public State<byte> GetMemOrRegData8(MemAddr t) =>
-        GetDataFromEnvCpu((env, cpu) => t.isMem ? EnvGetMemoryData8(env, t.addr) : EnvGetDataFromCPU(ArrayReg8)((int)t.addr)(cpu));
+        GetDataFromEnvCpu((env, cpu) => t.isMem ? EnvGetMemoryData8(env, t.addr) : ArrayReg8[(int)t.addr].getter(cpu));
 
     static public State<ushort> GetMemOrRegData16(MemAddr t) =>
-        GetDataFromEnvCpu((env, cpu) => t.isMem ? EnvGetMemoryData16(env, t.addr) : EnvGetDataFromCPU(ArrayReg16)((int)t.addr)(cpu));
+        GetDataFromEnvCpu((env, cpu) => t.isMem ? EnvGetMemoryData16(env, t.addr) : ArrayReg16[(int)t.addr].getter(cpu));
 
     static public State<uint> GetMemOrRegData32(MemAddr t) =>
-        GetDataFromEnvCpu((env, cpu) => t.isMem ? EnvGetMemoryData32(env, t.addr) : EnvGetDataFromCPU(ArrayReg32)((int)t.addr)(cpu));
+        GetDataFromEnvCpu((env, cpu) => t.isMem ? EnvGetMemoryData32(env, t.addr) : ArrayReg32[(int)t.addr].getter(cpu));
 
-    static Func<int, Func<CPU, CPU>> EnvSetRegData(Data data) =>
-        SetTypeData
-        (
-            data,
-            EnvSetRegData8,
-            EnvSetRegData16,
-            EnvSetRegData32
-        );
-
-    static Action<EmuEnvironment, uint> EnvSetMemoryData(Data data) =>
-        SetTypeData<Action<EmuEnvironment, uint>>
-        (
-            data,
-            db => (env, addr) => { EnvWriteByte(env, addr, db); },
-            dw => (env, addr) => { EnvWriteWord(env, addr, dw); },
-            dd => (env, addr) => { EnvWriteDword(env, addr, dd); }
-        );
+    static CPU SetRegisterValue(CPU cpu, int register, Data data) => data.type switch
+    {
+        0 => ArrayReg8[register].setter(cpu)(data.db),
+        1 => ArrayReg16[register].setter(cpu)(data.dw),
+        2 => ArrayReg32[register].setter(cpu)(data.dd),
+        _ => throw new IndexOutOfRangeException()
+    };
 
     static public State<Unit> SetMemOrRegData(
         MemAddr t,
@@ -720,13 +774,10 @@ static public partial class Ext
         {
             if (t.isMem)
             {
-                EnvSetMemoryData(data)(env, t.addr);
+                EnvWriteN(env, t.addr, arrLen[data.type], data.Value());
                 return cpu;
             }
-            else
-            {
-                return EnvSetRegData(data)((int)t.addr)(cpu);
-            }
+            return SetRegisterValue(cpu, (int)t.addr, data);
         });
 
     // 実効オペランドサイズ(type)。32ビットコードセグメントではデフォルトが32ビットになり、
@@ -766,14 +817,6 @@ static public partial class Ext
     static private Func<T, Func<int, Func<CPU, CPU>>> EnvSetDataFromCPU<T>(Accessor<CPU, T>[] array) =>
         data => reg => cpu => array[reg].setter(cpu)(data);
 
-    static private void EnvSetMemoryDatas(EmuEnvironment env, uint addr, byte[] data)
-    {
-        for (int i = 0; i < data.Length; ++i)
-        {
-            EnvWriteByte(env, addr + (uint)i, data[i]);
-        }
-    }
-
     /// I/O port ///////////////////////////////////
     // CMOS(0x70/0x71)・PIT(0x40/0x43)・ATA(0x1F0-0x1F7, 0x3F6)を
     // 特別扱いする以外は IoPort 配列を素通しする。
@@ -805,6 +848,8 @@ static public partial class Ext
                 return 0;
             case 0x60 or 0x64:
                 return env.Keyboard.Read(port & 0xFFFF);
+            case 0x3B4 or 0x3B5 or 0x3BA or (>= 0x3C0 and <= 0x3CF) or 0x3D4 or 0x3D5 or 0x3DA:
+                return env.Vga.ReadPort(port & 0xFFFF, env.Tsc);
             case 0x1F0 when env.Ata != null:
                 return (byte)env.Ata.ReadData(1);
             case (>= 0x1F1 and <= 0x1F7) or 0x3F6 when env.Ata != null:
@@ -899,6 +944,9 @@ static public partial class Ext
             case 0x60 or 0x64:
                 env.Keyboard.Write(port, val);
                 break;
+            case 0x3B4 or 0x3B5 or 0x3BA or (>= 0x3C0 and <= 0x3CF) or 0x3D4 or 0x3D5 or 0x3DA:
+                env.Vga.WritePort(port, val);
+                break;
             case 0x1F0 when env.Ata != null:
                 env.Ata.WriteData(1, val);
                 break;
@@ -929,6 +977,7 @@ static public partial class Ext
         if (env.PagingOn && addr >= env.WatchLo && addr < env.WatchHi) env.WatchTriggered = true;
         if (env.WriteLog != null && addr >= env.WLogLo && addr < env.WLogHi)
             env.WriteLog.Add($"{env.CurEip:x8}: [{addr:x8}]={val:x2}");
+        if (VgaDevice.Contains(addr)) { env.Vga.Write(addr, val); return; }
         if (addr < (uint)env.OneMegaMemory_.Length) env.OneMegaMemory_[addr] = val;
     }
 
@@ -952,6 +1001,13 @@ static public partial class Ext
         addr = EnvAlias(addr);
         if (env.PagingOn && (ulong)addr + (uint)size > env.WatchLo && addr < env.WatchHi)
             env.WatchTriggered = true;
+        if (VgaDevice.Contains(addr))
+        {
+            // VGA ウィンドウはページ境界に揃っているので、ここに来る複数バイトは全部ウィンドウ内。
+            for (var byteIndex = 0; byteIndex < size; byteIndex++)
+                env.Vga.Write(addr + (uint)byteIndex, (byte)(value >> (8 * byteIndex)));
+            return;
+        }
 
         var memory = env.OneMegaMemory_;
         if ((ulong)addr + (uint)size <= (uint)memory.Length)
@@ -979,6 +1035,7 @@ static public partial class Ext
     {
         if (env.PagingOn) addr = EnvTranslate(env, addr, write: false);
         addr = EnvAlias(addr);
+        if (VgaDevice.Contains(addr)) return env.Vga.Read(addr);
         return addr < (uint)env.OneMegaMemory_.Length ? env.OneMegaMemory_[addr] : (byte)0xFF;
     }
 
@@ -991,6 +1048,7 @@ static public partial class Ext
             addr = EnvTranslate(env, addr, write: false);
         }
         addr = EnvAlias(addr);
+        if (VgaDevice.Contains(addr)) return (ushort)(env.Vga.Read(addr) | (env.Vga.Read(addr + 1) << 8));
         return addr + 2 <= (uint)env.OneMegaMemory_.Length ? BitConverter.ToUInt16(env.OneMegaMemory_, (int)addr) : (ushort)0xFFFF;
     }
 
@@ -1006,6 +1064,8 @@ static public partial class Ext
             addr = EnvTranslate(env, addr, write: false);
         }
         addr = EnvAlias(addr);
+        if (VgaDevice.Contains(addr))
+            return (uint)(env.Vga.Read(addr) | (env.Vga.Read(addr + 1) << 8) | (env.Vga.Read(addr + 2) << 16) | (env.Vga.Read(addr + 3) << 24));
         return addr + 4 <= (uint)env.OneMegaMemory_.Length ? BitConverter.ToUInt32(env.OneMegaMemory_, (int)addr) : 0xFFFFFFFF;
     }
 }

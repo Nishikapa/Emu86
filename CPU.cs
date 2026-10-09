@@ -25,37 +25,25 @@ static public partial class Ext
         select (mod, reg, rm);
 
     static public State<Data> Choice(
-        int index, State<byte> dbState, State<ushort> dwState, State<uint> ddState) =>
-        Choice_(
-            index,
-            dbState.Select(ToTypeData),
-            dwState.Select(ToTypeData),
-            ddState.Select(ToTypeData)
-        );
+        int index, State<byte> dbState, State<ushort> dwState, State<uint> ddState) => index switch
+        {
+            0 => dbState.Select(ToTypeData),
+            1 => dwState.Select(ToTypeData),
+            2 => ddState.Select(ToTypeData),
+            _ => throw new IndexOutOfRangeException()
+        };
 
     static public Func<T, Data> GetTypeData_<T>(
         int index,
         Func<T, byte> func_db,
         Func<T, ushort> func_dw,
-        Func<T, uint> func_dd) =>
-        Choice_<Func<T, Data>>(
-            index,
-            t => func_db(t).ToTypeData(),
-            t => func_dw(t).ToTypeData(),
-            t => func_dd(t).ToTypeData()
-        );
-
-    static T SetTypeData<T>(
-        Data data,
-        Func<byte, T> func_db,
-        Func<ushort, T> func_dw,
-        Func<uint, T> func_dd) =>
-        Choice_(
-            data.type,
-            func_db(data.db),
-            func_dw(data.dw),
-            func_dd(data.dd)
-        );
+        Func<T, uint> func_dd) => index switch
+        {
+            0 => value => func_db(value).ToTypeData(),
+            1 => value => func_dw(value).ToTypeData(),
+            2 => value => func_dd(value).ToTypeData(),
+            _ => throw new IndexOutOfRangeException()
+        };
 
     // 算術/論理グループを uint 上で幅共通に計算する。
     // kind: 0=ADD 1=OR 2=ADC 3=SBB 4=AND 5=SUB 6=XOR 7=CMP
@@ -158,9 +146,6 @@ static public partial class Ext
     static public State<bool> Jcc(int type) =>
         GetDataFromCpu(cpu => EvaluateCondition(cpu, type));
 
-    static private Func<int, Func<CPU, T>> EnvGetDataFromCPU<T>(this Accessor<CPU, T>[] array) =>
-        reg => array[reg].getter;
-
     static private State<T> Get<T>(this Accessor<CPU, T> acc) =>
         GetDataFromCpu(acc.getter);
 
@@ -168,28 +153,24 @@ static public partial class Ext
         SetCpu(cpu => acc.setter(cpu)(value));
 
     static public State<Unit> IpInc(int inc) =>
-        from eip in Get(_eip)
-        from _ in Set(_eip, (uint)(eip + inc))
-        select _;
+        SetCpu(cpu => { cpu.eip = (uint)(cpu.eip + inc); return cpu; });
 
     static public State<Unit> SetCpu(Func<CPU, CPU> func) =>
-        from cpu in GetCpu
-        from _ in SetCpu(func(cpu))
-        select _;
+        (env, cpu, opcodes) => (true, unit, func(cpu), string.Empty);
 
     static public State<T> GetDataFromCpu<T>(Func<CPU, T> func) =>
-        from cpu in GetCpu
-        select func(cpu);
+        (env, cpu, opcodes) => (true, func(cpu), cpu, string.Empty);
 
     static public State<Unit> SetCpu(Func<EmuEnvironment, CPU, CPU> func) =>
-        from cpu in GetDataFromEnvCpu(func)
-        from _ in SetCpu(cpu)
-        select _;
+        (env, cpu, opcodes) => (true, unit, func(env, cpu), string.Empty);
 
     static public State<Unit> SetCpu<T>(params (Accessor<CPU, T> acc, T value)[] arr) =>
-        arr.Select(
-            item => SetCpu(cpu => item.acc.setter(cpu)(item.value))
-        ).Sequence().Ignore();
+        (env, cpu, opcodes) =>
+        {
+            foreach (var item in arr)
+                cpu = item.acc.setter(cpu)(item.value);
+            return (true, unit, cpu, string.Empty);
+        };
 
     static public State<IEnumerable<byte>> GetMemoryDataIp(int length) =>
         from data in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryDatas(env, GetCodeAddr(cpu).addr).Take(length))
@@ -300,10 +281,10 @@ public partial class CPU
 
     public ushort cs { get; private set; }
     public ushort ds { get; private set; }
-    private ushort es { get; set; }
+    public ushort es { get; private set; }
     public ushort ss { get; private set; }
-    private ushort fs { get; set; }
-    private ushort gs { get; set; }
+    public ushort fs { get; private set; }
+    public ushort gs { get; private set; }
 
     // 各セグメントの基底物理アドレス(記述子キャッシュ)。
     public uint cs_base, ds_base, es_base, ss_base, fs_base, gs_base;
@@ -397,6 +378,10 @@ public partial class CPU
     private bool GetEflags(uint flag) => 0 != (this.eflags & flag);
 
     public bool pe => 0 != (this.cr0 & 0x1);
+    // 仮想 8086 モード(EFLAGS.VM)。セグメントはリアルモード同様 セレクタ*16 が基底で、特権レベルは常に 3。
+    public bool vm => 0 != (this.eflags & 0x20000);
+    // 現在の特権レベル。V86 モードでは CS の RPL に関わらず 3。
+    public int cpl => this.vm ? 3 : this.cs & 3;
 
     // ページング有効(CR0.PG)。変換に使う実際の状態は EmuEnvironment 側に
     // ミラーされる(EnvSyncPaging)。CR 書き込みとスナップショット復元時に同期する。

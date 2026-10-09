@@ -134,6 +134,9 @@ static class SnapshotTests
         env.Pci.Address = 0x80000920; env.Pci.DataWrite(0, 4, 0xD001);
         cpu.fpu_top = 3; cpu.fpu_valid = 0xF8; cpu.fpu_st[3] = 1.25;
         cpu.tr = 0x28; cpu.ldtr = 0x30;
+        env.Vga.Vram[0x12345] = 0x5A; env.Vga.Crtc[0x0E] = 0x12;
+        EnvOutPort(env, 0x3C8, 7); EnvOutPort(env, 0x3C9, 0x3F);
+        EnvOutPort(env, 0x3C4, 2); EnvOutPort(env, 0x3C5, 0x05);
     }
 
     static string StateHash(EmuEnvironment env, CPU cpu)
@@ -180,6 +183,11 @@ static class SnapshotTests
         Equal(0xD000u, restored.Pci.IdeBmBase, "PCI BAR restored");
         Equal(0x80000920u, restored.Pci.Address, "PCI address restored");
         Equal("250,170", string.Join(",", restored.KbdOut), "keyboard queue restored");
+        Equal((byte)0x5A, restored.Vga.Vram[0x12345], "VRAM restored");
+        Equal((byte)0x12, restored.Vga.Crtc[0x0E], "CRTC restored");
+        Equal((byte)0x3F, restored.Vga.Dac[21], "DAC restored");
+        Equal("7,1,2,5", $"{restored.Vga.DacWriteIndex},{restored.Vga.DacWritePhase},{restored.Vga.SequencerIndex},{restored.Vga.Sequencer[2]}", "VGA indices restored");
+        Equal(true, restored.Vga.Dirty, "restored display marked dirty");
         Equal(0x98765432u, restored.Dr[3], "debug register restored");
         for (var version = 2; version <= 6; version++)
         {
@@ -191,6 +199,8 @@ static class SnapshotTests
             Equal(version >= 3 ? env.Tsc : 9876UL, restored.Tsc, "legacy TSC");
             Equal(version >= 5 ? 1.25 : 0.0, loaded.cpu.fpu_st[3], "legacy FPU");
             Equal(version >= 6 ? (ushort)0x28 : (ushort)0, loaded.cpu.tr, "legacy TR");
+            Equal((byte)0, restored.Vga.Vram[0x12345], "legacy snapshot resets VGA");
+            Equal((byte)0x03, restored.Vga.Sequencer[2], "legacy snapshot restores text mode defaults");
         }
         var original = File.ReadAllBytes("roundtrip.snap");
         env.Ata = new AtaDevice(null);

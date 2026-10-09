@@ -148,14 +148,17 @@ static class CoreTests
         if (extended)
         {
             foreach (var fast in new[] { false, true })
+            foreach (var moffs in new[] { false, true })
             {
                 var env = fast ? FastEnv : SlowEnv;
-                Reset(env, Store(2));
+                Reset(env, moffs ? [0xA3, 0xFF, 0x1F, 0x00, 0x00] : Store(2));
                 MapPages(env, false);
                 var cpu = CreateCpu(0x87654321, 0x1fff);
                 try
                 {
-                    if (fast) FastStep(env, cpu); else SetMemOrRegData((true, cpu.ebx), cpu.eax.ToTypeData())(env, cpu, null);
+                    if (fast) FastStep(env, cpu);
+                    else if (moffs) MovMoffsFromAcc(2, cpu.ebx)(env, cpu, null);
+                    else SetMemOrRegData((true, cpu.ebx), cpu.eax.ToTypeData())(env, cpu, null);
                     throw new Exception("expected page fault");
                 }
                 catch (PageFaultException fault)
@@ -183,6 +186,42 @@ static class CoreTests
         cases++;
     }
 
+    static void OperandTransfers()
+    {
+        for (var type = 0; type < 3; type++)
+        {
+            for (var source = 0; source < 8; source++)
+            for (var destination = 0; destination < 8; destination++)
+            foreach (var direction in new[] { 0, 2 })
+            {
+                var cpu = CreateCpu(0x87654321, 0xFEDCBA98);
+                cpu.ecx = 0x11223344; cpu.edx = 0x55667788;
+                cpu.esp = 0x10203040; cpu.ebp = 0x50607080;
+                cpu.esi = 0x90A0B0C0; cpu.edi = 0xD0E0F001;
+                var code = new List<byte>();
+                if (type == 1) code.Add(0x66);
+                code.Add((byte)((type == 0 ? 0x88 : 0x89) + direction));
+                code.Add((byte)(0xC0 | (source << 3) | destination));
+                Check(code.ToArray(), cpu);
+            }
+            foreach (var address in new uint[] { 0x3000, 0x3FFF, 0xFFFF, 0x10000, 0xFFF03000, 0xFFFFFFFF, 0x1FFF })
+            foreach (var logWrites in new[] { false, true })
+            {
+                var code = new List<byte>();
+                if (type == 1) code.Add(0x66);
+                code.Add((byte)(type == 0 ? 0xA2 : 0xA3));
+                code.AddRange(BitConverter.GetBytes(address));
+                Check(code.ToArray(), CreateCpu(0x87654321), env =>
+                {
+                    if (address == 0x1FFF) MapPages(env);
+                    env.WriteLog = logWrites ? [] : null;
+                    env.WLogLo = 0; env.WLogHi = 0x10000;
+                    env.WatchLo = 0x5FFF; env.WatchHi = 0x6000;
+                }, diagnostics: true);
+            }
+        }
+    }
+
     public static void Run()
     {
         Arithmetic();
@@ -193,6 +232,7 @@ static class CoreTests
         Console.WriteLine($"Baseline-compatible cases: {cases}; SHA256={baselineHash}");
         Memory(true);
         Integration();
+        OperandTransfers();
         Console.WriteLine($"Core cases passed: {cases}");
     }
 }

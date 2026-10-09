@@ -933,8 +933,10 @@ static partial class Program
     static State<Unit> Int_CD =>
         from _1 in SetLog("Int_CD")
         from vector in GetMemoryDataIp8
-        from _2 in Interrupt(vector)
+        from cpu in GetCpu
+        from _2 in cpu.vm ? InterruptFromV86(vector) : Interrupt(vector)
         select unit;
+
 
     // INT3 (0xCC): ベクタ 3 へのブレークポイント割り込み。
     static State<Unit> Int3_CC =>
@@ -1211,12 +1213,12 @@ static partial class Program
         from _2 in SetCpu(cpu =>
         {
             var nv = type == 2 ? fl.dd : (cpu.eflags & 0xFFFF0000) | fl.dw;
-            if (cpu.pe && (cpu.cs & 3) != 0)
+            if (cpu.pe && cpu.cpl != 0)
             {
-                // CPL>0: IOPL は変更不可。CPL>IOPL なら IF も変更不可。VM/RF は POPF では変わらない。
+                // CPL>0(V86 モードも CPL=3): IOPL は変更不可。CPL>IOPL なら IF も変更不可。VM/RF は POPF では変わらない。
                 const uint IOPL = 0x3000, IF = 0x200, VM = 0x20000, RF = 0x10000;
                 var keep = IOPL | VM | RF;
-                if ((cpu.cs & 3) > ((cpu.eflags >> 12) & 3)) keep |= IF;
+                if (cpu.cpl > ((cpu.eflags >> 12) & 3)) keep |= IF;
                 nv = (nv & ~keep) | (cpu.eflags & keep);
             }
             cpu.eflags = nv;

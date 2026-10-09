@@ -297,7 +297,8 @@ static public partial class Ext
             case 0x9C: // PUSHF(オペランドサイズに従う)
                 FPush(env, cpu, typeW, typeW == 2 ? cpu.eflags : (ushort)cpu.eflags);
                 break;
-            case 0x9D: // POPF
+            case 0x9D: // POPF(CPL>0 の IOPL/IF/VM 保護はモナド版に委ねる)
+                if (cpu.pe && cpu.cpl != 0) return false;
                 if (typeW == 2) cpu.eflags = FPop(env, cpu, 2);
                 else cpu.eflags = (cpu.eflags & 0xFFFF0000) | FPop(env, cpu, 1);
                 break;
