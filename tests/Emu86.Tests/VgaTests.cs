@@ -274,9 +274,88 @@ static class VgaTests
         }
     }
 
+    // PCI の VGA デバイス(00:02.0)と拡張 ROM BAR: サイズ問い合わせ、有効化後の ROM 窓の読み出し、PCIR 構造。
+    static void PciRom()
+    {
+        using var env = new EmuEnvironment(memory: new byte[0x10000]);
+        uint Config(int reg) { EnvOutPortN(env, 0xCF8, 4, 0x80000000u | (2u << 11) | (uint)reg); return EnvInPortN(env, 0xCFC, 4); }
+        void Write(int reg, uint value) { EnvOutPortN(env, 0xCF8, 4, 0x80000000u | (2u << 11) | (uint)reg); EnvOutPortN(env, 0xCFC, 4, value); }
+        uint Read(uint address, int size) => Enumerable.Range(0, size).Aggregate(0u, (value, index) => value | (uint)EnvGetMemoryData8(env, address + (uint)index) << (8 * index));
+        Equal(0x11111234u, Config(0x00), "VGA vendor/device");
+        Equal(0x030000u, Config(0x08) >> 8, "VGA class code");
+        Equal(0u, Config(0x30), "ROM BAR disabled by default");
+        Write(0x30, 0xFFFFF800);
+        Equal(0xFFFF0000u, Config(0x30), "ROM BAR size query (64KB, enable bit cleared)");
+        Equal((byte)0xFF, EnvGetMemoryData8(env, 0xFEBF0000), "ROM window hidden while disabled");
+        Write(0x30, 0xFEBF0001);
+        Equal(true, env.Pci.RomContains(0xFEBF0000) && env.Pci.RomContains(0xFEBFFFFF) && !env.Pci.RomContains(0xFEC00000), "ROM window bounds");
+        Equal(0xAA55u, Read(0xFEBF0000, 2), "ROM signature through the window");
+        Equal((byte)(VgaBiosStub.RomSize / 512), EnvGetMemoryData8(env, 0xFEBF0002), "ROM size in 512-byte blocks");
+        var pcir = Read(0xFEBF0018, 2);
+        Equal("PCIR", System.Text.Encoding.ASCII.GetString(Enumerable.Range(0, 4).Select(index => EnvGetMemoryData8(env, 0xFEBF0000u + pcir + (uint)index)).ToArray()), "PCI data structure");
+        Equal(0x11111234u, Read(0xFEBF0000u + pcir + 4, 4), "PCIR vendor/device");
+        Equal((byte)0x80, EnvGetMemoryData8(env, 0xFEBF0000u + pcir + 0x15), "PCIR last image");
+        Equal((byte)0xFF, EnvGetMemoryData8(env, 0xFEBF0000u + VgaBiosStub.RomSize), "beyond the ROM image");
+        Equal(0, Enumerable.Range(0, VgaBiosStub.RomSize).Sum(index => VgaBiosStub.Rom[index]) & 0xFF, "ROM checksum");
+        Write(0x30, 0xFEBF0000);
+        Equal((byte)0xFF, EnvGetMemoryData8(env, 0xFEBF0000), "ROM window hidden again");
+        // 旧スナップショット(VGA デバイス追加前、PCI 関数 4 つ)の PCI 状態は読み込め、VGA は初期値のまま。
+        using var stream = new MemoryStream();
+        using (var writer = new BinaryWriter(stream, System.Text.Encoding.UTF8, leaveOpen: true))
+        {
+            writer.Write(0x80000920u); writer.Write(1);
+            writer.Write((1 << 3) | 1); var ide = new byte[256]; ide[0x20] = 0x01; ide[0x21] = 0xD0; writer.Write(ide);
+        }
+        stream.Position = 0;
+        using (var reader = new BinaryReader(stream)) env.Pci.LoadState(reader);
+        Equal(0xD000u, env.Pci.IdeBmBase, "older PCI state restored");
+        Equal(0x11111234u, Config(0x00), "VGA function kept its defaults");
+    }
+
+    // ring0 の IRETD で復帰先 CS の RPL が記述子の DPL と合わない(000Bh = ring0 コードに RPL 3)と、スタックを
+    // 動かさずに #GP(セレクタ)になる。NT は V86 の BIOS 呼び出しからの復帰にこの #GP を使う。
+    static void IretPrivilegeCheck()
+    {
+        foreach (var fast in new[] { true, false })
+        {
+            using var env = new EmuEnvironment(memory: new byte[0x10000]);
+            var cpu = new CPU { eip = 0x100, esp = 0x6000, code32 = true, stack32 = true, eflags = 2,
+                idt_base = 0x1000, idt_limit = 0x7FF, gdt_base = 0x500, gdt_limit = 0x1F };
+            CPU._cr0.setter(cpu)(1);
+            CPU._cs.setter(cpu)(8); cpu.cs_base = 0;
+            CPU._ss.setter(cpu)(16); cpu.ss_base = 0;
+            Write32(env, 0x508, 0x0000FFFF); Write32(env, 0x50C, 0x00CF9A00);
+            Write32(env, 0x510, 0x0000FFFF); Write32(env, 0x514, 0x00CF9200);
+            Write32(env, 0x518, 0x0000FFFF); Write32(env, 0x51C, 0x00CFFA00); // 0x18: ring3 code
+            Write32(env, 0x1000 + 13 * 8, 0x00080400); Write32(env, 0x1004 + 13 * 8, 0x00008E00);
+            // push 0x23; push 0x5000; push 0x202; push 0x0B; push 0x200; iretd; (never reached) hlt
+            byte[] code = [0x6A, 0x23, 0x68, 0x00, 0x50, 0x00, 0x00, 0x68, 0x02, 0x02, 0x00, 0x00, 0x6A, 0x0B, 0x68, 0x00, 0x02, 0x00, 0x00, 0xCF, 0xF4];
+            byte[] handler = [0x8B, 0x0C, 0x24, 0x8B, 0x5C, 0x24, 0x04, 0x8B, 0x54, 0x24, 0x10, 0xEB, 0xFE]; // ecx=err; ebx=eip; edx=[esp+10h](元の IRET 枠の EIP); jmp $
+            code.CopyTo(env.OneMegaMemory_, 0x100); handler.CopyTo(env.OneMegaMemory_, 0x400);
+            var options = RunOptions.Parse(fast ? ["--limit", "12", "--noirq", "--notrace"] : ["--limit", "12", "--noirq", "--notrace", "--slow"]);
+            EmulationRunner.Run(options, env, cpu, 0, null, TextWriter.Null, TextWriter.Null);
+            var label = fast ? " (fast)" : " (slow)";
+            Equal(0x8u, cpu.ecx, "#GP error code is the selector" + label);
+            Equal(0x113u, cpu.ebx, "fault EIP points at the IRETD" + label);
+            Equal(0x200u, cpu.edx, "IRET frame left intact right above the #GP frame" + label);
+            Equal((ushort)8, cpu.cs, "still ring0" + label);
+            Equal(0x200u, BitConverter.ToUInt32(env.OneMegaMemory_, 0x5FEC), "frame EIP intact" + label);
+            // 正しい ring3 復帰(CS=1B)は通る。
+            using var ok = new EmuEnvironment(memory: new byte[0x10000]);
+            var cpu2 = new CPU { eip = 0x100, esp = 0x6000, code32 = true, stack32 = true, eflags = 2, gdt_base = 0x500, gdt_limit = 0x1F, idt_base = 0x1000, idt_limit = 0x7FF };
+            CPU._cr0.setter(cpu2)(1); CPU._cs.setter(cpu2)(8); cpu2.cs_base = 0; CPU._ss.setter(cpu2)(16); cpu2.ss_base = 0;
+            Array.Copy(env.OneMegaMemory_, 0x500, ok.OneMegaMemory_, 0x500, 0x20);
+            byte[] code2 = [0x6A, 0x23, 0x68, 0x00, 0x50, 0x00, 0x00, 0x68, 0x02, 0x02, 0x00, 0x00, 0x6A, 0x1B, 0x68, 0x00, 0x02, 0x00, 0x00, 0xCF];
+            code2.CopyTo(ok.OneMegaMemory_, 0x100); ok.OneMegaMemory_[0x200] = 0xEB; ok.OneMegaMemory_[0x201] = 0xFE;
+            EmulationRunner.Run(options, ok, cpu2, 0, null, TextWriter.Null, TextWriter.Null);
+            Equal((ushort)0x1B, cpu2.cs, "ring3 return accepted" + label);
+            Equal(0x5000u, cpu2.esp, "outer stack loaded" + label);
+        }
+    }
+
     public static void Run()
     {
-        MemoryWindow(); PlanarAndChain4(); Registers(); Rendering(); VirtualMode(); KeyboardInterrupt(); BiosStub();
+        MemoryWindow(); PlanarAndChain4(); Registers(); Rendering(); VirtualMode(); KeyboardInterrupt(); BiosStub(); PciRom(); IretPrivilegeCheck();
         Console.WriteLine($"VGA/V86/keyboard assertions passed: {assertions}");
     }
 }

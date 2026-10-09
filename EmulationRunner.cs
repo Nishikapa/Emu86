@@ -10,7 +10,7 @@ internal static class EmulationRunner
     public static long Run(RunOptions options, EmuEnvironment env, CPU cpu, long count = 0,
         TextWriter trace = null, TextWriter output = null, TextWriter error = null,
         Action<long, CPU, EmuEnvironment> saveSnapshot = null, long snapshotInterval = SnapshotInterval,
-        CancellationToken stop = default)
+        CancellationToken stop = default, EmulationControl control = null)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(snapshotInterval);
         output ??= Console.Out;
@@ -24,6 +24,7 @@ internal static class EmulationRunner
         if (env.NextIrq == 0) env.NextIrq = count + IrqPeriod;
         long nextSnapshot = count + snapshotInterval;
         long nextService = count + IrqPeriod;
+        var timerPending = false;
         while (count < options.Limit)
         {
             // ホストから注入されたスキャンコードを 8042 の出力バッファへ移し、表示ウィンドウが
@@ -32,6 +33,7 @@ internal static class EmulationRunner
             {
                 nextService = count + IrqPeriod;
                 env.Keyboard.Pump();
+                control?.WaitIfPaused(cpu, count, stop);
                 if (stop.IsCancellationRequested)
                 {
                     output.WriteLine($"stopped by request at {cpu.cs:x4}:{cpu.eip:x8} (instr {count})");
@@ -43,9 +45,16 @@ internal static class EmulationRunner
             // いなければ、PIC のベクタベース+0 へ配送する(リアルモードは IVT 経由で
             // SeaBIOS の handle_08 が BDA ティックを進め、プロテクトモードは IDT 経由で
             // Linux の jiffies が進む)。IDT 未設定(limit 不足)の間は配送しない。
+            // 周期が来たら要求を立て、配送できる状態(IF=1 など)になるまで保留する。実機の 8259 と同じく
+            // 要求は消えないので、IF=1 の区間が短いポーリングループ(SeaBIOS の sti; nop; cli)でも
+            // ティックが進む。
             if (!options.NoIrq && count >= env.NextIrq)
             {
                 env.NextIrq = count + IrqPeriod;
+                timerPending = true;
+            }
+            if (timerPending)
+            {
                 var vec = env.PicMasterBase + 0;
                 // 配送条件: IF=1、IRQ0 が PIC でマスクされておらず、かつ前回の IRQ0 が
                 // まだ処理中(in-service)でないこと。in-service は実機 8259 と同じく EOI で降りる。
@@ -66,6 +75,7 @@ internal static class EmulationRunner
                         {
                             cpu = irq.cpu;
                             env.PicMasterIsr |= 1; // IRQ0 を in-service にする(EOI まで再配送しない)
+                            timerPending = false;
                         }
                     }
                     catch (PageFaultException pf)
@@ -212,6 +222,7 @@ internal static class EmulationRunner
         if (!options.Slow && count > 0)
             output.WriteLine($"fast-path coverage: {fastCount:N0}/{count:N0} ({100.0 * fastCount / count:F2}%)");
         diagnostics.ReportStop(count);
+        control?.Stopped(cpu, count);
         return count;
     }
 }

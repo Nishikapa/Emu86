@@ -38,8 +38,9 @@ public class PciHost
     public void LoadState(BinaryReader reader)
     {
         Address = reader.ReadUInt32();
+        // 旧スナップショットに無いファンクション(後から追加したデバイス)は初期状態のままにする。
         var count = SnapshotStore.ReadCount(reader, 256);
-        if (count != cfg.Count) throw new InvalidDataException("PCI topology differs from snapshot");
+        if (count > cfg.Count) throw new InvalidDataException("PCI topology differs from snapshot");
         var restored = new HashSet<int>();
         for (var index = 0; index < count; index++)
         {
@@ -94,6 +95,26 @@ public class PciHost
         // SMM は未実装なので、待ちに入ると永久にループするため最初から立てておく。
         BinaryPrimitives.WriteUInt32LittleEndian(pm.AsSpan(0x58), 0x02000000);
         cfg[(1 << 3) | 3] = pm;
+        // 00:02.0 VGA 互換ディスプレイ(QEMU の標準 VGA と同じ 1234:1111)。SeaBIOS はこのクラスのデバイスを
+        // 見つけると拡張 ROM BAR(0x30)から VGA BIOS を 0xC0000 へ取り込んで実行し、画面出力を有効にする。
+        // ROM は VgaBiosStub(64KB 窓、実体は 2KB)。メモリ BAR は持たない(vga.sys は旧来の VGA 窓を使う)。
+        cfg[VgaKey] = Make(0x1234, 0x1111, baseClass: 0x03, subClass: 0x00, progIf: 0x00, header: 0x00);
+        barMask[(VgaKey, 0x30)] = 0xFFFF0001; // 64KB、bit0 = ROM デコード有効
+    }
+
+    public const int VgaKey = 2 << 3;
+
+    // VGA の拡張 ROM BAR が有効なら、その 64KB 窓の物理アドレス範囲に VgaBiosStub.Rom を見せる。
+    public bool RomContains(uint physical)
+    {
+        var bar = BinaryPrimitives.ReadUInt32LittleEndian(cfg[VgaKey].AsSpan(0x30));
+        return (bar & 1) != 0 && physical - (bar & 0xFFFF0000) < 0x10000;
+    }
+
+    public byte RomRead(uint physical)
+    {
+        var offset = physical & 0xFFFF;
+        return offset < VgaBiosStub.Rom.Length ? VgaBiosStub.Rom[offset] : (byte)0xFF;
     }
 
     static byte[] Make(ushort vendor, ushort device, byte baseClass, byte subClass, byte progIf, byte header)

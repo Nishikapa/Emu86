@@ -166,9 +166,15 @@ internal sealed class RunDiagnostics
             output.WriteLine("[first 30]");
             foreach (var entry in env.IntLog.Take(30))
                 output.WriteLine("  " + entry);
-            output.WriteLine("[last 4]");
-            foreach (var entry in env.IntLog.TakeLast(4))
+            output.WriteLine($"[last {options.IntLogLast}]");
+            foreach (var entry in env.IntLog.TakeLast(options.IntLogLast))
                 output.WriteLine("  " + entry);
+            if (env.IntLogV86.Count > 0)
+            {
+                output.WriteLine($"--- deliveries from virtual-8086 mode (total {env.IntLogV86.Count}) ---");
+                foreach (var entry in env.IntLogV86.TakeLast(200))
+                    output.WriteLine("  " + entry);
+            }
         }
         if (options.BranchHistory)
         {
