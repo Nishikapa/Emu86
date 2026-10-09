@@ -24,14 +24,15 @@ static class RunnerTests
         Equal("snapshot.snap", defaults.SnapshotPath, "default snapshot");
         Equal(true, defaults.Diagnostics.Trace, "default trace");
         Equal(false, defaults.Resume, "default cold boot");
-        string[] arguments = ["--resume", "--slow", "--noirq", "--limit", "123", "--snapshot", "other.snap",
+        string[] arguments = ["--resume", "--slow", "--noirq", "--window", "--limit", "123", "--snapshot", "other.snap",
             "--disk", "other.vhd", "--overlay", "other.avhdx", "--dumplba", "42", "2",
             "--trace-all", "--regtrace", "--notrace", "--brhist", "--esptrap", "--pftrap",
-            "--atalog", "--pcilog", "--piclog", "--intlog", "--upflog", "321",
+            "--atalog", "--pcilog", "--piclog", "--vgalog", "--intlog", "--upflog", "321",
             "--breakeip", "0x80000000", "--breakeax", "FFFFFFFF", "--breakat", "44", "--watchval", "0",
             "--entrylog", "10", "20", "--breakrange", "30", "40", "--wlog", "50", "60", "--watch", "70", "80"];
         var parsed = RunOptions.Parse(arguments);
-        Equal(true, parsed.Resume && parsed.Slow && parsed.NoIrq, "run flags");
+        Equal(true, parsed.Resume && parsed.Slow && parsed.NoIrq && parsed.Window, "run flags");
+        Equal(false, defaults.Window, "default headless");
         Equal(123L, parsed.Limit, "limit");
         Equal("other.snap", parsed.SnapshotPath, "snapshot path");
         Equal("other.vhd", parsed.DiskPath, "base path");
@@ -39,7 +40,7 @@ static class RunnerTests
         Equal((42L, 2), parsed.DumpLba.Value, "LBA decimal");
         Equal(true, parsed.Diagnostics.Trace && parsed.Diagnostics.RegTrace, "trace-all wins");
         Equal(true, parsed.Diagnostics.BranchHistory && parsed.Diagnostics.EspTrap && parsed.Diagnostics.PfTrap, "traps");
-        Equal(true, parsed.Diagnostics.AtaLog && parsed.Diagnostics.PciLog && parsed.Diagnostics.PicLog && parsed.Diagnostics.IntLog, "device logs");
+        Equal(true, parsed.Diagnostics.AtaLog && parsed.Diagnostics.PciLog && parsed.Diagnostics.PicLog && parsed.Diagnostics.VgaLog && parsed.Diagnostics.IntLog, "device logs");
         Equal(321L, parsed.Diagnostics.UserPageFaultMin.Value, "optional minimum");
         Equal(0x80000000u, parsed.Diagnostics.BreakEip, "hex prefix");
         Equal(uint.MaxValue, parsed.Diagnostics.BreakEax.Value, "hex maximum");

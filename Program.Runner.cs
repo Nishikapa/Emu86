@@ -4,6 +4,7 @@ namespace Emu86;
 
 static partial class Program
 {
+    [STAThread]
     static int Main(string[] args)
     {
         try
@@ -36,8 +37,12 @@ static partial class Program
                 ? new StreamWriter(new FileStream("trace.log", count > 0 ? FileMode.Append : FileMode.Create,
                     FileAccess.Write, FileShare.Read, 1 << 20))
                 : null;
-            EmulationRunner.Run(options, env, cpu, count, trace,
-                saveSnapshot: (savedCount, savedCpu, savedEnv) => SnapshotStore.Save(options.SnapshotPath, savedCount, savedCpu, savedEnv));
+            void Save(long savedCount, CPU savedCpu, EmuEnvironment savedEnv) =>
+                SnapshotStore.Save(options.SnapshotPath, savedCount, savedCpu, savedEnv);
+            if (options.Window)
+                RunWithWindow(options, env, cpu, count, trace, Save);
+            else
+                EmulationRunner.Run(options, env, cpu, count, trace, saveSnapshot: Save);
             return 0;
         }
         catch (ArgumentException exception)
@@ -51,6 +56,38 @@ static partial class Program
             Console.Error.WriteLine(exception.Message);
             return 1;
         }
+    }
+
+    // 表示ウィンドウを UI スレッド(このスレッド)で開き、エミュレーションは別スレッドで回す。
+    // ウィンドウを閉じると実行ループへ停止を要求し、通常終了と同じくスナップショットを保存してから戻る。
+    // 実行が先に終わった場合(命令数上限・停止診断)はウィンドウを残し、閉じられるまで最後の画面を表示する。
+    static void RunWithWindow(RunOptions options, EmuEnvironment env, CPU cpu, long count, TextWriter trace,
+        Action<long, CPU, EmuEnvironment> saveSnapshot)
+    {
+        System.Windows.Forms.Application.SetHighDpiMode(System.Windows.Forms.HighDpiMode.PerMonitorV2);
+        System.Windows.Forms.Application.EnableVisualStyles();
+        using var stop = new CancellationTokenSource();
+        using var window = new VgaWindow(env);
+        Exception failure = null;
+        var worker = new Thread(() =>
+        {
+            try
+            {
+                EmulationRunner.Run(options, env, cpu, count, trace, saveSnapshot: saveSnapshot, stop: stop.Token);
+                window.EmulationStopped("stopped");
+            }
+            catch (Exception exception)
+            {
+                failure = exception;
+                window.EmulationStopped("error: " + exception.Message);
+            }
+        }) { IsBackground = true, Name = "emulation" };
+        window.FormClosing += (_, _) => stop.Cancel();
+        worker.Start();
+        System.Windows.Forms.Application.Run(window);
+        stop.Cancel();
+        worker.Join();
+        if (failure != null) throw failure;
     }
 
     internal static void DumpSectors(string path, long start, int count)

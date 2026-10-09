@@ -29,6 +29,7 @@ internal sealed class RunDiagnostics
         env.Pci.Log = options.PciLog;
         env.Pci.Caller = () => WindowsDiagnostics.Caller(env, cpu);
         env.PicLog = options.PicLog;
+        env.Vga.Log = options.VgaLog;
         env.IntLog = options.IntLog ? [] : null;
         env.WriteLog = options.WriteLog != null ? [] : null;
         env.WLogLo = options.WriteLog?.Lo ?? 0;

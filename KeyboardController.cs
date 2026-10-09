@@ -7,6 +7,27 @@ internal sealed class KeyboardController
     public byte CommandByte = 0x45;
     public int PendingCommand;
 
+    // ホスト(表示ウィンドウ等、別スレッド)から注入されるスキャンコード(セット 1、E0 プレフィックス込み)。
+    // 実行スレッドが Pump で 1 バイトずつ出力バッファへ移す。スナップショットには含めない。
+    public readonly System.Collections.Concurrent.ConcurrentQueue<byte> Injected = new();
+
+    public void Inject(params byte[] scancodes)
+    {
+        foreach (var scancode in scancodes) Injected.Enqueue(scancode);
+    }
+
+    // 出力バッファが空のときだけ次のスキャンコードを移す(実機のキーボードも 8042 の OBF が
+    // 空くまで次のバイトを送らない)。移したら true。
+    public bool Pump()
+    {
+        if (Output.Count > 0 || !Injected.TryDequeue(out var scancode)) return false;
+        Output.Enqueue(scancode);
+        return true;
+    }
+
+    // IRQ1 を上げるべき状態: コマンドバイトでキーボード割り込みが許可され、出力バッファにデータがある。
+    public bool IrqAsserted => (CommandByte & 0x01) != 0 && Output.Count > 0;
+
     public byte Read(int port)
     {
         switch (port)

@@ -19,6 +19,7 @@ internal sealed class DiagnosticOptions
     public bool AtaLog { get; set; }
     public bool PciLog { get; set; }
     public bool PicLog { get; set; }
+    public bool VgaLog { get; set; }
     public bool IntLog { get; set; }
     public uint? WatchValue { get; set; }
     public uint? BreakEax { get; set; }
@@ -38,6 +39,7 @@ internal sealed class RunOptions
     public bool Resume { get; private set; }
     public bool Slow { get; private set; }
     public bool NoIrq { get; private set; }
+    public bool Window { get; private set; }
     public long Limit { get; private set; } = InstructionLimit;
     public string SnapshotPath { get; private set; } = "snapshot.snap";
     public string DiskPath { get; private set; }
@@ -84,6 +86,7 @@ internal sealed class RunOptions
                 case "--resume": options.Resume = true; break;
                 case "--slow": options.Slow = true; break;
                 case "--noirq": options.NoIrq = true; break;
+                case "--window": options.Window = true; break;
                 case "--limit": options.Limit = Decimal(); break;
                 case "--snapshot": options.SnapshotPath = Value(); break;
                 case "--disk": options.DiskPath = Value(); break;
@@ -104,6 +107,7 @@ internal sealed class RunOptions
                 case "--atalog": diagnostics.AtaLog = true; break;
                 case "--pcilog": diagnostics.PciLog = true; break;
                 case "--piclog": diagnostics.PicLog = true; break;
+                case "--vgalog": diagnostics.VgaLog = true; break;
                 case "--intlog": diagnostics.IntLog = true; break;
                 case "--watchval": diagnostics.WatchValue = Hex(); break;
                 case "--breakeax": diagnostics.BreakEax = Hex(); break;
@@ -125,11 +129,12 @@ internal sealed class RunOptions
     }
 
     public const string Usage = """
-        Usage: Emu86 [--resume] [--snapshot path] [--limit count] [--slow] [--noirq]
+        Usage: Emu86 [--resume] [--snapshot path] [--limit count] [--slow] [--noirq] [--window]
+          --window                      Show the VGA display in a 640x480 window (keyboard input goes to the guest)
           --disk path [--overlay path]   Select a base image and writable overlay
           --dumplba start count         Dump sectors from the existing overlay to lba_dump.bin
           --trace-all --regtrace --notrace --brhist --esptrap --pftrap
-          --atalog --pcilog --piclog --intlog --upflog [minCount]
+          --atalog --pcilog --piclog --vgalog --intlog --upflog [minCount]
           --breakeip hex [--breakeax hex] --breakat count --watchval hex
           --entrylog lo hi --breakrange lo hi --wlog lo hi --watch lo hi
         Counts/LBAs are decimal; addresses and range bounds are hexadecimal (optional 0x).

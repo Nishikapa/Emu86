@@ -8,6 +8,7 @@ public partial class EmuEnvironment
     internal PitDevice Pit { get; } = new();
     internal KeyboardController Keyboard { get; } = new();
     internal AcpiPmDevice Acpi { get; } = new();
+    public VgaDevice Vga { get; } = new();
 
     public byte[] Cmos { get => CmosRtc.Data; set => CmosRtc.Data = value; }
     public int CmosIndex { get => CmosRtc.Index; set => CmosRtc.Index = value; }

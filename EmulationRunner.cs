@@ -9,7 +9,8 @@ internal static class EmulationRunner
 
     public static long Run(RunOptions options, EmuEnvironment env, CPU cpu, long count = 0,
         TextWriter trace = null, TextWriter output = null, TextWriter error = null,
-        Action<long, CPU, EmuEnvironment> saveSnapshot = null, long snapshotInterval = SnapshotInterval)
+        Action<long, CPU, EmuEnvironment> saveSnapshot = null, long snapshotInterval = SnapshotInterval,
+        CancellationToken stop = default)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(snapshotInterval);
         output ??= Console.Out;
@@ -22,8 +23,22 @@ internal static class EmulationRunner
         long fastCount = 0;
         if (env.NextIrq == 0) env.NextIrq = count + IrqPeriod;
         long nextSnapshot = count + snapshotInterval;
+        long nextService = count + IrqPeriod;
         while (count < options.Limit)
         {
+            // ホストから注入されたスキャンコードを 8042 の出力バッファへ移し、表示ウィンドウが
+            // 閉じられたなどの停止要求もタイマ周期で確認する(命令ごとに見るほどの精度は要らない)。
+            if (count >= nextService)
+            {
+                nextService = count + IrqPeriod;
+                env.Keyboard.Pump();
+                if (stop.IsCancellationRequested)
+                {
+                    output.WriteLine($"stopped by request at {cpu.cs:x4}:{cpu.eip:x8} (instr {count})");
+                    break;
+                }
+            }
+
             // 仮想タイマ割り込み(IRQ0): 一定命令数ごとに、IF=1 かつ PIC でマスクされて
             // いなければ、PIC のベクタベース+0 へ配送する(リアルモードは IVT 経由で
             // SeaBIOS の handle_08 が BDA ティックを進め、プロテクトモードは IDT 経由で
@@ -56,6 +71,31 @@ internal static class EmulationRunner
                     catch (PageFaultException pf)
                     {
                         output.WriteLine($"FAULT during IRQ delivery: lin={pf.Linear:x8} err={pf.ErrorCode:x} at {cpu.cs:x4}:{cpu.eip:x8} esp={cpu.esp:x8} (instr {count})");
+                        break;
+                    }
+                }
+            }
+
+            // キーボード(IRQ1)の配送。8042 の出力バッファにデータがあり、コマンドバイトで割り込みが
+            // 許可されていれば、IRQ0 と同じ条件(IF・マスク・in-service、保護モードでは IDT の準備)で
+            // ベクタベース+1 へ配送する。ハンドラがポート 0x60 を読んでバッファが空になれば要求は下がる。
+            if (!options.NoIrq && env.Keyboard.IrqAsserted && cpu.jf && (env.PicMasterMask & 2) == 0 && (env.PicMasterIsr & 2) == 0)
+            {
+                var vec = env.PicMasterBase + 1;
+                if (!cpu.pe || (env.PicMasterBase >= 0x20 && cpu.idt_limit >= (vec + 1) * 8 - 1))
+                {
+                    try
+                    {
+                        var irq = executor.Execute(env, cpu, Interrupt(vec));
+                        if (irq.IsSuccess)
+                        {
+                            cpu = irq.cpu;
+                            env.PicMasterIsr |= 2;
+                        }
+                    }
+                    catch (PageFaultException pf)
+                    {
+                        output.WriteLine($"FAULT during keyboard IRQ delivery: lin={pf.Linear:x8} err={pf.ErrorCode:x} at {cpu.cs:x4}:{cpu.eip:x8} (instr {count})");
                         break;
                     }
                 }
@@ -101,7 +141,11 @@ internal static class EmulationRunner
                 // まず高速コアで 1 命令実行し、未対応の命令だけモナド版へフォールバックする。
                 var result = executor.Step(env, cpu);
                 if (executor.UsedFastPath) fastCount++;
-                if (!result.IsSuccess)
+                if (!result.IsSuccess && VgaBiosStub.TryService(env, cpu))
+                {
+                    // VGA BIOS スタブ(C000:0060 の UD2)のサービス呼び出し。C# 側で処理済み。
+                }
+                else if (!result.IsSuccess)
                 {
                     // 未定義/未対応命令。プロテクトモードで IDT が整っていれば #UD(ベクタ 6)として
                     // 命令開始時の状態から配送する(Virtual PC のハイパーコール命令 0F C7 C8 のように、

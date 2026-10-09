@@ -361,3 +361,35 @@ rm sample.avhdx; ./bin/Release/net10.0/Emu86.exe --notrace --entrylog 7c90e47c 7
   `VhdxBatLayout`、`tests/Emu86.Tests` 追加、PF 配送後の上限判定修正)も検証: テストスイート全 7 種 PASS、
   高速コア・`--slow` とも 10M 命令トレースが eeeae9f と一致、旧ビルド製 v7 スナップショット(差分ディスク内包)からの再開も
   同じ停止位置(77dfd771@5.9B)、Windows 冷起動 56 億命令は 426 秒(1〜5B 区間 13.1M 命令/秒)で同じ入力待ち、新スナップショットの再開も正常。
+
+## VGA 表示ウィンドウと V86 モード(2026-10-09)
+`--window` で VGA サイズ(640×480)の WinForms ウィンドウを開き、VGA(`VgaDevice`)の内容を描く。実装と、それに伴って
+見つかった XP ブートの退行と対処の記録。
+- **VGA デバイス**: 0xA0000-0xBFFFF を 4 プレーン × 64KB の VRAM に振り分け(奇偶/プレーナ/チェイン 4、書き込みモード 0〜3、
+  読み出しモード 0/1、ラッチ)、ポート 3B4/3B5/3BA、3C0-3CF、3D4/3D5/3DA(LPT の 3BC-3BF は従来どおり素通し)。
+  初期状態は mode 3 相当。描画は CRTC/Attribute/DAC から解像度と色を決める(テキスト 640×400、mode 12h 640×480、
+  mode 13h 320×200)。スナップショットは v8(デバイス状態の後ろに VGA 状態)。
+- **キーボード**: ウィンドウの WM_KEYDOWN/UP のハードウェアスキャンコード(セット 1)を `KeyboardController.Inject` に積み、
+  実行スレッドがタイマ周期で 1 バイトずつ 8042 出力バッファへ移し、コマンドバイトで許可されていれば IRQ1 を配送する。
+- **退行**: VGA のレジスタが読み返せるようになると bootvid の `VgaIsPresent` が真になり、`VidResetDisplay` →
+  `HalResetDisplay` が **V86 モードで INT 10h(AX=0012h)** を呼ぶ。エミュレータに V86 が無く、VM=1 のまま
+  `IRETD` が通常復帰を行ったため、1 億 400 万命令で `KiTrap0D`/`Kei386EoiHelper` が V86 フレームと誤判定して壊れた
+  (`test [esp+70h], 20000h` が真 → 通常 `iretd` → ESP が切り替わらず `_global_unwind2` の `ret` が不正番地へ)。
+  ポートのフックだけを外すと従来どおり通過することで切り分けた。
+- **V86 モード**: `cpu.vm`(EFLAGS bit17)と `cpu.cpl`(V86 なら 3)を追加。V86 ではセグメントロードを セレクタ*16 に
+  (`LoadSReg`)、割り込み/例外は TSS の SS0:ESP0 へ切り替えた上で GS/FS/DS/ES/SS/ESP を積み VM を落とし
+  DS/ES/FS/GS を null に(`SwitchToInnerStack`)、ring0 の IRETD で VM=1 を積んでいれば ESP/SS/ES/DS/FS/GS を pop して
+  V86 へ入る(`IretToV86`)。V86 内の `INT n` は IOPL<3 なら #GP(0)、ゲート DPL<3 なら #GP(n*8+2)で反射する
+  (XP の HAL は `HalpTrap0D` でこれを受け IVT 経由で INT を再現する)。V86 内の 16 ビット IRET は IOPL を保つ。
+  POPF の CPL 判定を `cpl` に揃え、高速コアの POPF は CPL>0 ならモナド版へ委ねる(従来は ring3 でも無条件に書いていた)。
+  落とし穴: `InterruptProtected` で VM を落とした後に `cpu.cpl` を評価すると 0 になりスタック切替が起きない
+  (LINQ の遅延評価)。`let cpl` で先に評価する。
+- **VGA BIOS スタブ**: XP の bootvid/vga.sys はモード設定を BIOS(INT 10h)に任せるので、VGA BIOS 無しでは mode 12h に
+  ならず A0000 への描画が捨てられる。同梱の SeaBIOS(QEMU 向け)はレガシー ROM 領域を走査しないため、INT 19h(ブート)時に
+  2KB のオプション ROM 形式スタブを 0xC0000 へ置き IVT 10h を C000:0060 の UD2 に向ける。ランナーが UD2 を
+  `VgaBiosStub.TryService` で受け、モード設定(3/12h/13h)・文字出力・カーソル・情報取得を C# で処理する。
+  リアルモード(SeaBIOS/NTLDR)でも、HAL(CS=2000)・vga.sys(CS=1000、ntvdm 形式)の V86 呼び出しでも同じ経路。
+- **結果**: 冷起動 60 億命令をバグチェック無しで通過(従来と同じ setup.exe の入力待ち)。ウィンドウには
+  1 億 400 万命令付近から Windows XP のブートロゴ(640×480×16 色)が出る。
+- 既知の制限: マウス未実装、VESA 非対応(4Fh は失敗を返す)、フォント転送(11h)未対応(VRAM にフォントが無ければホストの等幅
+  フォントで描く)、V86 の IOPL<3 のときの PUSHF/POPF/CLI/STI/IRET の #GP 化は未実装(NT は IOPL=3 で呼ぶ)。
