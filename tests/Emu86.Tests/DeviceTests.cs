@@ -109,7 +109,7 @@ static class DeviceTests
             writer.Write(diagnostics.ToString().Replace("\r\n", "\n"));
             writer.Flush();
             var hash = Convert.ToHexString(SHA256.HashData(stream.ToArray()));
-            Equal("0300ABC500A73E351996F8F8123733002B9A4B844D53348CAF914A718F4B9C4E", hash, "device behavior (PCI VGA device added 2026-10-09)");
+            Equal("D6320CEA83449111BFE2D69B4D486D712D7383DBC2162D3A60F9361F3E0E4E42", hash, "device behavior (PCI VGA 2026-10-09, PS/2 mouse and 8042 A7/A8/FE 2026-10-10)");
             Console.WriteLine($"Device compatibility SHA256={hash}");
         }
         finally

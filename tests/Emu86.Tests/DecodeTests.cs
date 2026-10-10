@@ -63,21 +63,22 @@ static class DecodeTests
             }
             else
             {
-                uint[] sums = [(uint)(cpu.bx + cpu.si), (uint)(cpu.bx + cpu.di), (uint)(cpu.bp + cpu.si),
-                    (uint)(cpu.bp + cpu.di), cpu.si, cpu.di, cpu.bp, cpu.bx];
+                // 16 ビットアドレッシングの実効アドレスは 16 ビットで折り返す(レジスタ和も変位の加算も)。
+                uint[] sums = [(ushort)(cpu.bx + cpu.si), (ushort)(cpu.bx + cpu.di), (ushort)(cpu.bp + cpu.si),
+                    (ushort)(cpu.bp + cpu.di), cpu.si, cpu.di, cpu.bp, cpu.bx];
                 var noBase = mod == 0 && register == 6;
                 offset = noBase ? 0 : sums[register];
                 stack = !noBase && register is 2 or 3 or 6;
                 if (mod == 1)
                 {
                     env.OneMegaMemory_[length++] = (byte)displacement;
-                    offset = unchecked(offset + (uint)(sbyte)displacement);
+                    offset = (ushort)(offset + (uint)(sbyte)displacement);
                 }
                 else if (mod == 2 || noBase)
                 {
                     BitConverter.GetBytes(displacement).CopyTo(env.OneMegaMemory_, length);
                     length += 2;
-                    offset += (ushort)displacement;
+                    offset = (ushort)(offset + (ushort)displacement);
                 }
             }
             var result = GetMemOrRegAddr(mod, register)(env, cpu, null);

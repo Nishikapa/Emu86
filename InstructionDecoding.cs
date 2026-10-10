@@ -13,13 +13,14 @@ static public partial class Ext
         if (mod == 0 && rm == 6) // [d16]
             return (true, EnvGetMemoryData16(env, instructionAddress), segment_base, 2);
 
-        // rm ごとのレジスタ組み合わせ(BP を含む形は既定セグメントが SS)
+        // rm ごとのレジスタ組み合わせ(BP を含む形は既定セグメントが SS)。
+        // 16 ビットアドレッシングの実効アドレスは 16 ビットで折り返す(BP に負の変位を足して桁借りする場合など)。
         var regsum = rm switch
         {
-            0 => (uint)(cpu.bx + cpu.si),
-            1 => (uint)(cpu.bx + cpu.di),
-            2 => (uint)(cpu.bp + cpu.si),
-            3 => (uint)(cpu.bp + cpu.di),
+            0 => (ushort)(cpu.bx + cpu.si),
+            1 => (ushort)(cpu.bx + cpu.di),
+            2 => (ushort)(cpu.bp + cpu.si),
+            3 => (ushort)(cpu.bp + cpu.di),
             4 => cpu.si,
             5 => cpu.di,
             6 => cpu.bp,
@@ -30,8 +31,8 @@ static public partial class Ext
         return mod switch
         {
             0 => (true, regsum, segBase, 0),
-            1 => (true, (uint)(regsum + (sbyte)EnvGetMemoryData8(env, instructionAddress)), segBase, 1),
-            _ => (true, regsum + EnvGetMemoryData16(env, instructionAddress), segBase, 2),
+            1 => (true, (ushort)(regsum + (sbyte)EnvGetMemoryData8(env, instructionAddress)), segBase, 1),
+            _ => (true, (ushort)(regsum + EnvGetMemoryData16(env, instructionAddress)), segBase, 2),
         };
     }
     // ModRM 32ビットアドレッシング(SIB 対応)。実効オフセット・セグメントベース・消費 disp バイト数を返す。

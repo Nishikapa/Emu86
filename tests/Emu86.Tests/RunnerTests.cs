@@ -24,7 +24,7 @@ static class RunnerTests
         Equal("snapshot.snap", defaults.SnapshotPath, "default snapshot");
         Equal(true, defaults.Diagnostics.Trace, "default trace");
         Equal(false, defaults.Resume, "default cold boot");
-        string[] arguments = ["--resume", "--slow", "--noirq", "--window", "--limit", "123", "--snapshot", "other.snap",
+        string[] arguments = ["--resume", "--slow", "--noirq", "--window", "--boot-debug", "--com1", "pipe-a", "--com2", "pipe-b", "--limit", "123", "--snapshot", "other.snap",
             "--disk", "other.vhd", "--overlay", "other.avhdx", "--dumplba", "42", "2",
             "--trace-all", "--regtrace", "--notrace", "--brhist", "--esptrap", "--pftrap",
             "--atalog", "--pcilog", "--piclog", "--vgalog", "--intlog", "--upflog", "321",
@@ -33,6 +33,8 @@ static class RunnerTests
         var parsed = RunOptions.Parse(arguments);
         Equal(true, parsed.Resume && parsed.Slow && parsed.NoIrq && parsed.Window, "run flags");
         Equal(false, defaults.Window, "default headless");
+        Equal(true, parsed.BootDebug && parsed.Com1Pipe == "pipe-a" && parsed.Com2Pipe == "pipe-b", "serial and boot-debug options");
+        Equal(true, defaults.Com1Pipe == null && defaults.Com2Pipe == null && !defaults.BootDebug, "serial defaults");
         Equal(123L, parsed.Limit, "limit");
         Equal("other.snap", parsed.SnapshotPath, "snapshot path");
         Equal("other.vhd", parsed.DiskPath, "base path");
@@ -59,7 +61,7 @@ static class RunnerTests
             ["--bogus"], ["--limit"], ["--limit", "--slow"], ["--limit", "-1"], ["--limit", "abc"],
             ["--limit", "9223372036854775808"], ["--snapshot", ""], ["--breakeip", "100000000"],
             ["--breakeip", "-1"], ["--watch", "20"], ["--watch", "20", "10"], ["--watch", "10", "10"],
-            ["--upflog", "oops"], ["--intlog", "0"], ["--intlog", "oops"], ["--dumplba", "1"], ["--dumplba", "0", "0"],
+            ["--upflog", "oops"], ["--intlog", "0"], ["--intlog", "oops"], ["--com1"], ["--com2", "--slow"], ["--dumplba", "1"], ["--dumplba", "0", "0"],
             ["--dumplba", "9223372036854775807", "2"], ["--dumplba", "0", "2147483648"],
             ["--overlay", "overlay.avhdx"]
         ];
@@ -272,6 +274,17 @@ static class RunnerTests
             SnapshotStore.Save("resume.snap", 10, new CPU { eip = 0x100, code32 = true, stack32 = true, esp = 0x8000 }, env);
             var resumeResult = Run("--resume", "--snapshot", "resume.snap", "--limit", "11", "--notrace");
             Equal(0, resumeResult, "CLI resume success: " + error);
+            // ゲストのリセット要求で環境を作り直し、リセットベクタから続行して上限で終わる。
+            using var resetEnv = new EmuEnvironment();
+            byte[] reset = [0xB0, 0xFE, 0xE6, 0x64, 0xEB, 0xFE];
+            reset.CopyTo(resetEnv.OneMegaMemory_, 0x100);
+            SnapshotStore.Save("reset.snap", 20, new CPU { eip = 0x100, code32 = true, stack32 = true, esp = 0x8000 }, resetEnv);
+            Equal(0, Run("--resume", "--snapshot", "reset.snap", "--limit", "20100", "--notrace", "--noirq"), "CLI reset loop exit code: " + error);
+            Equal(true, error.ToString().Contains("[system] reset at instruction"), "CLI reports the reset");
+            using var afterReset = new EmuEnvironment();
+            var resetResult = SnapshotStore.Load("reset.snap", afterReset);
+            Equal(20100L, resetResult.count, "count continues across the reset");
+            Equal(true, resetResult.cpu.cs is 0xF000 or 0x0008, "restarted from the reset vector (SeaBIOS may have entered protected mode): " + resetResult.cpu.cs.ToString("x"));
             using var restored = new EmuEnvironment();
             var result = SnapshotStore.Load("resume.snap", restored);
             Equal(11L, result.count, "CLI saves final count");

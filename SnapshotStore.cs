@@ -6,7 +6,7 @@ namespace Emu86;
 public static class SnapshotStore
 {
     const string Magic = "EMU86SNP";
-    const int Version = 8;
+    const int Version = 10;
     const int HashSize = 32;
 
     public static void Save(string path, long count, CPU cpu, EmuEnvironment env)
@@ -26,6 +26,9 @@ public static class SnapshotStore
                 cpu.SaveRuntimeState(writer);
                 env.SaveDeviceState(writer);
                 env.Vga.SaveState(writer);
+                env.Mouse.SaveState(writer);
+                env.Com1.SaveState(writer);
+                env.Com2.SaveState(writer);
                 if (env.Ata != null)
                 {
                     var diskPath = env.Ata.DiskPath ?? throw new InvalidOperationException("ATA disk is not attached");
@@ -81,6 +84,8 @@ public static class SnapshotStore
             env.LoadDeviceState(reader);
             if (version >= 8) env.Vga.LoadState(reader);
             else env.Vga.Reset();
+            if (version >= 9) env.Mouse.LoadState(reader);
+            if (version >= 10) { env.Com1.LoadState(reader); env.Com2.LoadState(reader); }
             var diskLength = reader.ReadInt64();
             if (diskLength < 0 || diskLength != stream.Length - HashSize - stream.Position
                 || (diskLength > 0) != (env.Ata != null))

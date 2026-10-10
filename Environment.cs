@@ -880,6 +880,10 @@ static public partial class Ext
                 return env.Keyboard.Read(port & 0xFFFF);
             case 0x3B4 or 0x3B5 or 0x3BA or (>= 0x3C0 and <= 0x3CF) or 0x3D4 or 0x3D5 or 0x3DA:
                 return env.Vga.ReadPort(port & 0xFFFF, env.Tsc);
+            case >= 0x3F8 and <= 0x3FF:
+                return env.Com1.Read((port & 0xFFFF) - 0x3F8);
+            case >= 0x2F8 and <= 0x2FF:
+                return env.Com2.Read((port & 0xFFFF) - 0x2F8);
             case 0x1F0 when env.Ata != null:
                 return (byte)env.Ata.ReadData(1);
             case (>= 0x1F1 and <= 0x1F7) or 0x3F6 when env.Ata != null:
@@ -918,6 +922,12 @@ static public partial class Ext
             return;
         }
         var p = port & 0xFFFF;
+        if (p == 0xCF9 && size == 1)
+        {
+            // PIIX4 リセット制御レジスタ(バイトアクセス)。CONFIG_ADDRESS のバイト 1 とは区別する。
+            EnvOutPort(env, p, (byte)val);
+            return;
+        }
         if (p >= 0xCF8 && p <= 0xCFB)
         {
             // CONFIG_ADDRESS ラッチをバイト位置に合わせて更新(通常は 0xCF8 への 32bit 書き込み)。
@@ -964,6 +974,10 @@ static public partial class Ext
                 env.Acpi.Write(port, val);
                 env.IoPort[port] = val;
                 break;
+            case 0xCF9: // PIIX4 リセット制御: bit2 でシステムリセット(bit1 でフル/ハードリセットの区別、どちらも再起動)
+                if ((val & 0x04) != 0) env.ResetRequested = true;
+                env.IoPort[port] = val;
+                break;
             case (>= 0xB000 and <= 0xB03F) or (>= 0xAFE0 and <= 0xAFE3):
                 env.Acpi.Write(port, val);
                 break;
@@ -976,6 +990,12 @@ static public partial class Ext
                 break;
             case 0x3B4 or 0x3B5 or 0x3BA or (>= 0x3C0 and <= 0x3CF) or 0x3D4 or 0x3D5 or 0x3DA:
                 env.Vga.WritePort(port, val);
+                break;
+            case >= 0x3F8 and <= 0x3FF:
+                env.Com1.Write(port - 0x3F8, val);
+                break;
+            case >= 0x2F8 and <= 0x2FF:
+                env.Com2.Write(port - 0x2F8, val);
                 break;
             case 0x1F0 when env.Ata != null:
                 env.Ata.WriteData(1, val);
@@ -1129,7 +1149,12 @@ public partial class EmuEnvironment : IDisposable
         Ata = ata;
     }
 
-    public void Dispose() => Ata?.Dispose();
+    public void Dispose()
+    {
+        Ata?.Dispose();
+        Com1.Host?.Dispose(); Com1.Host = null;
+        Com2.Host?.Dispose(); Com2.Host = null;
+    }
 
     // プライマリ ATA チャネルのマスタドライブ(未接続なら null)。
     public AtaDevice Ata;
@@ -1166,6 +1191,9 @@ public partial class EmuEnvironment : IDisposable
 
     // タイムスタンプカウンタの代用(Runner が毎命令、実行済み命令数を書き込む)。
     public ulong Tsc;
+
+    // システムリセット要求(ポート 0xCF9 または 8042 経由)。ランナーが見て実行を抜ける。スナップショットには含めない。
+    public bool ResetRequested;
 
     // MSR の汎用ストア(RDMSR/WRMSR)。未書き込みは 0 として読める。
     public Dictionary<uint, ulong> Msrs = new();
