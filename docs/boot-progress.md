@@ -423,3 +423,31 @@ rm sample.avhdx; ./bin/Release/net10.0/Emu86.exe --notrace --entrylog 7c90e47c 7
 - 朝の時点で同じ経路が通っていたように見えたのは、タイマ IRQ を取りこぼしていた頃は vga.sys の INT 10h がこの高速経路に
   入らなかった(ミニセットアップの進行が遅かった)ためと考えられる。
 
+### PS/2 マウス・システムリセット・無制限実行(2026-10-10)
+- 8042 の AUX ポートに PS/2 マウス(`MouseDevice`)を接続。リセット/ID/サンプルレート/解像度/有効化などに応答し、200/100/80 の
+  魔法シーケンスで IntelliMouse(ID 3、4 バイトパケット)になる。マウス由来のバイトはステータス bit5 で区別し、IRQ12
+  (スレーブ PIC 入力 4、カスケードの in-service も立てる)で配送する。XP の i8042prt が検出し、ウィンドウで捕捉した
+  マウスの相対移動でミニセットアップ画面のカーソルが動くことを確認(クリックで捕捉、右 Ctrl で解放)。
+- システムリセット: 8042 の 0xFE パルス/出力ポート bit0、PIIX4 の 0xCF9 bit2 で `ResetRequested` を立て、ランナーが実行を抜ける。
+  `Program` が環境を作り直し(ディスク接続状態は引き継ぐ)、リセットベクタから再実行する。ウィンドウは新しい環境へ参照を差し替える。
+  0xCF9 はバイトアクセスのときだけリセット制御として扱い、CONFIG_ADDRESS のバイト 1 と区別する。
+- `--limit max`(上限なし)と `--snapshot-interval`(0 で終了時のみ)を追加。`--limit 0` は従来どおり「予算消化済み」。
+  起動プロファイル「Emu86 (window)」は `--limit max --snapshot-interval 1000000000`。
+- スナップショットは v9(VGA の後ろにマウス状態)。DeviceTests の固定ハッシュは A7/A8/FE/D3/D4 の挙動追加で採り直し。
+- 冷起動 84 億命令: ミニセットアップの「Please wait...」(Windows ロゴ付きダイアログ)まで進行、バグチェック無し。
+
+### シリアルポートとカーネルデバッガ接続(2026-10-10)
+- 16550 UART(`SerialPort.cs`)を COM1/COM2 に置き、`--com1/--com2 <名前>` で名前付きパイプに橋渡しする。KDCOM のポート存在検査
+  (MCR ループバックで OUT1→RI 等が MSR に映る)に対応。パイプの送信は専用タスク(実行スレッドでブロックしない)。
+- `--boot-debug`(`BootAutomation.cs`): INT 19h 以降 F8 を繰り返し押し、「Windows Advanced Options Menu」が出たら BIOS の
+  キーバッファを空にし、ハイライト行を読みながら ↓ を送って「Debugging Mode」で Enter、OS 選択メニューでも Enter。
+  ↓ を回数固定で送ると取りこぼしで「Enable VGA Mode」に止まったため、画面を見て送る方式にした。
+- `KdDebuggerEnabled=1` になった後も COM2 に何も出なかった原因: KDCOM がポート 0x998a0000(メモリマップト扱い)を掴んでいた。
+  KDCOM は DBGP が無いと NTDETECT の構成木(SerialController の CM_PARTIAL_RESOURCE_LIST)から Count 個の記述子を歩き、
+  最後の Port 型の Start を使うが、Count が 487 になっていた。NTDETECT は `mov byte [bp-0xae], 1` でヘッダを書くが、
+  **両コアの 16 ビット実効アドレス計算が 16 ビットで折り返しておらず**(bp=0x0d3c + 0xff52 = 0x10c8e)、別の場所へ書いていた。
+  `[bx+si]` 等のレジスタ和と disp8/disp16 の加算を `(ushort)` で折り返すように修正(DecodeTests の期待値も同様に)。
+- 修正後、COM2 に KD パケット(`30 30 30 30` リーダー、`31 30` LoadSymbols 状態変化)が 288 バイト周期で届く。
+- 既知の制限: `--boot-debug` は XP の「Debugging Mode」の既定(COM2/19200)に依存。boot.ini を編集すれば `/debugport=com1 /baudrate=115200`
+  も使える。KD のタイムアウトはゲストの仮想時間(100 万命令 = 1 秒)で進む。
+

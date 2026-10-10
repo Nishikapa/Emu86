@@ -73,4 +73,11 @@ public sealed class EmulationControl
         HasStopped = true;
         StateChanged?.Invoke();
     }
+
+    // 実行スレッドから: システムリセット後に新しい環境で実行を続けるとき、停止状態を取り消す。
+    internal void Restart()
+    {
+        HasStopped = false;
+        StateChanged?.Invoke();
+    }
 }

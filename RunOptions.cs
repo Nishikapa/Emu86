@@ -41,7 +41,11 @@ internal sealed class RunOptions
     public bool Slow { get; private set; }
     public bool NoIrq { get; private set; }
     public bool Window { get; private set; }
+    public string Com1Pipe { get; private set; }
+    public string Com2Pipe { get; private set; }
+    public bool BootDebug { get; private set; }
     public long Limit { get; private set; } = InstructionLimit;
+    public long SnapshotInterval { get; private set; } = 100_000_000;
     public string SnapshotPath { get; private set; } = "snapshot.snap";
     public string DiskPath { get; private set; }
     public string OverlayPath { get; private set; }
@@ -88,7 +92,17 @@ internal sealed class RunOptions
                 case "--slow": options.Slow = true; break;
                 case "--noirq": options.NoIrq = true; break;
                 case "--window": options.Window = true; break;
-                case "--limit": options.Limit = Decimal(); break;
+                case "--com1": options.Com1Pipe = Value(); break;
+                case "--com2": options.Com2Pipe = Value(); break;
+                case "--boot-debug": options.BootDebug = true; break;
+                case "--limit":
+                    if (index + 1 < args.Length && args[index + 1] == "max") { index++; options.Limit = long.MaxValue; } // 上限なし
+                    else options.Limit = Decimal();
+                    break;
+                case "--snapshot-interval":
+                    var interval = Decimal();
+                    options.SnapshotInterval = interval == 0 ? long.MaxValue : interval; // 0 = 終了時のみ
+                    break;
                 case "--snapshot": options.SnapshotPath = Value(); break;
                 case "--disk": options.DiskPath = Value(); break;
                 case "--overlay": options.OverlayPath = Value(); break;
@@ -139,7 +153,11 @@ internal sealed class RunOptions
 
     public const string Usage = """
         Usage: Emu86 [--resume] [--snapshot path] [--limit count] [--slow] [--noirq] [--window]
-          --window                      Show the VGA display in a 640x480 window (keyboard input goes to the guest)
+          --limit count|max             Stop after count instructions (max = run until the window closes)
+          --snapshot-interval count     Save a snapshot every count instructions (default 100000000, 0 = only at the end)
+          --window                      Show the VGA display in a 640x480 window (keyboard and mouse go to the guest)
+          --com1 name / --com2 name     Serve the UART on \\.\pipe\name (WinDbg: com:pipe,port=\\.\pipe\name,resets=0,reconnect)
+          --boot-debug                  Drive NTLDR's F8 menu to boot Windows in Debugging Mode (COM2, 19200 bps)
           --disk path [--overlay path]   Select a base image and writable overlay
           --dumplba start count         Dump sectors from the existing overlay to lba_dump.bin
           --trace-all --regtrace --notrace --brhist --esptrap --pftrap

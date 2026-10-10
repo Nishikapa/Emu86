@@ -9,6 +9,9 @@ public partial class EmuEnvironment
     internal KeyboardController Keyboard { get; } = new();
     internal AcpiPmDevice Acpi { get; } = new();
     public VgaDevice Vga { get; } = new();
+    // COM1(0x3F8, IRQ4)と COM2(0x2F8, IRQ3)。ホスト側(名前付きパイプ)は起動時の指定で接続する。
+    public Uart16550 Com1 { get; } = new();
+    public Uart16550 Com2 { get; } = new();
 
     public byte[] Cmos { get => CmosRtc.Data; set => CmosRtc.Data = value; }
     public int CmosIndex { get => CmosRtc.Index; set => CmosRtc.Index = value; }
@@ -38,6 +41,7 @@ public partial class EmuEnvironment
     public bool PitStatusPending { get => Pit.StatusPending; set => Pit.StatusPending = value; }
 
     public Queue<byte> KbdOut => Keyboard.Output;
+    public MouseDevice Mouse => Keyboard.Mouse;
     public byte KbdLast { get => Keyboard.Last; set => Keyboard.Last = value; }
     public byte KbdCmdByte { get => Keyboard.CommandByte; set => Keyboard.CommandByte = value; }
     public int KbdPendingCmd { get => Keyboard.PendingCommand; set => Keyboard.PendingCommand = value; }

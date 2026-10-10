@@ -2,7 +2,12 @@
   "profiles": {
     "Emu86 (window)": {
       "commandName": "Project",
-      "commandLineArgs": "--window --notrace",
+      "commandLineArgs": "--window --notrace --limit max --snapshot-interval 1000000000",
+      "workingDirectory": "$(ProjectDir)"
+    },
+    "Emu86 (window, kernel debug)": {
+      "commandName": "Project",
+      "commandLineArgs": "--window --notrace --limit max --snapshot-interval 1000000000 --com1 emu86-com1 --com2 emu86-com2 --boot-debug",
       "workingDirectory": "$(ProjectDir)"
     },
     "Emu86 (console)": {

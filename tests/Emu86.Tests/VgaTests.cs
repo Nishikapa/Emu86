@@ -353,9 +353,216 @@ static class VgaTests
         }
     }
 
+    // PS/2 マウス: 8042 経由のコマンド応答、IntelliMouse 切替、パケット生成、ステータス bit5、IRQ12 の配送。
+    static void Mouse()
+    {
+        using var env = new EmuEnvironment(memory: new byte[0x10000]);
+        byte[] Drain() { var bytes = new List<byte>(); while ((EnvInPort(env, 0x64) & 1) != 0) bytes.Add(EnvInPort(env, 0x60)); return [.. bytes]; }
+        string Hex(byte[] bytes) => string.Join(",", bytes.Select(b => b.ToString("X2")));
+        void ToMouse(byte value) { EnvOutPort(env, 0x64, 0xD4); EnvOutPort(env, 0x60, value); }
+        EnvOutPort(env, 0x64, 0x60); EnvOutPort(env, 0x60, 0x47); // キーボード/AUX 割り込み許可、変換有効(XP の設定)
+        EnvOutPort(env, 0x64, 0xA8);
+        Equal((byte)0x47, env.KbdCmdByte, "aux enabled in command byte");
+        ToMouse(0xFF);
+        Equal((byte)0x35, EnvInPort(env, 0x64), "status shows aux data");
+        Equal("FA,AA,00", Hex(Drain()), "reset response");
+        ToMouse(0xF2);
+        Equal("FA,00", Hex(Drain()), "standard mouse id");
+        foreach (var rate in new byte[] { 200, 100, 80 }) { ToMouse(0xF3); Drain(); ToMouse(rate); Drain(); }
+        ToMouse(0xF2);
+        Equal("FA,03", Hex(Drain()), "IntelliMouse id after the magic sequence");
+        ToMouse(0xE9);
+        Equal(4, Drain().Length, "status request");
+        env.Mouse.Move(5, 3, -1, 1);
+        Equal(false, env.Keyboard.Pump(), "no packet before reporting is enabled");
+        ToMouse(0xF4); Drain();
+        Equal(true, env.Keyboard.Pump(), "packet moved into the aux buffer");
+        Equal(true, env.Keyboard.AuxIrqAsserted, "IRQ12 asserted");
+        Equal("09,05,03,FF", Hex(Drain()), "IntelliMouse packet");
+        env.Mouse.Move(-300, -2, 0, 0);
+        env.Keyboard.Pump();
+        Equal("78,00,FE,00", Hex(Drain()), "overflow and negative packet");
+        env.Keyboard.Inject(0x1E); env.Mouse.Move(1, 1, 0, 0);
+        env.Keyboard.Pump();
+        Equal(true, env.Keyboard.IrqAsserted && !env.Keyboard.AuxIrqAsserted, "keyboard byte goes first");
+        Equal((byte)0x15, EnvInPort(env, 0x64), "status without aux bit for keyboard data");
+        Drain();
+        EnvOutPort(env, 0x64, 0xA7);
+        Equal(false, env.Keyboard.Pump(), "aux disabled blocks packets");
+        EnvOutPort(env, 0x64, 0xA8);
+        Equal(true, env.Keyboard.Pump(), "aux re-enabled");
+        Drain();
+        // IRQ12: リアルモードの IVT 0x74 でパケットの先頭バイトを受け取る。
+        using var irq = new EmuEnvironment(memory: new byte[0x10000]);
+        var cpu = new CPU { eip = 0x100, esp = 0x8000, eflags = 2, edi = 0x700 };
+        byte[] main = [0xFB, 0xEB, 0xFE];
+        byte[] handler = [0xE4, 0x60, 0xAA, 0xB0, 0x20, 0xE6, 0xA0, 0xE6, 0x20, 0xCF]; // in al,60h; stosb; EOI slave+master; iret
+        main.CopyTo(irq.OneMegaMemory_, 0x100); handler.CopyTo(irq.OneMegaMemory_, 0x600);
+        Write32(irq, 0x74 * 4, 0x00000600);
+        irq.KbdCmdByte = 0x47; // キーボード/AUX 割り込み許可、変換有効
+        irq.Mouse.Enabled = true;
+        irq.Mouse.Move(2, 1, 0, 2);
+        EmulationRunner.Run(RunOptions.Parse(["--limit", "40100", "--notrace"]), irq, cpu, 0, null, TextWriter.Null, TextWriter.Null);
+        Equal("0A,02,01", Hex(irq.OneMegaMemory_.Skip(0x700).Take(3).ToArray()), "right button packet via IRQ12");
+        Equal(0x703u, cpu.edi, "exactly three bytes delivered");
+        Equal(0, irq.Mouse.Output.Count, "all packet bytes consumed");
+        // スナップショット v9 にマウス状態が入る。
+        env.Mouse.Move(1, 2, 0, 0); env.Keyboard.Pump();
+        SnapshotStore.Save("mouse.snap", 7, new CPU(), env);
+        using var restored = new EmuEnvironment(memory: new byte[0x10000]);
+        SnapshotStore.Load("mouse.snap", restored, DiskConfiguration.Discover(Directory.GetCurrentDirectory()));
+        Equal((byte)3, restored.Mouse.Id, "mouse id restored");
+        Equal(true, restored.Mouse.Enabled, "mouse reporting restored");
+        Equal(4, restored.Mouse.Output.Count, "aux buffer restored");
+    }
+
+    // システムリセット: 8042 の 0xFE パルス/出力ポート、0xCF9 で要求が立ち、ランナーが実行を抜ける。
+    static void ResetRequest()
+    {
+        foreach (var (name, code) in new (string, byte[])[]
+        {
+            ("pulse", [0xB0, 0xFE, 0xE6, 0x64, 0xEB, 0xFE]),                                 // mov al,FEh; out 64h,al
+            ("output port", [0xB0, 0xD1, 0xE6, 0x64, 0xB0, 0x02, 0xE6, 0x60, 0xEB, 0xFE]),   // D1 then 02 (bit0=0)
+            ("cf9", [0xB0, 0x06, 0x66, 0xBA, 0xF9, 0x0C, 0x00, 0x00, 0xEE, 0xEB, 0xFE]),     // mov al,6; mov edx,CF9h; out dx,al
+        })
+        {
+            using var env = new EmuEnvironment(memory: new byte[0x10000]);
+            var cpu = new CPU { eip = 0x100, esp = 0x8000, eflags = 2, code32 = true, stack32 = true };
+            code.CopyTo(env.OneMegaMemory_, 0x100);
+            using var output = new StringWriter();
+            var count = EmulationRunner.Run(RunOptions.Parse(["--limit", "30000", "--notrace", "--noirq"]), env, cpu, 0, null, output, TextWriter.Null);
+            Equal(true, env.ResetRequested, "reset flagged: " + name);
+            Equal(true, count < 30000, "run left early: " + name);
+            Equal(true, output.ToString().Contains("[system] reset requested"), "reset reported: " + name);
+        }
+        using var none = new EmuEnvironment(memory: new byte[0x10000]);
+        byte[] keep = [0xB0, 0xD1, 0xE6, 0x64, 0xB0, 0x03, 0xE6, 0x60, 0xEB, 0xFE]; // 出力ポート 03 (bit0=1) はリセットしない
+        keep.CopyTo(none.OneMegaMemory_, 0x100);
+        var count2 = EmulationRunner.Run(RunOptions.Parse(["--limit", "30000", "--notrace", "--noirq"]), none,
+            new CPU { eip = 0x100, esp = 0x8000, eflags = 2, code32 = true, stack32 = true }, 0, null, TextWriter.Null, TextWriter.Null);
+        Equal(30000L, count2, "A20 write does not reset");
+        Equal(long.MaxValue, RunOptions.Parse(["--limit", "max"]).Limit, "limit max is unlimited");
+        Equal(0L, RunOptions.Parse(["--limit", "0"]).Limit, "limit 0 stays zero");
+        Equal(long.MaxValue, RunOptions.Parse(["--snapshot-interval", "0"]).SnapshotInterval, "interval 0 saves only at the end");
+        Equal(12345L, RunOptions.Parse(["--snapshot-interval", "12345"]).SnapshotInterval, "snapshot interval");
+    }
+
+    // 16550 UART: レジスタ、ループバック、KDCOM のポート検出(MCR ループバックと MSR)、名前付きパイプの往復、IRQ4。
+    static void Serial()
+    {
+        using var env = new EmuEnvironment(memory: new byte[0x10000]);
+        Equal((byte)0x60, EnvInPort(env, 0x3FD), "LSR idle: THRE and TEMT");
+        Equal((byte)0xB0, EnvInPort(env, 0x3FE), "MSR idle");
+        Equal((byte)0x01, EnvInPort(env, 0x3FA), "IIR no interrupt");
+        EnvOutPort(env, 0x3FB, 0x80); EnvOutPort(env, 0x3F8, 0x0C); EnvOutPort(env, 0x3F9, 0x00); EnvOutPort(env, 0x3FB, 0x03);
+        Equal("0C,00", $"{env.Com1.Dll:X2},{env.Com1.Dlm:X2}", "divisor latch written through DLAB");
+        EnvOutPort(env, 0x3FC, 0x10);
+        Equal((byte)0x00, EnvInPort(env, 0x3FE), "loopback with no OUT bits: no modem status");
+        EnvOutPort(env, 0x3FC, 0x14);
+        Equal((byte)0x40, EnvInPort(env, 0x3FE), "loopback OUT1 -> RI (KDCOM probe)");
+        EnvOutPort(env, 0x3FC, 0x1F);
+        Equal((byte)0xF0, EnvInPort(env, 0x3FE), "loopback reflects all modem control bits");
+        EnvOutPort(env, 0x3F8, 0x5A);
+        Equal((byte)0x61, EnvInPort(env, 0x3FD), "loopback byte ready");
+        Equal((byte)0x5A, EnvInPort(env, 0x3F8), "loopback byte read");
+        EnvOutPort(env, 0x3FC, 0x03);
+        EnvOutPort(env, 0x3FF, 0xA5);
+        Equal((byte)0xA5, EnvInPort(env, 0x3FF), "scratch register");
+        EnvOutPort(env, 0x2F8, 0x42);
+        Equal((byte)0x60, EnvInPort(env, 0x2FD), "COM2 without a host drops the byte");
+        // 名前付きパイプ: クライアントが読み書きし、UART の Pump で受信 FIFO に入る。
+        var name = "emu86-test-" + Guid.NewGuid().ToString("N");
+        using (var host = new NamedPipeSerialHost(name))
+        {
+            env.Com1.Host = host;
+            using var client = new System.IO.Pipes.NamedPipeClientStream(".", name, System.IO.Pipes.PipeDirection.InOut);
+            client.Connect(10000);
+            for (var wait = 0; wait < 100 && !host.Connected; wait++) Thread.Sleep(10);
+            Equal(true, host.Connected, "pipe client connected");
+            foreach (var value in "KD\n"u8.ToArray()) EnvOutPort(env, 0x3F8, value);
+            env.Com1.Pump();
+            var received = new byte[3];
+            var reading = client.ReadAsync(received, 0, 3);
+            Equal(true, reading.Wait(5000), "pipe client received data in time");
+            Equal(3, reading.Result, "three bytes from the guest");
+            Equal("KD\n", System.Text.Encoding.ASCII.GetString(received), "guest bytes reach the pipe client");
+            client.Write("ok"u8.ToArray()); client.Flush();
+            for (var wait = 0; wait < 100 && env.Com1.Rx.Count < 2; wait++) { Thread.Sleep(10); env.Com1.Pump(); }
+            Equal((byte)0x61, EnvInPort(env, 0x3FD), "data ready from the pipe");
+            Equal("ok", $"{(char)EnvInPort(env, 0x3F8)}{(char)EnvInPort(env, 0x3F8)}", "pipe bytes read through RBR");
+            EnvOutPort(env, 0x3F9, 0x01);
+            client.Write("!"u8.ToArray()); client.Flush();
+            for (var wait = 0; wait < 100 && env.Com1.Rx.Count < 1; wait++) { Thread.Sleep(10); env.Com1.Pump(); }
+            Equal(true, env.Com1.IrqAsserted, "receive interrupt asserted");
+            Equal((byte)0x04, EnvInPort(env, 0x3FA), "IIR received data available");
+            EnvInPort(env, 0x3F8);
+            Equal(false, env.Com1.IrqAsserted, "interrupt dropped after reading");
+            env.Com1.Host = null;
+        }
+        // IRQ4: リアルモードの IVT 0x0C でバイトを受け取る。
+        using var irq = new EmuEnvironment(memory: new byte[0x10000]);
+        var cpu = new CPU { eip = 0x100, esp = 0x8000, eflags = 2, edi = 0x700 };
+        byte[] main = [0xFB, 0xEB, 0xFE];
+        byte[] handler = [0xBA, 0xF8, 0x03, 0xEC, 0xAA, 0xB0, 0x20, 0xE6, 0x20, 0xCF]; // mov dx,3F8h; in al,dx; stosb; EOI; iret
+        main.CopyTo(irq.OneMegaMemory_, 0x100); handler.CopyTo(irq.OneMegaMemory_, 0x600);
+        Write32(irq, 0x0C * 4, 0x00000600);
+        irq.Com1.Ier = 0x01; irq.Com1.Rx.Enqueue((byte)'x'); irq.Com1.Rx.Enqueue((byte)'y');
+        EmulationRunner.Run(RunOptions.Parse(["--limit", "20100", "--notrace"]), irq, cpu, 0, null, TextWriter.Null, TextWriter.Null);
+        Equal("xy", System.Text.Encoding.ASCII.GetString(irq.OneMegaMemory_, 0x700, 2), "bytes delivered through IRQ4");
+        // スナップショット v10 に UART の状態が入る。
+        env.Com2.Ier = 0x03; env.Com2.Rx.Enqueue(0x11);
+        SnapshotStore.Save("serial.snap", 3, new CPU(), env);
+        using var restored = new EmuEnvironment(memory: new byte[0x10000]);
+        SnapshotStore.Load("serial.snap", restored, DiskConfiguration.Discover(Directory.GetCurrentDirectory()));
+        Equal((byte)0x03, restored.Com2.Ier, "UART IER restored");
+        Equal(1, restored.Com2.Rx.Count, "UART receive FIFO restored");
+    }
+
+    // NTLDR メニューの自動操作: 画面テキストの検出、ハイライト行の追跡、キー注入の順序。
+    static void BootMenuAutomation()
+    {
+        using var env = new EmuEnvironment(memory: new byte[0x100000]);
+        void Line(int row, string text, bool highlighted = false)
+        {
+            for (var column = 0; column < 80; column++)
+            {
+                env.Vga.Vram[row * 80 + column] = (byte)(column < text.Length ? text[column] : ' ');
+                env.Vga.Vram[0x10000 + row * 80 + column] = (byte)(highlighted ? 0x70 : 0x07);
+            }
+        }
+        var automation = new BootAutomation();
+        using var output = new StringWriter();
+        automation.Step(env, 1000, output);
+        Equal(0, env.Keyboard.Injected.Count, "nothing before the boot sector");
+        VgaBiosStub.Install(env);
+        automation.Step(env, 2000, output);
+        Equal(2, env.Keyboard.Injected.Count, "F8 pressed after boot");
+        while (env.Keyboard.Injected.TryDequeue(out _)) { }
+        Line(0, "Windows Advanced Options Menu");
+        Line(2, "    Safe Mode", highlighted: true);
+        Line(3, "    Debugging Mode");
+        Line(4, "    Return to OS Choices Menu");
+        env.OneMegaMemory_[0x41A] = 0x24; env.OneMegaMemory_[0x41C] = 0x28;
+        automation.Step(env, 1_000_000, output);
+        Equal("0x1E,0x1E", $"0x{env.OneMegaMemory_[0x41A]:X2},0x{env.OneMegaMemory_[0x41C]:X2}", "BIOS key buffer emptied when the menu appears");
+        automation.Step(env, 1_300_000, output);
+        Equal("E0,50,E0,D0", string.Join(",", env.Keyboard.Injected.Select(b => b.ToString("X2"))), "down arrow sent while another line is highlighted");
+        while (env.Keyboard.Injected.TryDequeue(out _)) { }
+        Line(2, "    Safe Mode"); Line(3, "    Debugging Mode", highlighted: true);
+        automation.Step(env, 1_600_000, output);
+        Equal("1C,9C", string.Join(",", env.Keyboard.Injected.Select(b => b.ToString("X2"))), "Enter sent on Debugging Mode");
+        while (env.Keyboard.Injected.TryDequeue(out _)) { }
+        Line(0, "Please select the operating system to start:"); Line(2, "    Microsoft Windows XP Professional", highlighted: true);
+        Line(3, ""); Line(4, "");
+        automation.Step(env, 2_000_000, output);
+        Equal("1C,9C", string.Join(",", env.Keyboard.Injected.Select(b => b.ToString("X2"))), "Enter sent on the OS menu");
+        Equal(true, automation.Completed, "automation finished");
+        Equal(true, output.ToString().Contains("Debugging Mode selected"), "progress logged");
+    }
+
     public static void Run()
     {
-        MemoryWindow(); PlanarAndChain4(); Registers(); Rendering(); VirtualMode(); KeyboardInterrupt(); BiosStub(); PciRom(); IretPrivilegeCheck();
+        MemoryWindow(); PlanarAndChain4(); Registers(); Rendering(); VirtualMode(); KeyboardInterrupt(); BiosStub(); PciRom(); IretPrivilegeCheck(); Mouse(); ResetRequest(); Serial(); BootMenuAutomation();
         Console.WriteLine($"VGA/V86/keyboard assertions passed: {assertions}");
     }
 }

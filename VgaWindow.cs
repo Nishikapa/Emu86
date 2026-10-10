@@ -9,12 +9,13 @@ namespace Emu86;
 // 現在のビデオモードの解像度(テキスト 640×400、mode 12h 640×480、mode 13h 320×200 など)を
 // 最近傍補間で引き伸ばして描く。キー入力は WM_KEYDOWN/UP のハードウェアスキャンコード
 // (セット 1)をそのまま 8042 へ注入する。描画は約 30fps のタイマで VgaDevice.Dirty を見て更新する。
+// 表示領域をクリックするとマウスを捕捉し(相対移動とボタンを PS/2 マウスへ送る)、右 Ctrl で解放する。
 // 下部のボタンで実行の中断・再開ができ、中断中(および停止後)は CPU レジスタのダイアログを開ける。
 internal sealed class VgaWindow : Form
 {
     const int ToolbarHeight = 34;
 
-    readonly EmuEnvironment env;
+    EmuEnvironment env;
     readonly EmulationControl control;
     readonly System.Windows.Forms.Timer timer = new() { Interval = 33 };
     readonly DisplayPanel display;
@@ -38,6 +39,7 @@ internal sealed class VgaWindow : Form
         ImeMode = ImeMode.Disable;
 
         display = new DisplayPanel(env) { Dock = DockStyle.Fill };
+        display.CaptureChanged += () => UpdateControls();
         var toolbar = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = ToolbarHeight, FlowDirection = FlowDirection.LeftToRight, Padding = new Padding(4, 3, 4, 3), BackColor = BackColor };
         pauseButton.Click += (_, _) => SetPaused(true);
         resumeButton.Click += (_, _) => SetPaused(false);
@@ -52,7 +54,7 @@ internal sealed class VgaWindow : Form
 
         env.Vga.FallbackFont ??= BuildFallbackFont();
         control.StateChanged += () => { try { BeginInvoke(UpdateControls); } catch (InvalidOperationException) { } };
-        timer.Tick += (_, _) => Refresh(force: false);
+        timer.Tick += (_, _) => { display.FlushMouse(); Refresh(force: false); };
         timer.Start();
         Refresh(force: true);
         UpdateControls();
@@ -72,6 +74,25 @@ internal sealed class VgaWindow : Form
         catch (InvalidOperationException) { }
     }
 
+    // 実行スレッドから: ゲストのシステムリセットで環境が作り直されたので、表示と入力の参照先を差し替える。
+    public void Rebind(EmuEnvironment fresh)
+    {
+        if (IsDisposed) return;
+        try
+        {
+            BeginInvoke(() =>
+            {
+                env = fresh;
+                display.Env = fresh;
+                status = "running";
+                frame = null;
+                Refresh(force: true);
+                UpdateControls();
+            });
+        }
+        catch (InvalidOperationException) { }
+    }
+
     void SetPaused(bool pause)
     {
         if (control.HasStopped) return;
@@ -85,16 +106,9 @@ internal sealed class VgaWindow : Form
     {
         var cpu = control.Snapshot();
         if (cpu == null) return;
-        try
-        {
-            registers.Update(cpu, control.Count, control.HasStopped ? "stopped" : "paused");
-            if (!registers.Visible) registers.Show(this);
-            else registers.Activate();
-        }
-        catch (Exception exception)
-        {
-            Console.Error.WriteLine($"[window] register dialog failed: {exception}");
-        }
+        registers.Update(cpu, control.Count, control.HasStopped ? "stopped" : "paused");
+        if (!registers.Visible) registers.Show(this);
+        else registers.Activate();
     }
 
     void UpdateControls()
@@ -105,9 +119,10 @@ internal sealed class VgaWindow : Form
         pauseButton.Enabled = !stopped && !paused && !control.PauseRequested;
         resumeButton.Enabled = !stopped && (paused || control.PauseRequested);
         registersButton.Enabled = (paused || stopped) && control.Snapshot() != null;
-        statusLabel.Text = stopped ? $"{status} ({control.Count:N0} instructions)"
+        var mouse = display.MouseCaptured ? "  [mouse captured: 右 Ctrl で解放]" : "  [click to capture mouse]";
+        statusLabel.Text = (stopped ? $"{status} ({control.Count:N0} instructions)"
             : paused ? $"paused at {control.Count:N0} instructions"
-            : control.PauseRequested ? "pausing..." : "running";
+            : control.PauseRequested ? "pausing..." : "running") + (stopped ? "" : mouse);
         if (registers.Visible && (paused || stopped))
             registers.Update(control.Snapshot(), control.Count, stopped ? "stopped" : "paused");
     }
@@ -134,6 +149,7 @@ internal sealed class VgaWindow : Form
         finally { frame.UnlockBits(data); }
         Text = $"Emu86 - {vga.ModeDescription()} - {(control.IsPaused && !control.HasStopped ? "paused" : status)}";
         display.Frame = frame;
+        display.GuestSize = new Size(width, height);
         display.Invalidate();
     }
 
@@ -169,16 +185,22 @@ internal sealed class VgaWindow : Form
         }
     }
 
-    // VGA のフレームを描き、キー入力をスキャンコードとして 8042 へ注入する表示領域。
+    // VGA のフレームを描き、キー入力をスキャンコードとして 8042 へ、マウスを PS/2 マウスへ注入する表示領域。
     sealed class DisplayPanel : Control
     {
         const int WM_KEYDOWN = 0x0100, WM_KEYUP = 0x0101, WM_SYSKEYDOWN = 0x0104, WM_SYSKEYUP = 0x0105;
-        readonly EmuEnvironment env;
+        public EmuEnvironment Env;
         public Bitmap Frame;
+        public Size GuestSize = new(640, 480);
+        public bool MouseCaptured { get; private set; }
+        public event Action CaptureChanged;
+        int pendingDx, pendingDy, pendingDz;
+        byte buttons, sentButtons;
+        bool ignoreNextMove;
 
         public DisplayPanel(EmuEnvironment env)
         {
-            this.env = env;
+            Env = env;
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.Selectable, true);
             TabStop = true;
             BackColor = Color.Black;
@@ -197,14 +219,101 @@ internal sealed class VgaWindow : Form
         {
             base.OnResize(e);
             Invalidate();
+            if (MouseCaptured) Cursor.Clip = RectangleToScreen(ClientRectangle);
+        }
+
+        /// マウス ///////////////////////////////////
+        Point Center => new(ClientSize.Width / 2, ClientSize.Height / 2);
+
+        void CaptureMouse()
+        {
+            if (MouseCaptured) return;
+            MouseCaptured = true;
+            Capture = true;
+            Cursor.Hide();
+            Cursor.Clip = RectangleToScreen(ClientRectangle);
+            Recenter();
+            CaptureChanged?.Invoke();
+        }
+
+        public void ReleaseMouse()
+        {
+            if (!MouseCaptured) return;
+            MouseCaptured = false;
+            Capture = false;
+            Cursor.Clip = Rectangle.Empty;
+            Cursor.Show();
+            CaptureChanged?.Invoke();
+        }
+
+        void Recenter()
+        {
+            ignoreNextMove = true;
+            Cursor.Position = PointToScreen(Center);
         }
 
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
             Focus();
+            if (!MouseCaptured) { CaptureMouse(); return; }
+            buttons |= ButtonBit(e.Button);
         }
 
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            if (!MouseCaptured) return;
+            buttons &= (byte)~ButtonBit(e.Button);
+            Capture = true; // WinForms はボタンを離すと Capture を外すので取り直す
+        }
+
+        static byte ButtonBit(MouseButtons button) => button switch
+        {
+            MouseButtons.Left => 1,
+            MouseButtons.Right => 2,
+            MouseButtons.Middle => 4,
+            _ => 0,
+        };
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            if (!MouseCaptured) return;
+            if (ignoreNextMove) { ignoreNextMove = false; return; }
+            var center = Center;
+            var dx = e.X - center.X;
+            var dy = e.Y - center.Y;
+            if (dx == 0 && dy == 0) return;
+            // 表示が拡大縮小されていてもゲストのピクセル単位で動かす。
+            pendingDx += dx * GuestSize.Width / Math.Max(1, ClientSize.Width);
+            pendingDy += dy * GuestSize.Height / Math.Max(1, ClientSize.Height);
+            Recenter();
+        }
+
+        protected override void OnMouseWheel(MouseEventArgs e)
+        {
+            base.OnMouseWheel(e);
+            if (MouseCaptured) pendingDz -= e.Delta / 120;
+        }
+
+        protected override void OnLostFocus(EventArgs e)
+        {
+            base.OnLostFocus(e);
+            ReleaseMouse();
+        }
+
+        // タイマ周期でまとめて PS/2 マウスへ送る(PS/2 の Y は上が正)。
+        public void FlushMouse()
+        {
+            if (!MouseCaptured && buttons == sentButtons) return;
+            if (pendingDx == 0 && pendingDy == 0 && pendingDz == 0 && buttons == sentButtons) return;
+            Env.Mouse.Move(pendingDx, -pendingDy, pendingDz, buttons);
+            sentButtons = buttons;
+            pendingDx = pendingDy = pendingDz = 0;
+        }
+
+        /// キーボード ///////////////////////////////
         // Tab や方向キーもダイアログキーとして処理させず、WM_KEYDOWN として受け取る。
         protected override bool IsInputKey(Keys keyData) => true;
 
@@ -216,11 +325,18 @@ internal sealed class VgaWindow : Form
                 var scancode = (byte)((lParam >> 16) & 0xFF);
                 var extended = ((lParam >> 24) & 1) != 0;
                 var release = m.Msg is WM_KEYUP or WM_SYSKEYUP;
+                // 右 Ctrl(E0 1D)はマウスの解放に使い、ゲストへは送らない。
+                if (scancode == 0x1D && extended)
+                {
+                    if (!release) ReleaseMouse();
+                    m.Result = IntPtr.Zero;
+                    return;
+                }
                 if (scancode != 0)
                 {
                     var code = (byte)(scancode | (release ? 0x80 : 0));
-                    if (extended) env.Keyboard.Inject(0xE0, code);
-                    else env.Keyboard.Inject(code);
+                    if (extended) Env.Keyboard.Inject(0xE0, code);
+                    else Env.Keyboard.Inject(code);
                 }
                 // F10 や Alt 系がメニューとして解釈されないよう、キー入力はここで消費する。
                 m.Result = IntPtr.Zero;

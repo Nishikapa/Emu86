@@ -10,7 +10,7 @@ internal static class EmulationRunner
     public static long Run(RunOptions options, EmuEnvironment env, CPU cpu, long count = 0,
         TextWriter trace = null, TextWriter output = null, TextWriter error = null,
         Action<long, CPU, EmuEnvironment> saveSnapshot = null, long snapshotInterval = SnapshotInterval,
-        CancellationToken stop = default, EmulationControl control = null)
+        CancellationToken stop = default, EmulationControl control = null, BootAutomation bootAutomation = null)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(snapshotInterval);
         output ??= Console.Out;
@@ -33,11 +33,24 @@ internal static class EmulationRunner
             {
                 nextService = count + IrqPeriod;
                 env.Keyboard.Pump();
+                env.Com1.Pump();
+                env.Com2.Pump();
+                bootAutomation?.Step(env, count, output);
                 control?.WaitIfPaused(cpu, count, stop);
                 if (stop.IsCancellationRequested)
                 {
                     output.WriteLine($"stopped by request at {cpu.cs:x4}:{cpu.eip:x8} (instr {count})");
                     break;
+                }
+                // システムリセット(8042 の 0xFE/出力ポート、ACPI/PIIX4 の 0xCF9)。呼び出し側が環境を作り直して
+                // リセットベクタから再開する。直前の状態は保存しない(再開してもリセット待ちのまま止まるだけなので)。
+                if (env.ResetRequested || env.Keyboard.ResetRequested)
+                {
+                    env.ResetRequested = true;
+                    output.WriteLine($"[system] reset requested at {cpu.cs:x4}:{cpu.eip:x8} (instr {count})");
+                    diagnostics.ReportStop(count);
+                    control?.Stopped(cpu, count);
+                    return count;
                 }
             }
 
@@ -106,6 +119,57 @@ internal static class EmulationRunner
                     catch (PageFaultException pf)
                     {
                         output.WriteLine($"FAULT during keyboard IRQ delivery: lin={pf.Linear:x8} err={pf.ErrorCode:x} at {cpu.cs:x4}:{cpu.eip:x8} (instr {count})");
+                        break;
+                    }
+                }
+            }
+
+            // シリアル(COM1=IRQ4、COM2=IRQ3、マスタ PIC 入力)の配送。条件は IRQ1 と同じ。
+            if (!options.NoIrq && cpu.jf)
+            {
+                foreach (var (uart, line) in new[] { (env.Com1, 4), (env.Com2, 3) })
+                {
+                    if (!uart.IrqAsserted || (env.PicMasterMask & (1 << line)) != 0 || (env.PicMasterIsr & (1 << line)) != 0) continue;
+                    var vec = env.PicMasterBase + line;
+                    if (cpu.pe && (env.PicMasterBase < 0x20 || cpu.idt_limit < (vec + 1) * 8 - 1)) continue;
+                    try
+                    {
+                        var irq = executor.Execute(env, cpu, Interrupt(vec));
+                        if (irq.IsSuccess)
+                        {
+                            cpu = irq.cpu;
+                            env.PicMasterIsr |= (byte)(1 << line);
+                        }
+                    }
+                    catch (PageFaultException pf)
+                    {
+                        output.WriteLine($"FAULT during serial IRQ delivery: lin={pf.Linear:x8} err={pf.ErrorCode:x} at {cpu.cs:x4}:{cpu.eip:x8} (instr {count})");
+                        return count;
+                    }
+                    break;
+                }
+            }
+
+            // マウス(IRQ12, スレーブ PIC 入力4)の配送。IRQ1 と同じ条件で、カスケードの in-service も立てる。
+            if (!options.NoIrq && env.Keyboard.AuxIrqAsserted && cpu.jf
+                && (env.PicSlaveMask & 0x10) == 0 && (env.PicMasterMask & 0x04) == 0 && (env.PicSlaveIsr & 0x10) == 0)
+            {
+                var vec = env.PicSlaveBase + 4;
+                if (!cpu.pe || (env.PicMasterBase >= 0x20 && cpu.idt_limit >= (vec + 1) * 8 - 1))
+                {
+                    try
+                    {
+                        var irq = executor.Execute(env, cpu, Interrupt(vec));
+                        if (irq.IsSuccess)
+                        {
+                            cpu = irq.cpu;
+                            env.PicSlaveIsr |= 0x10;
+                            env.PicMasterIsr |= 0x04;
+                        }
+                    }
+                    catch (PageFaultException pf)
+                    {
+                        output.WriteLine($"FAULT during mouse IRQ delivery: lin={pf.Linear:x8} err={pf.ErrorCode:x} at {cpu.cs:x4}:{cpu.eip:x8} (instr {count})");
                         break;
                     }
                 }

@@ -70,21 +70,22 @@ static public partial class Ext
                     return (true, F16(), segBase, reg);
                 var regsum = rm switch
                 {
-                    0 => (uint)(cpu.bx + cpu.si),
-                    1 => (uint)(cpu.bx + cpu.di),
-                    2 => (uint)(cpu.bp + cpu.si),
-                    3 => (uint)(cpu.bp + cpu.di),
+                    0 => (ushort)(cpu.bx + cpu.si),
+                    1 => (ushort)(cpu.bx + cpu.di),
+                    2 => (ushort)(cpu.bp + cpu.si),
+                    3 => (ushort)(cpu.bp + cpu.di),
                     4 => cpu.si,
                     5 => cpu.di,
                     6 => cpu.bp,
                     _ => cpu.bx,
                 };
                 var sb = rm is 2 or 3 or 6 ? ssSegBase : segBase;
+                // 実効アドレスは 16 ビットで折り返す(モナド版と同一)。
                 return mod switch
                 {
                     0 => (true, regsum, sb, reg),
-                    1 => (true, (uint)(regsum + (sbyte)F8()), sb, reg),
-                    _ => (true, regsum + F16(), sb, reg),
+                    1 => (true, (ushort)(regsum + (sbyte)F8()), sb, reg),
+                    _ => (true, (ushort)(regsum + F16()), sb, reg),
                 };
             }
 
