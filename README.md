@@ -101,14 +101,21 @@ dotnet run -c Release -- --resume
 
 ## 現在の到達点
 
-SeaBIOS を実行させた場合、次のところまで動作を確認しています。
+SeaBIOS を起動し、ディスクイメージから OS を読み込んで、次のところまで動作を確認しています（経緯と再開手順は `docs/boot-progress.md`）。
 
-1. PCI バス初期化、CMOS からのメモリサイズ検出、ATA コントローラ検出（`ata0-0: ... Hard-Disk`）を含む POST を完走。
-2. `Booting from Hard Disk...` → ブートセクタ（MBR）を ATA 経由で読み込み、`0000:7C00` へジャンプして実行。
-3. ブートローダー（GRUB 等）が `CR0.PE` をセットしてプロテクトモードへ遷移し、32 ビットコードセグメントでの実行を継続。
-4. その後、狭いコード領域（数百バイト）を数千万命令にわたって繰り返し実行する区間に入ることを確認しています。実行アドレスは毎回変化しており、ハングではなく展開処理（自身の解凍など）と見られる正当な処理です。1 命令ずつ解釈実行するインタプリタ方式のため、この種の処理は実 CPU に比べて桁違いに多い命令数を要し、完了には数億命令規模の実行が必要になる場合があります。
+**Windows XP（`sample.vhd`、Virtual PC 由来の sysprep 済みイメージ）**
 
-ページングや PIC/IDT ベースの割り込みは未実装のため、実 OS カーネルの本格的な起動（タイマー割り込み待ちや DMA を要求する処理など）はまだ確認できていません。現状の律速はページング等の機能欠落よりも、インタプリタの実行速度（命令数上限 `InstructionLimit`、既定 5 億命令）である可能性が高いです。
+1. SeaBIOS の POST → MBR → NTLDR → NTDETECT → ntoskrnl（ACPI 単一プロセッサ HAL）の起動。
+2. ページング、IDT 経由の割り込み・例外配送（#PF/#UD/#GP）、リング遷移（TSS の SS0/ESP0 によるスタック切り替え）、V86 モード経由の BIOS 呼び出しを経てユーザーモードへ到達。
+3. smss・csrss・winlogon・services・lsass・svchost が稼働し、sysprep のミニセットアップ（setup.exe）が GUI で入力待ちになるところまで（冷起動で約 60〜140 億命令）。VGA ウィンドウに画面を表示し、キーボードとマウスの入力を受け付けます。「設定して再起動」のゲストリセットも通ります。
+4. `--boot-debug` でデバッグモード起動し、WinDbg を COM2 に接続してカーネルデバッグができます。
+
+**Debian（`sample.vhdx`、4.19 686-pae）**
+
+1. GRUB → カーネル展開 → PAE ページング → メモリ初期化 → PCI/デバイス初期化 → PnP BIOS 呼び出し → initcall（crypto の自己テストを含む）まで進行（約 57 億命令以上）。
+2. root ファイルシステムのマウントは未達です。ドライバがすべてモジュールのため initramfs のロードが必要で、RAM を 256 MB に増やした後の起動確認は途中（GRUB がカーネルをロード中）で止まっています。
+
+1 命令ずつ解釈するインタプリタのため、Release ビルドで毎秒数百万〜約 900 万命令です。実機で数秒の処理に数十分かかるので、OS のブート確認はスナップショットからの再開（`--resume`）を併用します。
 
 ## アーキテクチャ
 
@@ -144,9 +151,9 @@ static State<Unit> Mov_8C =>
 
 ### 実行ループとタイマー割り込み
 
-`Main`（`Program.Runner.cs`）は引数解析・起動環境の組み立て・再開処理を担当し、`--window` では `VgaWindow`（Windows Forms）を UI スレッドで開いてエミュレーションを別スレッドで走らせます。`EmulationRunner` が命令実行、タイマー IRQ0・キーボード IRQ1・ATA IRQ14 の配送、ホストから注入されたスキャンコードの 8042 への受け渡し、停止要求の確認、定期保存を制御します。割り込みは IF・PIC のマスク・in-service 状態を確認し、リアルモードでは IVT、プロテクトモードでは準備済みの IDT を経由して配送します。トレース・監視点・停止診断は `RunDiagnostics`、Windows 固有の IRP・デバッグ文字列・EBP チェーンの解釈は `WindowsDiagnostics` に分離しています。
+`Main`（`Program.Runner.cs`）は引数解析・起動環境の組み立て・再開処理を担当し、`--window` では `VgaWindow`（Windows Forms）を UI スレッドで開いてエミュレーションを別スレッドで走らせます。`EmulationRunner` が命令実行、タイマー IRQ0・キーボード IRQ1・シリアル IRQ3/IRQ4・マウス IRQ12・ATA IRQ14 の配送、ホストから注入されたスキャンコード・マウスパケット・受信バイトの 8042/UART への受け渡し、NTLDR メニューの自動操作（`BootAutomation`）、中断・再開（`EmulationControl`）、ゲストのリセット要求と停止要求の確認、定期保存を制御します。割り込みは IF・PIC のマスク・in-service 状態を確認し、リアルモードでは IVT、プロテクトモードでは準備済みの IDT を経由して配送します。トレース・監視点・停止診断は `RunDiagnostics`、Windows 固有の IRP・デバッグ文字列・EBP チェーンの解釈は `WindowsDiagnostics` に分離しています。
 
-実行は `InstructionLimit`（既定 5 億命令）に達するか、配送できない未対応命令・例外に遭遇するまで続きます。実行中は一定間隔（`SnapshotInterval`）ごとに `SnapshotStore` が状態を `snapshot.snap` へ保存し、`--resume` で続きを再開できます。
+実行は `InstructionLimit`（既定 5 億命令、`--limit max` で上限なし）に達するか、配送できない未対応命令・例外に遭遇するか、表示ウィンドウが閉じられるまで続きます。実行中は一定間隔（`SnapshotInterval`）ごとに `SnapshotStore` が状態を `snapshot.snap` へ保存し、`--resume` で続きを再開できます。
 
 通常命令とページフォルト配送は、命令数・TSC の更新、進捗報告、定期保存・上限判定を共通経路で行います。ページフォルト配送自体は命令完了トレースには含めません。開始時点で `--limit` に到達済みの場合は追加の命令を実行せず、最終状態を保存します。
 
@@ -168,54 +175,73 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | `State.cs` | `State<V>` モナドの定義と LINQ コンビネータ（`Select`/`SelectMany`/`Choice`/`Sequence`/`Many0` 等）。 |
 | `CPU.cs` | `CPU` 状態、レジスタアクセサ、共通 ALU/フラグ更新処理を呼び出すモナド操作、シフト計算。 |
 | `Alu.cs` | 通常コアと高速コアで共有する算術・論理演算、フラグ更新、条件分岐の判定。 |
+| `Fpu.cs` | x87 FPU。ST スタック 8 本を double で保持し、80 ビット拡張実数と相互変換。ロード/ストア、四則演算、比較、超越関数、FNSAVE/FRSTOR。 |
 | `FastCore.cs` | 高速実行コア。演算規則は `Alu.cs`、メモリアクセスは `Environment.cs` の共通処理を使用し、未対応命令は通常コアへ委譲。 |
 | `InstructionExecutor.cs` | 両コアの実行・CPU 復元境界、命令ごとのデコード状態、REP の再開位置。 |
 | `InstructionDecoding.cs` / `Registers.cs` | 通常コアの ModRM/SIB 実効アドレス計算と、両コア共通の配列を作らないレジスタ参照。変位・即値は必要な幅だけを直接読み取る。 |
-| `Program.Runner.cs` / `RunOptions.cs` | CLI の起動処理、引数解析・検証、セクタダンプ。 |
-| `EmulationRunner.cs` | 命令実行ループ、割り込み配送、定期保存の呼び出し。 |
+| `Program.Runner.cs` / `RunOptions.cs` | CLI の起動処理、引数解析・検証、ウィンドウ付き実行と別スレッドでの実行ループ、ゲストリセット時の環境再生成、セクタダンプ。 |
+| `EmulationRunner.cs` | 命令実行ループ、割り込み配送、デバイスのポンプ、定期保存の呼び出し。 |
+| `EmulationControl.cs` | UI スレッドからの中断・再開要求と、中断中・停止後の CPU 状態の公開。 |
+| `BootAutomation.cs` | `--boot-debug` の NTLDR 起動メニュー自動操作（VRAM の文字を見ながらキーを送る）。 |
 | `RunDiagnostics.cs` / `WindowsDiagnostics.cs` | トレース・監視点・停止診断と、Windows 固有の構造体・スタック解析。 |
 | `EnvironmentFactory.cs` / `DiskConfiguration.cs` | 埋め込み BIOS の読み込み、ディスク探索・明示的なパス設定、通常起動用の環境生成。 |
 | `SnapshotStore.cs` | 保存形式の版管理、チェックサム検証、ディスク差分を含むチェックポイントの確定と復元。 |
 | `CPU.Snapshot.cs` / `Environment.Snapshot.cs` | CPU・FPU と環境・デバイスの追加保存状態。PCI と ATA の内部状態は各デバイスが保存・復元。 |
-| `Environment.cs` | `EmuEnvironment`（既定 256 MB メモリ、64 KB I/O ポート、ATA 接続）と、メモリ/レジスタ/スタックアクセス、GDT ディスクリプタデコード、文字列・ビット操作・I/O ポートの振り分け。 |
+| `Environment.cs` | `EmuEnvironment`（既定 256 MB メモリ、64 KB I/O ポート、ATA 接続）と、メモリ/レジスタ/スタックアクセス、ページング変換と TLB、GDT ディスクリプタデコード、IDT 経由の割り込み配送、文字列・ビット操作、I/O ポートの振り分け。 |
 | `Environment.Devices.cs` | 環境ごとのデバイス所有と、既存の状態名への転送プロパティ。保存形式のバイト順・バージョンは変更しない。 |
-| `PicDevice.cs` / `PitDevice.cs` / `CmosDevice.cs` / `KeyboardController.cs` / `AcpiPmDevice.cs` | PIC・PIT・CMOS・8042・ACPI の状態と入出力処理。PIC のマスタ/スレーブは共通実装の独立したインスタンス。 |
+| `PicDevice.cs` / `PitDevice.cs` / `CmosDevice.cs` / `KeyboardController.cs` / `MouseDevice.cs` / `AcpiPmDevice.cs` | PIC・PIT・CMOS・8042・PS/2 マウス・ACPI 電源管理の状態と入出力処理。PIC のマスタ/スレーブは共通実装の独立したインスタンス。 |
+| `Pci.cs` | PCI コンフィグ空間（0xCF8/0xCFC）。i440FX ホストブリッジ、PIIX4 ISA/IDE/電源管理、VGA 互換デバイスと拡張 ROM BAR。 |
+| `SerialPort.cs` | 16550 互換 UART と、ホストの名前付きパイプへの橋渡し（送受信は専用タスク）。 |
+| `VgaDevice.cs` / `VgaBiosStub.cs` | VGA のレジスタ・VRAM ウィンドウ・描画と、拡張 ROM として見せる最小 VGA BIOS（INT 10h を C# 側で処理）。 |
+| `VgaWindow.cs` / `RegisterDialog.cs` | Windows Forms の表示ウィンドウ（描画、キー入力とマウス捕捉、中断・再開ボタン）とレジスタ表示ダイアログ。 |
 | `Ext.cs` | 型変換ユーティリティ（`ToTypeData`/`MapType`/`Choice_` 等）。 |
 | `Program.cs` / `Program.*.cs` | 命令の実装とオペコードテーブル。起動処理は `Program.Runner.cs`。 |
-| `Disk.cs` | `DiskImage`（VHD/VHDX/AVHDX/生イメージの CoW ディスクバックエンド）と `AtaDevice`（最小限の ATA PIO デバイス）。 |
+| `Disk.cs` | `DiskImage`（VHD/VHDX/AVHDX/生イメージの CoW ディスクバックエンド）と `AtaDevice`（ATA PIO デバイス、IRQ14）。 |
 | `VhdxBatLayout.cs` | VHDX のペイロード・ビットマップの位置、BAT の必要エントリ数・領域サイズ。 |
 | `tests/Emu86.Tests/` | 本体を参照する回帰テストと、実行状態・トレースの比較用データ。 |
+| `tools/win-debug/` | Windows ブート解析用の Python スクリプト（スナップショットの CPU/メモリ読み出し、Unicorn との差分トレース、シンボル付きスタック表示など）。 |
+| `docs/` | ブート進捗メモ（`boot-progress.md`）、設計判断の記録（`adr/`）、用語集（`glossary.md`）。 |
 
 ## 実装済み命令
 
 | 分類 | 命令 |
 |------|------|
-| データ移動 | `MOV`（reg↔r/m、即値、moffs、Sreg 双方向）、`MOVZX`/`MOVSX`、`XCHG`、`XLAT`、`LEA` |
-| 算術 | `ADD`/`ADC`/`SUB`/`SBB`/`CMP`、`INC`/`DEC`（全幅・メモリ）、`MUL`/`IMUL`/`DIV`/`IDIV`（`IMUL` は 1/2/3 オペランド形式）、`NEG`、`CBW`/`CWD` |
+| データ移動 | `MOV`（reg↔r/m、即値、moffs、Sreg 双方向、CRn/DRn）、`MOVZX`/`MOVSX`、`XCHG`、`XLAT`、`LEA`、`LES`/`LDS`/`LSS`/`LFS`/`LGS`、`CMOVcc`、`BSWAP` |
+| 算術 | `ADD`/`ADC`/`SUB`/`SBB`/`CMP`、`INC`/`DEC`（全幅・メモリ）、`MUL`/`IMUL`/`DIV`/`IDIV`（`IMUL` は 1/2/3 オペランド形式）、`NEG`、`CBW`/`CWD`（`CWDE`/`CDQ`）、`AAA`/`AAS`/`AAM`/`AAD`/`DAA`/`DAS` |
 | 論理/シフト | `AND`/`OR`/`XOR`/`NOT`/`TEST`、`ROL`/`ROR`/`RCL`/`RCR`/`SHL`/`SHR`/`SAR`、`SHLD`/`SHRD` |
 | ビット操作 | `BT`/`BTS`/`BTR`/`BTC`、`BSF`/`BSR`、`SETcc` |
-| スタック | `PUSH`/`POP`（reg/imm/r/m/Sreg）、`PUSHA`/`POPA`、`PUSHF`/`POPF` |
-| 制御転送 | `Jcc`（rel8/rel16）、`JMP`（near/far/間接）、`CALL`/`RET`（near/far/間接）、`LOOP`/`LOOPE`/`LOOPNE`、`JCXZ` |
-| 文字列 | `MOVS`/`STOS`/`LODS`/`CMPS`/`SCAS` + `REP`/`REPE`/`REPNE`（16/32 ビットアドレッシング両対応） |
-| 関数フレーム | `ENTER`/`LEAVE` |
-| 割り込み | `INT`/`INT3`/`INTO`/`IRET`（リアルモード IVT 方式） |
-| フラグ/その他 | `CLC`/`STC`/`CMC`/`CLD`/`STD`/`CLI`/`STI`（実際に IF を操作）、`SAHF`/`LAHF`、`NOP`/`HLT`、`IN`/`OUT` |
-| システム | `LGDT`/`LIDT`/`SGDT`/`SIDT`、`MOV CRn`、`CPUID`（最小限、EAX=0/1 のみ）、プロテクトモード遷移、32 ビットコード実行 |
+| アトミック | `XCHG`（メモリ）、`CMPXCHG`、`XADD`、`CMPXCHG8B`。`LOCK` プレフィックスは受理して無視（単一 CPU のため） |
+| スタック | `PUSH`/`POP`（reg/imm/r/m/Sreg、FS/GS 含む）、`PUSHA`/`POPA`（`PUSHAD`/`POPAD`）、`PUSHF`/`POPF`（IOPL とユーザーモードの制約込み）、`ENTER`/`LEAVE` |
+| 制御転送 | `Jcc`（rel8/rel16/rel32）、`JMP`/`CALL`/`RET`（near/far/間接。far は外側特権レベルへの復帰を含む）、`LOOP`/`LOOPE`/`LOOPNE`、`JCXZ`/`JECXZ` |
+| 文字列 | `MOVS`/`STOS`/`LODS`/`CMPS`/`SCAS`/`INS`/`OUTS` + `REP`/`REPE`/`REPNE`（16/32 ビットアドレッシング、ページフォルト後の途中再開） |
+| 割り込み・例外 | `INT`/`INT3`/`INTO`/`IRET`（`IRETD`）。リアルモードは IVT、プロテクトモードは IDT の割り込み/トラップゲート経由で、リング遷移（TSS の SS0/ESP0）と V86 モードへの出入り（`IRETD` での突入、V86 内 `INT n` の #GP 反射、セグメントレジスタ付きフレーム）に対応。#PF/#UD/#GP を命令開始時の状態から配送 |
+| フラグ/その他 | `CLC`/`STC`/`CMC`/`CLD`/`STD`/`CLI`/`STI`、`SAHF`/`LAHF`、`NOP`/`HLT`（待機せず次へ進む）、`IN`/`OUT`、`WAIT` |
+| システム | `LGDT`/`LIDT`/`SGDT`/`SIDT`、`LLDT`/`LTR`/`SLDT`/`STR`（セレクタの保持のみ）、`MOV CRn`/`DRn`、`CPUID`（EAX=0/1）、`RDTSC`、`RDMSR`/`WRMSR`（汎用ストア）、`INVLPG`、`INVD`/`WBINVD`、プロテクトモード遷移、ページング（2 レベル、PSE、PAE、CR0.WP、Accessed/Dirty 更新）、V86 モード |
+| x87 FPU | ロード/ストア（f32/f64/f80/int16/32/64）、四則演算（全方向・P 付き）、比較（`FCOM`/`FUCOM`/`FCOMI` 系、`FTST`/`FXAM`）、`FCMOVcc`、`FXCH`/`FCHS`/`FABS`/定数ロード、`FSIN`/`FCOS`/`FSINCOS`/`FPTAN`/`FPATAN`/`F2XM1`/`FYL2X`/`FYL2XP1`、`FSQRT`/`FRNDINT`/`FSCALE`/`FPREM`/`FPREM1`/`FXTRACT`、制御語/状態語、`FNSAVE`/`FRSTOR`/`FNSTENV`/`FNINIT` |
 
 ## 周辺デバイス
 
 | デバイス | ポート | 実装範囲 |
 |---------|--------|---------|
-| CMOS/RTC | 0x70（インデックス）/ 0x71（データ） | メモリサイズレジスタ（0x15-0x18, 0x30-0x35）を SeaBIOS 用に設定済み。 |
-| 8254 PIT | 0x40（チャネル0データ）/ 0x43（コントロール） | チャネル0のみ。実時間ではなく、ラッチ操作のたびにカウンタを減算する簡易モデル。 |
-| ATA（プライマリ） | 0x1F0-0x1F7, 0x3F6 | IDENTIFY DEVICE、READ/WRITE SECTORS（PIO）に対応。マスタドライブのみ、割り込み（IRQ14）は使わずポーリング前提。スレーブ・セカンダリコントローラ・DMA・ATAPI は非対応。 |
+| CMOS | 0x70（インデックス）/ 0x71（データ） | 128 バイトの汎用レジスタ。メモリサイズ（0x15-0x18, 0x30-0x31, 0x34-0x35）を SeaBIOS 用に設定済み。RTC の時計・アラーム割り込み（IRQ8）は未実装。 |
+| 8259 PIC（マスタ/スレーブ） | 0x20/0x21、0xA0/0xA1 | ICW1〜ICW4 の初期化とベクタベース、マスク、in-service と EOI（非特定/特定）。配送できるまで要求を保留し、IRQ0/1/3/4/12/14 を配送（スレーブ経由はカスケードの in-service も立てる）。 |
+| 8254 PIT | 0x40、0x42、0x43、0x61 | チャネル 0 のラッチ読み出しと、チャネル 2（ポート 0x61 のゲート、SeaBIOS/Windows の遅延ループ用）。タイマー割り込みは実時間ではなく 1 万命令ごと。 |
+| 8042 キーボードコントローラ | 0x60/0x64 | コマンドバイトの読み書き、AUX の許可/禁止、自己診断、出力ポート書き込みと 0xFE パルスによるシステムリセット、マウスへの転送（0xD4）。ホストのキー入力はセット 1 スキャンコードとして IRQ1 で配送。 |
+| PS/2 マウス | （8042 の AUX ポート） | リセット/ID/サンプルレート/解像度/有効化などのコマンド応答、IntelliMouse（ホイール、4 バイトパケット）、IRQ12。 |
+| 16550 UART ×2 | 0x3F8-0x3FF（COM1、IRQ4）、0x2F8-0x2FF（COM2、IRQ3） | レジスタ一式と MCR ループバック、受信データあり/送信ホールディング空の割り込み。`--com1`/`--com2` で名前付きパイプへ橋渡し。 |
+| VGA | 0x3B4/0x3B5/0x3BA、0x3C0-0x3CF、0x3D4/0x3D5/0x3DA、VRAM 0xA0000-0xBFFFF | Sequencer/Graphics Controller/CRTC/Attribute/DAC、4 プレーン・奇偶・チェイン 4、書き込みモード 0〜3、テキスト/mode 12h/mode 13h の描画。PCI 00:02.0 の拡張 ROM に最小 VGA BIOS スタブ。 |
+| PCI | 0xCF8/0xCFC | i440FX ホストブリッジ（00:00.0）、PIIX4 ISA（00:01.0）、PIIX4 IDE（00:01.1。BAR4 のバスマスタレジスタは常に非活性）、PIIX4 電源管理（00:01.3）、VGA 互換デバイス（00:02.0）。 |
+| ATA（プライマリ） | 0x1F0-0x1F7、0x3F6 | IDENTIFY DEVICE、READ/WRITE SECTORS（EXT/MULTIPLE は単一セクタ扱い）、ソフトウェアリセット、各種設定コマンド。コマンド完了・データ準備で IRQ14。スレーブ・セカンダリコントローラ・DMA・ATAPI は非対応（IDENTIFY も DMA 非対応を報告）。 |
+| ACPI 電源管理（PIIX4） | 0xB000-0xB03F、0xAFE0-0xAFE3、0xB2、0xCF9 | PM1 ステータス/イネーブル/コントロール、PM タイマー（命令数ベース）、GPE0、APM コマンドによる SCI_EN の切り替え、0xCF9 によるシステムリセット。SMBus（0xB100）はデバイス無し。 |
 | デバッグコンソール | 0x402 | SeaBIOS のデバッグ出力を標準エラー出力へそのまま転送。 |
 
 ## 主な制限
 
-- ページング（CR3/ページテーブル）は未実装です。
-- 割り込みはリアルモードの IVT（`vector × 4`）方式のみ。プロテクトモードの IDT ゲート経由のディスパッチ、PIC 8259、ハードウェア外部 IRQ は未実装です（IDT レジスタ自体は `LIDT`/`SIDT` で保持されます）。
-- 補助キャリーフラグ（AF）は更新しません。
+- 単一 CPU のみ。Local APIC / I/O APIC と MMIO は未実装で、`CPUID` でも APIC を報告しません（マルチ CPU 対応は `docs/adr/0001-multithreading-and-smp.md` で保留中）。
+- TSS によるハードウェアタスクスイッチ・タスクゲート（NMI、#DF）・コールゲート・LDT は未実装です（`LLDT`/`LTR` はセレクタを保持するだけ）。#PF 配送中の再フォルトはダブルフォルトとして停止します。
+- SSE/MMX、`SYSENTER`/`SYSEXIT`、`FXSAVE`/`FXRSTOR` は未実装で、`CPUID` でも報告しません。
 - セグメントオーバーライドプレフィックスは ModRM 実効アドレス計算と moffs には反映されますが、文字列命令（`MOVS`/`STOS`/`LODS`/`CMPS`/`SCAS`）は DS:SI・ES:DI 固定で、オーバーライドは反映されません。
-- ATA はマスタドライブ・PIO 転送のみ。VHD 形式への書き込みは非対応（差分書き込みは常に AVHDX オーバーレイに限定）。
+- `HLT` は待機せずに次の命令へ進み、`LOCK` プレフィックスは無視します。
+- ゲストの時刻は命令数ベース（100 万命令 = 1 秒、IRQ0 は 1 万命令ごと、TSC と ACPI PM タイマーも同じ基準）で、実時間とは一致しません。RTC の時計は未実装です。
+- ATA はマスタドライブ・PIO 転送のみ。DMA・ATAPI・セカンダリコントローラは非対応です。VHD 形式への直接書き込みは非対応（差分書き込みは常に AVHDX オーバーレイに限定）。
 - 自動回帰テストはありますが、OS の長時間ブート確認は別途手動で行います。
