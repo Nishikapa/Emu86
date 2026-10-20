@@ -1,4 +1,5 @@
-using System.Globalization;
+using static Emu86.ArgParsers;
+using static Emu86.CommandOption;
 
 namespace Emu86;
 
@@ -52,118 +53,94 @@ internal sealed class RunOptions
     public (long Start, int Count)? DumpLba { get; private set; }
     public DiagnosticOptions Diagnostics { get; } = new();
 
+    // 値の形。アドレス範囲は lo hi の 2 つの十六進数で lo < hi。
+    static readonly ArgParser<AddressRange> Range =
+        from lo in Hex
+        from hi in Hex
+        from _ in Require(lo < hi, "expected lo < hi")
+        select new AddressRange(lo, hi);
+
+    static readonly ArgParser<(long Start, int Count)> SectorRange =
+        from start in Integer
+        from count in Integer
+        from _ in Require(count is > 0 and <= int.MaxValue && start <= long.MaxValue - count, "invalid sector range")
+        select (start, (int)count);
+
+    static readonly ArgParser<int> IntLogTail =
+        (from last in Integer
+         from _ in Require(last is >= 1 and <= 100000, "expected 1..100000")
+         select (int)last).Optional(4);
+
+    // オプションの表。解析(Parse)と使い方(Usage)はこの表から作る。
+    static readonly CommandOption[] Table =
+    [
+        Flag("Run", "--resume", "Resume from the snapshot instead of booting from the reset vector", o => o.Resume = true),
+        Of("Run", "--snapshot", "path", "Snapshot file to save to and resume from (default snapshot.snap)", Value, (o, v) => o.SnapshotPath = v),
+        Of("Run", "--limit", "count|max", "Stop after count instructions (max = run until the window closes)",
+            Word("max").Select(_ => long.MaxValue).Or(Integer), (o, v) => o.Limit = v),
+        Of("Run", "--snapshot-interval", "count", "Save a snapshot every count instructions (default 100000000, 0 = only at the end)",
+            Integer, (o, v) => o.SnapshotInterval = v == 0 ? long.MaxValue : v),
+        Flag("Run", "--slow", "Run every instruction on the LINQ core instead of the fast core", o => o.Slow = true),
+        Flag("Run", "--noirq", "Do not deliver hardware interrupts", o => o.NoIrq = true),
+        Flag("Run", "--window", "Show the VGA display in a 640x480 window (keyboard and mouse go to the guest)", o => o.Window = true),
+        Of("Run", "--com1", "name", @"Serve COM1 on \\.\pipe\name (WinDbg: com:pipe,port=\\.\pipe\name,resets=0,reconnect)", Value, (o, v) => o.Com1Pipe = v),
+        Of("Run", "--com2", "name", @"Serve COM2 on \\.\pipe\name", Value, (o, v) => o.Com2Pipe = v),
+        Flag("Run", "--boot-debug", "Drive NTLDR's F8 menu to boot Windows in Debugging Mode (COM2, 19200 bps)", o => o.BootDebug = true),
+        Flag("Run", "--help", "Show this help and exit", o => o.Help = true),
+        Of("Disk", "--disk", "path", "Base disk image (default: sample.vhd or sample.vhdx in the current directory)", Value, (o, v) => o.DiskPath = v),
+        Of("Disk", "--overlay", "path", "Writable overlay for --disk (default: the base path with .avhdx)", Value, (o, v) => o.OverlayPath = v),
+        Of("Disk", "--dumplba", "start count", "Dump sectors from the existing overlay to lba_dump.bin", SectorRange, (o, v) => o.DumpLba = v),
+        Flag("Diagnostics", "--trace-all", "Trace every instruction to trace.log, not only control transfers", o => o.Diagnostics.TraceAll = true),
+        Flag("Diagnostics", "--regtrace", "Include the general registers and EFLAGS in each trace line", o => o.Diagnostics.RegTrace = true),
+        Flag("Diagnostics", "--notrace", "Do not write trace.log", o => o.Diagnostics.NoTrace = true),
+        Flag("Diagnostics", "--brhist", "Report the last 64 branches on stop and stop when CS becomes null", o => o.Diagnostics.BranchHistory = true),
+        Flag("Diagnostics", "--esptrap", "Stop when ESP enters the kernel entry stack", o => o.Diagnostics.EspTrap = true),
+        Flag("Diagnostics", "--pftrap", "Stop on a protection page fault", o => o.Diagnostics.PfTrap = true),
+        Flag("Diagnostics", "--atalog", "Log ATA commands to stderr", o => o.Diagnostics.AtaLog = true),
+        Flag("Diagnostics", "--pcilog", "Log PCI configuration accesses to stderr", o => o.Diagnostics.PciLog = true),
+        Flag("Diagnostics", "--piclog", "Log PIC mask changes to stderr", o => o.Diagnostics.PicLog = true),
+        Flag("Diagnostics", "--vgalog", "Log VGA register writes to stderr", o => o.Diagnostics.VgaLog = true),
+        Of("Diagnostics", "--intlog", "[lastCount]", "Log protected-mode interrupt deliveries; report the first 30 and the last lastCount (default 4)",
+            IntLogTail, (o, v) => { o.Diagnostics.IntLog = true; o.Diagnostics.IntLogLast = v; }),
+        Of("Diagnostics", "--upflog", "[minCount]", "Log user-mode page faults from instruction minCount on (default 0)",
+            Integer.Optional(0), (o, v) => o.Diagnostics.UserPageFaultMin = v),
+        Of("Diagnostics", "--breakeip", "hex", "Stop when EIP reaches the address", Hex, (o, v) => o.Diagnostics.BreakEip = v),
+        Of("Diagnostics", "--breakeax", "hex", "With --breakeip: stop only when EAX also matches", Hex, (o, v) => o.Diagnostics.BreakEax = v),
+        Of("Diagnostics", "--breakat", "count", "Stop at the instruction count", Integer, (o, v) => o.Diagnostics.BreakAt = v),
+        Of("Diagnostics", "--watchval", "hex", "Stop when any general register holds the value", Hex, (o, v) => o.Diagnostics.WatchValue = v),
+        Of("Diagnostics", "--entrylog", "lo hi", "Log the first 400 entries into the EIP range (with Windows IRP/debug-string decoding)", Range, (o, v) => o.Diagnostics.EntryLog = v),
+        Of("Diagnostics", "--breakrange", "lo hi", "Stop when EIP enters the range (protected mode)", Range, (o, v) => o.Diagnostics.BreakRange = v),
+        Of("Diagnostics", "--wlog", "lo hi", "Record writes to the physical range and show the last 30 on stop", Range, (o, v) => o.Diagnostics.WriteLog = v),
+        Of("Diagnostics", "--watch", "lo hi", "Stop on a write to the physical range (paging on)", Range, (o, v) => o.Diagnostics.Watch = v),
+    ];
+
+    // コマンドライン全体: 表のどれかに当てはまるオプションの 0 回以上の繰り返し。
+    static readonly ArgParser<IReadOnlyList<Action<RunOptions>>> CommandLine =
+        Choice([.. Table.Select(option => option.Parser)]).Many();
+
     public static RunOptions Parse(string[] args)
     {
+        var (_, actions, end) = CommandLine(args, 0);
+        if (end < args.Length) throw new ArgumentException($"Unknown option: {args[end]}");
         var options = new RunOptions();
-        var diagnostics = options.Diagnostics;
-        for (var index = 0; index < args.Length; index++)
-        {
-            var option = args[index];
-            string Value()
-            {
-                if (++index >= args.Length || string.IsNullOrWhiteSpace(args[index]) || args[index].StartsWith("--"))
-                    throw new ArgumentException($"{option}: missing value");
-                return args[index];
-            }
-            long Decimal()
-            {
-                if (!long.TryParse(Value(), NumberStyles.None, CultureInfo.InvariantCulture, out var value))
-                    throw new ArgumentException($"{option}: expected a non-negative decimal integer");
-                return value;
-            }
-            uint Hex()
-            {
-                var value = Value();
-                if (value.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) value = value[2..];
-                if (!uint.TryParse(value, NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out var address))
-                    throw new ArgumentException($"{option}: expected a 32-bit hexadecimal address");
-                return address;
-            }
-            AddressRange Range()
-            {
-                var range = new AddressRange(Hex(), Hex());
-                if (range.Lo >= range.Hi) throw new ArgumentException($"{option}: expected lo < hi");
-                return range;
-            }
-            switch (option)
-            {
-                case "--help": options.Help = true; break;
-                case "--resume": options.Resume = true; break;
-                case "--slow": options.Slow = true; break;
-                case "--noirq": options.NoIrq = true; break;
-                case "--window": options.Window = true; break;
-                case "--com1": options.Com1Pipe = Value(); break;
-                case "--com2": options.Com2Pipe = Value(); break;
-                case "--boot-debug": options.BootDebug = true; break;
-                case "--limit":
-                    if (index + 1 < args.Length && args[index + 1] == "max") { index++; options.Limit = long.MaxValue; } // 上限なし
-                    else options.Limit = Decimal();
-                    break;
-                case "--snapshot-interval":
-                    var interval = Decimal();
-                    options.SnapshotInterval = interval == 0 ? long.MaxValue : interval; // 0 = 終了時のみ
-                    break;
-                case "--snapshot": options.SnapshotPath = Value(); break;
-                case "--disk": options.DiskPath = Value(); break;
-                case "--overlay": options.OverlayPath = Value(); break;
-                case "--dumplba":
-                    var start = Decimal();
-                    var count = Decimal();
-                    if (count is <= 0 or > int.MaxValue || start > long.MaxValue - count)
-                        throw new ArgumentException("--dumplba: invalid sector range");
-                    options.DumpLba = (start, (int)count);
-                    break;
-                case "--trace-all": diagnostics.TraceAll = true; break;
-                case "--regtrace": diagnostics.RegTrace = true; break;
-                case "--notrace": diagnostics.NoTrace = true; break;
-                case "--brhist": diagnostics.BranchHistory = true; break;
-                case "--esptrap": diagnostics.EspTrap = true; break;
-                case "--pftrap": diagnostics.PfTrap = true; break;
-                case "--atalog": diagnostics.AtaLog = true; break;
-                case "--pcilog": diagnostics.PciLog = true; break;
-                case "--piclog": diagnostics.PicLog = true; break;
-                case "--vgalog": diagnostics.VgaLog = true; break;
-                case "--intlog":
-                    diagnostics.IntLog = true;
-                    if (index + 1 < args.Length && !args[index + 1].StartsWith("--"))
-                    {
-                        var last = Decimal();
-                        if (last is < 1 or > 100000) throw new ArgumentException("--intlog: expected 1..100000");
-                        diagnostics.IntLogLast = (int)last;
-                    }
-                    break;
-                case "--watchval": diagnostics.WatchValue = Hex(); break;
-                case "--breakeax": diagnostics.BreakEax = Hex(); break;
-                case "--breakeip": diagnostics.BreakEip = Hex(); break;
-                case "--breakat": diagnostics.BreakAt = Decimal(); break;
-                case "--entrylog": diagnostics.EntryLog = Range(); break;
-                case "--breakrange": diagnostics.BreakRange = Range(); break;
-                case "--wlog": diagnostics.WriteLog = Range(); break;
-                case "--watch": diagnostics.Watch = Range(); break;
-                case "--upflog":
-                    diagnostics.UserPageFaultMin = index + 1 < args.Length && !args[index + 1].StartsWith("--") ? Decimal() : 0;
-                    break;
-                default: throw new ArgumentException($"Unknown option: {option}");
-            }
-        }
+        foreach (var action in actions) action(options);
         if (options.OverlayPath != null && options.DiskPath == null)
             throw new ArgumentException("--overlay requires --disk");
         return options;
     }
 
-    public const string Usage = """
-        Usage: Emu86 [--resume] [--snapshot path] [--limit count] [--slow] [--noirq] [--window]
-          --limit count|max             Stop after count instructions (max = run until the window closes)
-          --snapshot-interval count     Save a snapshot every count instructions (default 100000000, 0 = only at the end)
-          --window                      Show the VGA display in a 640x480 window (keyboard and mouse go to the guest)
-          --com1 name / --com2 name     Serve the UART on \\.\pipe\name (WinDbg: com:pipe,port=\\.\pipe\name,resets=0,reconnect)
-          --boot-debug                  Drive NTLDR's F8 menu to boot Windows in Debugging Mode (COM2, 19200 bps)
-          --disk path [--overlay path]   Select a base image and writable overlay
-          --dumplba start count         Dump sectors from the existing overlay to lba_dump.bin
-          --trace-all --regtrace --notrace --brhist --esptrap --pftrap
-          --atalog --pcilog --piclog --vgalog --intlog [lastCount] --upflog [minCount]
-          --breakeip hex [--breakeax hex] --breakat count --watchval hex
-          --entrylog lo hi --breakrange lo hi --wlog lo hi --watch lo hi
-        Counts/LBAs are decimal; addresses and range bounds are hexadecimal (optional 0x).
-        """;
+    public static readonly string Usage = BuildUsage();
+
+    static string BuildUsage()
+    {
+        var width = Table.Max(option => option.Syntax.Length) + 2;
+        var lines = new List<string> { "Usage: Emu86 [options]" };
+        foreach (var group in Table.GroupBy(option => option.Group))
+        {
+            lines.Add($"{group.Key}:");
+            lines.AddRange(group.Select(option => $"  {option.Syntax.PadRight(width)}{option.Description}"));
+        }
+        lines.Add("Counts/LBAs are decimal; addresses and range bounds are hexadecimal (optional 0x).");
+        return string.Join(Environment.NewLine, lines);
+    }
 }

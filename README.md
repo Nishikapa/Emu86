@@ -78,7 +78,7 @@ dotnet run --project tests/Emu86.Tests -c Release -- completion disk
 
 ### 起動設定
 
-`RunOptions` が引数を先に解析し、不明なオプション・値の不足・不正な数値や範囲は、ディスクを開く前にエラーにします。`--help` で一覧を表示できます。命令数・LBA は十進数、アドレスは十六進数（`0x` は省略可）です。既定は分岐のみをトレースし、`--notrace` で無効化、`--trace-all` で全命令を記録します。
+`RunOptions` が引数を先に解析し、不明なオプション・値の不足・不正な数値や範囲は、ディスクを開く前にエラーにします（メッセージはオプション名で始まります）。`--help` で一覧を表示できます。オプションは名前・引数・説明・値のパーサ・適用関数の表として定義され、解析も一覧もその表から作られます。命令数・LBA は十進数、アドレスは十六進数（`0x` は省略可）です。既定は分岐のみをトレースし、`--notrace` で無効化、`--trace-all` で全命令を記録します。
 
 `--disk <base>` でベースイメージを明示でき、`--overlay <path>`（`--disk` と併用）で差分の保存先を指定できます。省略時はベースの拡張子を `.avhdx` に変えたパスを使います。選択したパスは起動時に絶対パスとして固定し、スナップショット復元にも同じ設定を渡します。`--dumplba <start> <count>` は既存のオーバーレイから読み出すだけで、新規作成せず `lba_dump.bin` に保存します。
 
@@ -181,7 +181,8 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | `FastCore.cs` | 高速実行コア。演算規則は `Alu.cs`、メモリアクセスは `Environment.cs` の共通処理を使用し、未対応命令は通常コアへ委譲。 |
 | `InstructionExecutor.cs` | 両コアの実行・CPU 復元境界、命令ごとのデコード状態、REP の再開位置。 |
 | `InstructionDecoding.cs` / `Registers.cs` | 通常コアの ModRM/SIB 実効アドレス計算と、両コア共通の配列を作らないレジスタ参照。変位・即値は必要な幅だけを直接読み取る。 |
-| `Program.Runner.cs` / `RunOptions.cs` | CLI の起動処理、引数解析・検証、ウィンドウ付き実行と別スレッドでの実行ループ、ゲストリセット時の環境再生成、セクタダンプ。 |
+| `Program.Runner.cs` / `RunOptions.cs` | CLI の起動処理、オプションの表（名前・引数・説明・値のパーサ・適用）、ウィンドウ付き実行と別スレッドでの実行ループ、ゲストリセット時の環境再生成、セクタダンプ。解析と `--help` の一覧は同じ表から作る。 |
+| `ArgumentParsing.cs` | 引数列のパーサコンビネータ（`ArgParser<T>`: `Select`/`SelectMany`/`Choice`/`Many`/`Optional`/`Require` と `Value`/`Decimal`/`Hex`）と `CommandOption`。 |
 | `EmulationRunner.cs` | 命令実行ループ、例外配送、デバイスのポンプ、定期保存の呼び出し。 |
 | `IrqDelivery.cs` | ハードウェア割り込みの選択（優先順・IF・PIC のマスクと in-service・IDT の準備）と、配送・in-service 設定・要求取り下げの `State`。 |
 | `EmulationControl.cs` | UI スレッドからの中断・再開要求と、中断中・停止後の CPU 状態の公開。 |
