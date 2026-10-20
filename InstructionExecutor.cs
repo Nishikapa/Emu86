@@ -4,7 +4,20 @@ namespace Emu86;
 
 public struct DecodeContext
 {
-    public bool Cs, Es, Ss, Ds, Fs, Gs, OperandSize, AddressSize, Lock;
+    // 現在の命令のプレフィックス(両コアが Prefixes パーサで読む)。
+    public Prefix Prefixes;
+    public bool Cs { readonly get => Has(Prefix.Cs); set => Set(Prefix.Cs, value); }
+    public bool Es { readonly get => Has(Prefix.Es); set => Set(Prefix.Es, value); }
+    public bool Ss { readonly get => Has(Prefix.Ss); set => Set(Prefix.Ss, value); }
+    public bool Ds { readonly get => Has(Prefix.Ds); set => Set(Prefix.Ds, value); }
+    public bool Fs { readonly get => Has(Prefix.Fs); set => Set(Prefix.Fs, value); }
+    public bool Gs { readonly get => Has(Prefix.Gs); set => Set(Prefix.Gs, value); }
+    public bool OperandSize { readonly get => Has(Prefix.OperandSize); set => Set(Prefix.OperandSize, value); }
+    public bool AddressSize { readonly get => Has(Prefix.AddressSize); set => Set(Prefix.AddressSize, value); }
+    public bool Lock { readonly get => Has(Prefix.Lock); set => Set(Prefix.Lock, value); }
+    readonly bool Has(Prefix prefix) => (Prefixes & prefix) != 0;
+    void Set(Prefix prefix, bool value) => Prefixes = value ? Prefixes | prefix : Prefixes & ~prefix;
+
     bool hasRepeatProgress;
     uint repeatCount, repeatSource, repeatDestination, repeatAccumulator, repeatFlags;
 
