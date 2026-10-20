@@ -133,9 +133,67 @@ static class StateTests
         }
     }
 
+    static void Combinators()
+    {
+        using var env = new EmuEnvironment(memory: new byte[0x10000]);
+        var cpu = new CPU { eax = 5 };
+        var calls = 0;
+        State<uint> read = (context, state, opcodes) => { calls++; return (true, state.eax, state, "read"); };
+        var accepted = read.Where(value => value == 5)(env, cpu, null);
+        Equal(true, accepted.IsSuccess, "where keeps a matching value");
+        Equal(5u, accepted.value, "where passes the value through");
+        Equal("read", accepted.log, "where keeps the log");
+        var rejected = read.Where(value => value == 6)(env, cpu, null);
+        Equal(false, rejected.IsSuccess, "where fails a non-matching value");
+        Equal(0u, rejected.value, "where clears the value on failure");
+        Equal(cpu, rejected.cpu, "where returns the CPU unchanged");
+        Equal(2, calls, "where runs the source once per evaluation");
+        State<uint> failing = (context, state, opcodes) => (false, 5, state, string.Empty);
+        var tested = 0;
+        Equal(false, failing.Where(value => { tested++; return true; })(env, cpu, null).IsSuccess, "where propagates failure");
+        Equal(0, tested, "where does not test a failed value");
+        Throws<Exception>(() => ((State<uint>)null).Where(value => true), "where rejects a null state");
+
+        // クエリ構文: where 句はガードになり、述語が偽なら以降の from は実行されない。
+        var written = 0;
+        State<Unit> guarded =
+            from value in read
+            where value == 5
+            from _ in SetCpu(state => { written++; state.ebx = value; return state; })
+            select Unit.unit;
+        Equal(true, guarded(env, cpu, null).IsSuccess, "query guard passes");
+        Equal(5u, cpu.ebx, "query guard runs the following clause");
+        cpu.eax = 7;
+        Equal(false, guarded(env, cpu, null).IsSuccess, "query guard fails");
+        Equal(1, written, "query guard short-circuits the following clause");
+
+        var executed = 0;
+        var body = SetCpu(state => { executed++; return state; });
+        Equal(true, When(false, body)(env, cpu, null).IsSuccess, "when with a false condition succeeds");
+        Equal(cpu, When(false, body)(env, cpu, null).cpu, "when with a false condition keeps the CPU");
+        Equal(0, executed, "when with a false condition skips the body");
+        When(true, body)(env, cpu, null);
+        Equal(1, executed, "when with a true condition runs the body");
+        Unless(true, body)(env, cpu, null);
+        Equal(1, executed, "unless with a true condition skips the body");
+        Unless(false, body)(env, cpu, null);
+        Equal(2, executed, "unless with a false condition runs the body");
+        Equal(true, ReferenceEquals(When(false, body), Pass), "when reuses the shared no-op");
+
+        cpu.ecx = 10;
+        var modify = CPU._ecx.Modify(value => value * 3);
+        Equal(10u, cpu.ecx, "modify is deferred");
+        Equal(cpu, modify(env, cpu, null).cpu, "modify returns the same CPU instance");
+        Equal(30u, cpu.ecx, "modify applies the update");
+        cpu.cf = true;
+        CPU._cf.Modify(flag => !flag)(env, cpu, null);
+        Equal(false, cpu.cf, "modify toggles a flag");
+    }
+
     public static void Run()
     {
         CpuUpdates();
+        Combinators();
         OperandWidths();
         ControlRegisters();
         Console.WriteLine($"State helper assertions passed: {assertions}");
