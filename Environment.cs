@@ -240,10 +240,10 @@ static public partial class Ext
 
     // SP/ESP をデータ長分減らしてからスタックトップへ書き込む（PUSH）。
     static public State<Unit> Push(Data data) =>
-        from cpu0 in GetCpu
-        from _1 in cpu0.stack32 ?
-            _esp.Set((uint)(cpu0.esp - arrLen[data.type])) :
-            _sp.Set((ushort)(cpu0.sp - arrLen[data.type]))
+        from stack32 in GetDataFromCpu(cpu => cpu.stack32)
+        from _1 in stack32 ?
+            _esp.Modify(esp => (uint)(esp - arrLen[data.type])) :
+            _sp.Modify(sp => (ushort)(sp - arrLen[data.type]))
         from cpu in GetCpu
         from _2 in SetMemOrRegData(EnvGetStackAddr(cpu), data)
         select Unit.unit;
@@ -259,8 +259,8 @@ static public partial class Ext
             GetMemOrRegData32(addr)
         )
         from _ in cpu.stack32 ?
-            _esp.Set((uint)(cpu.esp + arrLen[type])) :
-            _sp.Set((ushort)(cpu.sp + arrLen[type]))
+            _esp.Modify(esp => (uint)(esp + arrLen[type])) :
+            _sp.Modify(sp => (ushort)(sp + arrLen[type]))
         select data;
 
     static public State<Unit> Push16(ushort value) =>
@@ -365,9 +365,7 @@ static public partial class Ext
     //   op: 0=BT(変更なし) 1=BTS(セット) 2=BTR(クリア) 3=BTC(反転)
     static public State<Unit> BitTest(MemAddr addr, Data data, int bit, int op) =>
         from _f in _cf.Set(((data.type == 1 ? data.dw : data.dd) & (1u << (bit & (data.type == 1 ? 15 : 31)))) != 0)
-        from _w in op == 0
-            ? Unit.unit.ToState()
-            : SetMemOrRegData(addr, BitModify(data, bit, op))
+        from _w in Unless(op == 0, SetMemOrRegData(addr, BitModify(data, bit, op)))
         select Unit.unit;
 
     static Data BitModify(Data data, int bit, int op)
@@ -418,14 +416,14 @@ static public partial class Ext
         from frame in GetRegData16(4)
         from _n in EnterNesting(frame, level & 0x1F)
         from _b in _bp.Set(frame)
-        from _s in SetCpu(cpu => { cpu.sp -= alloc; return cpu; })
+        from _s in _sp.Modify(sp => (ushort)(sp - alloc))
         select Unit.unit;
 
     // ネストレベル>0 のとき、外側フレームのリンクを順に push し、最後に frame を push する。
     static State<Unit> EnterNesting(ushort frame, int level) =>
         Enumerable.Range(1, level)
             .Select(i => i < level
-                ? from _r in SetCpu(cpu => { cpu.bp -= 2; return cpu; })
+                ? from _r in _bp.Modify(bp => (ushort)(bp - 2))
                   from v in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryData16(env, cpu.ss_base + cpu.bp))
                   from _p in Push16(v)
                   select Unit.unit
@@ -510,7 +508,7 @@ static public partial class Ext
         let fromVm = cpu0.vm
         let cpl = cpu0.cpl // VM を落とす前に評価する(V86 なら 3)
         let fl = cpu0.eflags
-        from _vm in fromVm ? SetCpu(cpu => { cpu.eflags &= ~0x20000u; return cpu; }) : Unit.unit.ToState()
+        from _vm in When(fromVm, SetCpu(cpu => { cpu.eflags &= ~0x20000u; return cpu; }))
         from _sw in SwitchToInnerStack(sel, cpl, fromVm)
         from _1 in Push(fl.ToTypeData())
         from cs in GetSRegData(1)
@@ -518,7 +516,7 @@ static public partial class Ext
         from eip0 in GetDataFromCpu(cpu => cpu.eip)
         from _3 in Push(eip0.ToTypeData())
         // 一部の例外(#PF 等)は EIP の後ろにエラーコードを push する。
-        from _e in hasError ? Push(errorCode.ToTypeData()) : Unit.unit.ToState()
+        from _e in When(hasError, Push(errorCode.ToTypeData()))
         // 割り込みゲート(型 0xE)は IF をクリアする。トラップゲート(0xF)は保つ。
         from _if in SetCpu(cpu => { if (gateType == 0xE) cpu.jf = false; cpu.tf = false; return cpu; })
         from _4 in _eip.Set(offset)
@@ -530,48 +528,42 @@ static public partial class Ext
     // V86 モードから(fromVm)は、さらにその前に GS/FS/DS/ES を積み、これらを null にする
     // (ハンドラ側は KiTrap の冒頭でカーネル用セレクタをロードし直す)。
     static State<Unit> SwitchToInnerStack(ushort targetCs, int cpl, bool fromVm) =>
-        from _ in cpl > (targetCs & 3)
-            ? (from ctx in GetDataFromEnvCpu((env, cpu) =>
-                  {
-                      var (tssBase, _) = EnvReadDescriptor(env, cpu, cpu.tr);
-                      var esp0 = EnvGetMemoryData32(env, tssBase + 4);
-                      var ss0 = (ushort)EnvGetMemoryData32(env, tssBase + 8);
-                      return (oldSs: cpu.ss, oldEsp: cpu.esp, ss0, esp0, cpu.es, cpu.ds, cpu.fs, cpu.gs);
-                  })
-               from _1 in LoadSReg(2, ctx.ss0)
-               from _2 in SetCpu(cpu => { cpu.esp = ctx.esp0; return cpu; })
-               from _v in fromVm
-                   ? (from a in Push(((uint)ctx.gs).ToTypeData())
-                      from b in Push(((uint)ctx.fs).ToTypeData())
-                      from c in Push(((uint)ctx.ds).ToTypeData())
-                      from d in Push(((uint)ctx.es).ToTypeData())
-                      select Unit.unit)
-                   : Unit.unit.ToState()
-               from _3 in Push(((uint)ctx.oldSs).ToTypeData())
-               from _4 in Push(ctx.oldEsp.ToTypeData())
-               from _n in fromVm
-                   ? SetCpu(cpu =>
-                     {
-                         foreach (var reg in new[] { 0, 3, 4, 5 })
-                             cpu = EnvSetSReg3(0)(reg)(cpu);
-                         return cpu;
-                     })
-                   : Unit.unit.ToState()
-               select Unit.unit)
-            : Unit.unit.ToState()
-        select Unit.unit;
+        When(cpl > (targetCs & 3),
+            from ctx in GetDataFromEnvCpu((env, cpu) =>
+                {
+                    var (tssBase, _) = EnvReadDescriptor(env, cpu, cpu.tr);
+                    var esp0 = EnvGetMemoryData32(env, tssBase + 4);
+                    var ss0 = (ushort)EnvGetMemoryData32(env, tssBase + 8);
+                    return (oldSs: cpu.ss, oldEsp: cpu.esp, ss0, esp0, cpu.es, cpu.ds, cpu.fs, cpu.gs);
+                })
+            from _1 in LoadSReg(2, ctx.ss0)
+            from _2 in _esp.Set(ctx.esp0)
+            from _v in When(fromVm,
+                from a in Push(((uint)ctx.gs).ToTypeData())
+                from b in Push(((uint)ctx.fs).ToTypeData())
+                from c in Push(((uint)ctx.ds).ToTypeData())
+                from d in Push(((uint)ctx.es).ToTypeData())
+                select Unit.unit)
+            from _3 in Push(((uint)ctx.oldSs).ToTypeData())
+            from _4 in Push(ctx.oldEsp.ToTypeData())
+            from _n in When(fromVm, SetCpu(cpu =>
+                {
+                    foreach (var reg in new[] { 0, 3, 4, 5 })
+                        cpu = EnvSetSReg3(0)(reg)(cpu);
+                    return cpu;
+                }))
+            select Unit.unit);
 
     // 外側の特権レベル(例: ring0 → ring3)へ戻るときは、さらに ESP と SS を pop してスタックを切り替える。
     // V86 モード内の far 復帰はリアルモード同様で、セレクタの下位ビットは特権を意味しない。
     static public State<Unit> ReturnToOuterStack(ushort targetCs) =>
         from cpu0 in GetCpu
-        from _ in !cpu0.vm && (targetCs & 3) > (cpu0.cs & 3)
-            ? (from sp in Pop(2)
-               from ss in Pop(2)
-               from _1 in LoadSReg(2, (ushort)ss.dd)
-               from _2 in SetCpu(cpu => { cpu.esp = sp.dd; return cpu; })
-               select Unit.unit)
-            : Unit.unit.ToState()
+        from _ in When(!cpu0.vm && (targetCs & 3) > (cpu0.cs & 3),
+            from sp in Pop(2)
+            from ss in Pop(2)
+            from _1 in LoadSReg(2, (ushort)ss.dd)
+            from _2 in _esp.Set(sp.dd)
+            select Unit.unit)
         select Unit.unit;
 
     // IRET: モードに応じて復帰する(リアル/16bit と プロテクト/32bit)。

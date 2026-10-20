@@ -133,11 +133,9 @@ static public partial class Ext
         let cnt = count & 0x1F   // 80386 はシフト量を 5bit にマスクする
         let res = ComputeShift(data.Value(), cnt, kind, Bits(data.type), cf0)
         // count==0 のときはフラグを変更しない。シフト系(kind>=4)は ZF/SF も更新する。
-        from _f in cnt == 0
-            ? unit.ToState()
-            : kind >= 4
-                ? SetCpu((_cf, res.cf), (_of, res.of), (_zf, res.result == 0), (_sf, (res.result & Msb(data.type)) != 0), (_pf, Par(res.result)))
-                : SetCpu((_cf, res.cf), (_of, res.of))
+        from _f in Unless(cnt == 0, kind >= 4
+            ? SetCpu((_cf, res.cf), (_of, res.of), (_zf, res.result == 0), (_sf, (res.result & Msb(data.type)) != 0), (_pf, Par(res.result)))
+            : SetCpu((_cf, res.cf), (_of, res.of)))
         select res.result.ToTypeData(data.type);
 
     static public State<bool> Not(State<bool> s) =>
@@ -151,6 +149,10 @@ static public partial class Ext
 
     static public State<Unit> Set<T>(this Accessor<CPU, T> acc, T value) =>
         SetCpu(cpu => acc.setter(cpu)(value));
+
+    // アクセサが指す値を関数で更新する(CMC の cf = !cf、SP -= n など)。
+    static public State<Unit> Modify<T>(this Accessor<CPU, T> acc, Func<T, T> update) =>
+        SetCpu(cpu => acc.setter(cpu)(update(acc.getter(cpu))));
 
     static public State<Unit> IpInc(int inc) =>
         SetCpu(cpu => { cpu.eip = (uint)(cpu.eip + inc); return cpu; });

@@ -8,6 +8,30 @@ static public partial class Ext
 {
     static public State<V> ToState<V>(this V value) => (env, cpu, ope) => (true, value, cpu, string.Empty);
 
+    // 何もせず成功する State(When/Unless の「実行しない側」)。
+    static public readonly State<Unit> Pass = Unit.unit.ToState();
+
+    // クエリ構文の where 句。述語が偽なら失敗にする(CPU は変更しない)。
+    // 失敗を返す State は CPU を変更する前に置くこと(Choice/Many0 は失敗した枝の変更を巻き戻せない)。
+    static public State<T> Where<T>(this State<T> state, Func<T, bool> predicate)
+    {
+        if (default == state)
+        {
+            throw new Exception();
+        }
+        return (env, cpu, ope) =>
+        {
+            var (f, value, cpu2, log) = state(env, cpu, ope);
+            var ok = f && predicate(value);
+            return (ok, ok ? value : default, cpu2, log);
+        };
+    }
+
+    // 条件が真のときだけ state を実行する(偽なら何もせず成功)。
+    static public State<Unit> When(bool condition, State<Unit> state) => condition ? state : Pass;
+
+    static public State<Unit> Unless(bool condition, State<Unit> state) => When(!condition, state);
+
     static public State<B> Select<A, B>(this State<A> stateA, Func<A, B> selector)
     {
         if (default == stateA)

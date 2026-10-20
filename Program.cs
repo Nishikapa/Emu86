@@ -59,7 +59,7 @@ static partial class Program
         from ret in Pop(type)
         from _2 in (2 == type) ? _eip.Set(ret.dd) : _ip.Set(ret.dw)
         from cs in Pop(type)
-        from _r in (2 == type) ? ReturnToOuterStack((ushort)cs.Value()) : unit.ToState()
+        from _r in When(2 == type, ReturnToOuterStack((ushort)cs.Value()))
         from _3 in LoadSReg(1, (ushort)cs.Value())
         select unit;
 
@@ -72,7 +72,7 @@ static partial class Program
         from _2 in (2 == type) ? _eip.Set(ret.dd) : _ip.Set(ret.dw)
         from cs in Pop(type)
         from _4 in SetCpu(cpu => { if (cpu.stack32) cpu.esp += imm; else cpu.sp += imm; return cpu; })
-        from _r in (2 == type) ? ReturnToOuterStack((ushort)cs.Value()) : unit.ToState()
+        from _r in When(2 == type, ReturnToOuterStack((ushort)cs.Value()))
         from _3 in LoadSReg(1, (ushort)cs.Value())
         select unit;
 
@@ -263,7 +263,7 @@ static partial class Program
     static State<Unit> Mov_0F20 =>
         from _1 in SetLog("Mov_0F20")
         from m in ModRegRm()
-        from _2 in SetResult(3 == m.mod)
+        where 3 == m.mod
         from data in GetCrReg(m.reg)
         from _3 in SetRegData32(m.rm, data)
         select unit;
@@ -273,14 +273,14 @@ static partial class Program
     static State<Unit> Mov_0F21 =>
         from _1 in SetLog("Mov_0F21")
         from m in ModRegRm()
-        from _2 in SetResult(3 == m.mod)
+        where 3 == m.mod
         from _3 in SetCpu((env, cpu) => EnvSetRegData32(env.Dr[m.reg])(m.rm)(cpu))
         select unit;
 
     static State<Unit> Mov_0F23 =>
         from _1 in SetLog("Mov_0F23")
         from m in ModRegRm()
-        from _2 in SetResult(3 == m.mod)
+        where 3 == m.mod
         from data in GetRegData32(m.rm)
         from _3 in SetCpu((env, cpu) => { env.Dr[m.reg] = data; return cpu; })
         select unit;
@@ -288,7 +288,7 @@ static partial class Program
     static State<Unit> Mov_0F22 =>
         from _1 in SetLog("Mov_0F22")
         from m in ModRegRm()
-        from _2 in SetResult(3 == m.mod)
+        where 3 == m.mod
         from data in GetRegData32(m.rm)
         from _3 in SetCrReg(m.reg, data)
         select unit;
@@ -408,7 +408,7 @@ static partial class Program
     static State<Unit> Group9_0FC7 =>
         from _1 in SetLog("Group9_0FC7")
         from m in ModRegRm()
-        from _2 in SetResult(m.reg == 1 && m.mod != 3)
+        where m.reg == 1 && m.mod != 3
         from addr in GetMemOrRegAddr(m.mod, m.rm)
         from lo in GetMemOrRegData32(addr)
         from hi in GetMemOrRegData32((addr.isMem, addr.addr + 4))
@@ -452,9 +452,8 @@ static partial class Program
         from src in GetRegData(m.reg, dst.type)
         from cnt in useCl ? GetRegData(1, 0).Select(d => (int)d.db) : GetMemoryDataIp8.Select(b => (int)b)
         let count = cnt & 0x1F
-        from _2 in count == 0
-            ? unit.ToState()  // count==0 は結果・フラグとも不変
-            : ApplyDoubleShift(addr, dst.type, DoubleShift(dst.Value(), src.Value(), count, Bits(dst.type), left))
+        // count==0 は結果・フラグとも不変
+        from _2 in Unless(count == 0, ApplyDoubleShift(addr, dst.type, DoubleShift(dst.Value(), src.Value(), count, Bits(dst.type), left)))
         select unit;
 
     static State<Unit> ApplyDoubleShift(
@@ -551,7 +550,7 @@ static partial class Program
         from m in ModRegRm()
         from src in GetMemOrRegData(m.mod, m.rm, true)
         from f in Jcc(cond)
-        from _2 in f ? SetRegData(m.reg, src.data) : unit.ToState()
+        from _2 in When(f, SetRegData(m.reg, src.data))
         select unit;
 
     // SETcc r/m8 (0F 90-9F): 条件成立なら 1、不成立なら 0 を r/m8 に書く。
@@ -911,7 +910,7 @@ static partial class Program
     // far ポインタ m16:16/m16:32 を読み、オフセットを reg、セレクタを sreg へロードする共通部。
     static State<Unit> LoadFarPtr(int sreg) =>
         from m in ModRegRm()
-        from _2 in SetResult(3 != m.mod)
+        where 3 != m.mod
         from addr in GetMemOrRegAddr(m.mod, m.rm)
         from data in GetMemOrRegData(addr, true)
         from sel in GetMemOrRegData16((addr.isMem, addr.addr + (uint)(data.type == 2 ? 4 : 2)))
@@ -948,7 +947,7 @@ static partial class Program
     static State<Unit> Into_CE =>
         from _1 in SetLog("Into_CE")
         from of in GetDataFromCpu(cpu => cpu.of)
-        from _2 in of ? Interrupt(4) : unit.ToState()
+        from _2 in When(of, Interrupt(4))
         select unit;
 
     // IRET (0xCF): IP, CS, FLAGS を pop して割り込みから復帰する。
@@ -1089,7 +1088,7 @@ static partial class Program
             .Select(reg =>
                 from v in Pop(type)
                 // reg=4(元 SP)は読み飛ばして破棄する
-                from _ in reg == 4 ? unit.ToState() : SetRegData(reg, v)
+                from _ in Unless(reg == 4, SetRegData(reg, v))
                 select unit)
             .Sequence()
             .Ignore()
@@ -1174,7 +1173,7 @@ static partial class Program
     static State<Unit> Pop_8F =>
         from _1 in SetLog("Pop_8F")
         from m in ModRegRm()
-        from _2 in SetResult(0 == m.reg)
+        where 0 == m.reg
         from addr in GetMemOrRegAddr(m.mod, m.rm)
         from type in OperandType(true)
         from data in Pop(type)
@@ -1327,7 +1326,7 @@ static partial class Program
         from _1 in SetLog("AamAad_D4_D5")
         from opecode in Opecodes
         from imm in GetMemoryDataIp8
-        from _2 in SetResult(opecode[0] != 0xD4 || imm != 0) // AAM 0 は #DE
+        where opecode[0] != 0xD4 || imm != 0 // AAM 0 は #DE
         from _3 in SetCpu(cpu =>
         {
             if (opecode[0] == 0xD4) { byte al = cpu.al; cpu.ah = (byte)(al / imm); cpu.al = (byte)(al % imm); }
@@ -1357,7 +1356,7 @@ static partial class Program
 
     static State<Unit> Cmc_F5 =>
         from _1 in SetLog("Cmc_F5")
-        from _2 in SetCpu(cpu => { cpu.cf = !cpu.cf; return cpu; })
+        from _2 in _cf.Modify(cf => !cf)
         select unit;
 
     // LOOP系 (0xE0-0xE2): CX-- してから、条件を満たせば rel8 分岐する。

@@ -141,6 +141,8 @@ static State<Unit> Mov_8C =>
 
 各 `from` 句が CPU 状態を次へ受け渡し、いずれかが失敗すると以降は短絡します。`State` のコンビネータ自体はロールバックせず、失敗した操作が返した CPU を伝えます。命令を実行する場合は `InstructionExecutor.Step`（通常コアのみなら `Program.Execute2`）を使用します。
 
+クエリ構文の `where` 句はガードです（`Where` が実装されており、述語が偽なら失敗になります）。`POP r/m` の `where 0 == m.reg` のように、ModRM の `reg` フィールドで有効性を判定する命令に使います。失敗を返す句は CPU を変更する句より前に置いてください。`Choice` や `Many0` は失敗した枝の変更を巻き戻さないためです。条件付きの実行は `When(cond, state)` / `Unless(cond, state)`（偽なら何もしない `Pass`）、アクセサ経由の読み書き更新は `_cf.Modify(cf => !cf)` のように `Modify` で書きます。
+
 `InstructionExecutor` は命令開始前の CPU を退避し、未対応命令・例外時にレジスタと FPU を復元してページング状態を同期します。命令ごとのプレフィックスは `DecodeContext` に分離し、成功・失敗のどちらでも終了時に消去します。REP の途中でページフォルトが起きた場合は完了済みの反復の ECX・ESI・EDI・EAX・EFLAGS を保持し、命令先頭から残りの反復を再開します。メモリや I/O の既発生の副作用は取り消しません。割り込み配送にも同じ CPU 復元境界を適用します。
 
 ### 命令ディスパッチ
@@ -172,7 +174,7 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | ファイル | 役割 |
 |---------|------|
 | `GlobalUsings.cs` | `Data`/`MemAddr` 型エイリアスの定義。 |
-| `State.cs` | `State<V>` モナドの定義と LINQ コンビネータ（`Select`/`SelectMany`/`Choice`/`Sequence`/`Many0` 等）。 |
+| `State.cs` | `State<V>` モナドの定義と LINQ コンビネータ（`Select`/`SelectMany`/`Where`/`When`/`Unless`/`Choice`/`Sequence`/`Many0` 等）。 |
 | `CPU.cs` | `CPU` 状態、レジスタアクセサ、共通 ALU/フラグ更新処理を呼び出すモナド操作、シフト計算。 |
 | `Alu.cs` | 通常コアと高速コアで共有する算術・論理演算、フラグ更新、条件分岐の判定。 |
 | `Fpu.cs` | x87 FPU。ST スタック 8 本を double で保持し、80 ビット拡張実数と相互変換。ロード/ストア、四則演算、比較、超越関数、FNSAVE/FRSTOR。 |
