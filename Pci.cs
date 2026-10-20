@@ -24,32 +24,37 @@ public class PciHost
     // 未登録の BAR / 拡張 ROM BAR(0x30)は読み取り専用 0(未実装)。
     readonly Dictionary<(int fn, int off), uint> barMask = new();
 
-    public void SaveState(BinaryWriter writer)
-    {
-        writer.Write(Address);
-        writer.Write(cfg.Count);
-        foreach (var entry in cfg.OrderBy(entry => entry.Key))
-        {
-            writer.Write(entry.Key);
-            writer.Write(entry.Value);
-        }
-    }
+    // スナップショット(v7 から): CONFIG_ADDRESS と、ファンクションごとのコンフィグ空間(キー順)。
+    internal static readonly Codec<PciHost> Layout = new Codec<PciHost>()
+        .U32(p => p.Address, (p, v) => p.Address = v)
+        .Custom(
+            (writer, p) =>
+            {
+                writer.Write(p.cfg.Count);
+                foreach (var entry in p.cfg.OrderBy(entry => entry.Key))
+                {
+                    writer.Write(entry.Key);
+                    writer.Write(entry.Value);
+                }
+            },
+            (reader, p) =>
+            {
+                // 旧スナップショットに無いファンクション(後から追加したデバイス)は初期状態のままにする。
+                var count = SnapshotStore.ReadCount(reader, 256);
+                if (count > p.cfg.Count) throw new InvalidDataException("PCI topology differs from snapshot");
+                var restored = new HashSet<int>();
+                for (var index = 0; index < count; index++)
+                {
+                    var key = reader.ReadInt32();
+                    if (!p.cfg.TryGetValue(key, out var config) || !restored.Add(key))
+                        throw new InvalidDataException("Invalid PCI function in snapshot");
+                    reader.BaseStream.ReadExactly(config);
+                }
+            });
 
-    public void LoadState(BinaryReader reader)
-    {
-        Address = reader.ReadUInt32();
-        // 旧スナップショットに無いファンクション(後から追加したデバイス)は初期状態のままにする。
-        var count = SnapshotStore.ReadCount(reader, 256);
-        if (count > cfg.Count) throw new InvalidDataException("PCI topology differs from snapshot");
-        var restored = new HashSet<int>();
-        for (var index = 0; index < count; index++)
-        {
-            var key = reader.ReadInt32();
-            if (!cfg.TryGetValue(key, out var config) || !restored.Add(key))
-                throw new InvalidDataException("Invalid PCI function in snapshot");
-            reader.BaseStream.ReadExactly(config);
-        }
-    }
+    public void SaveState(BinaryWriter writer) => Layout.Save(writer, this);
+
+    public void LoadState(BinaryReader reader) => Layout.Load(reader, this, SnapshotStore.Version);
 
     // PIIX3 IDE のバスマスタ I/O ベース(BAR4)。SeaBIOS/OS が割り当て直す。
     public uint IdeBmBase

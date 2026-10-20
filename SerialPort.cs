@@ -76,22 +76,21 @@ public sealed class Uart16550
         Host.Flush();
     }
 
-    public void SaveState(BinaryWriter writer)
-    {
-        writer.Write(Rx.Count);
-        foreach (var value in Rx) writer.Write(value);
-        writer.Write(Ier); writer.Write(Fcr); writer.Write(Lcr); writer.Write(Mcr); writer.Write(Scr);
-        writer.Write(Dll); writer.Write(Dlm); writer.Write(ThrePending);
-    }
+    // スナップショット(v10 から)。
+    static readonly Codec<Uart16550> Layout = new Codec<Uart16550>()
+        .ByteQueue(u => u.Rx, 1 << 20)
+        .U8(u => u.Ier, (u, v) => u.Ier = v)
+        .U8(u => u.Fcr, (u, v) => u.Fcr = v)
+        .U8(u => u.Lcr, (u, v) => u.Lcr = v)
+        .U8(u => u.Mcr, (u, v) => u.Mcr = v)
+        .U8(u => u.Scr, (u, v) => u.Scr = v)
+        .U8(u => u.Dll, (u, v) => u.Dll = v)
+        .U8(u => u.Dlm, (u, v) => u.Dlm = v)
+        .Bool(u => u.ThrePending, (u, v) => u.ThrePending = v);
 
-    public void LoadState(BinaryReader reader)
-    {
-        Rx.Clear();
-        var count = SnapshotStore.ReadCount(reader, 1 << 20);
-        for (var index = 0; index < count; index++) Rx.Enqueue(reader.ReadByte());
-        Ier = reader.ReadByte(); Fcr = reader.ReadByte(); Lcr = reader.ReadByte(); Mcr = reader.ReadByte(); Scr = reader.ReadByte();
-        Dll = reader.ReadByte(); Dlm = reader.ReadByte(); ThrePending = reader.ReadBoolean();
-    }
+    public void SaveState(BinaryWriter writer) => Layout.Save(writer, this);
+
+    public void LoadState(BinaryReader reader) => Layout.Load(reader, this, SnapshotStore.Version);
 }
 
 // UART の相手側(ホスト)。送信バイトを受け取り、受信バイトを返す。

@@ -190,7 +190,8 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | `RunDiagnostics.cs` / `WindowsDiagnostics.cs` | トレース・監視点・停止診断と、Windows 固有の構造体・スタック解析。 |
 | `EnvironmentFactory.cs` / `DiskConfiguration.cs` | 埋め込み BIOS の読み込み、ディスク探索・明示的なパス設定、通常起動用の環境生成。 |
 | `SnapshotStore.cs` | 保存形式の版管理、チェックサム検証、ディスク差分を含むチェックポイントの確定と復元。 |
-| `CPU.Snapshot.cs` / `Environment.Snapshot.cs` | CPU・FPU と環境・デバイスの追加保存状態。PCI と ATA の内部状態は各デバイスが保存・復元。 |
+| `Codec.cs` | スナップショットの双方向コーデック `Codec<T>`。フィールドを保存形式の並び順に 1 度だけ登録し（`since:` で追加された版を指定）、保存と復元を同じ記述から導出する。 |
+| `CPU.Snapshot.cs` / `Environment.Snapshot.cs` | CPU レジスタ・FPU と、環境・デバイスの保存形式（`Codec<T>` の表）。PCI・ATA・VGA・マウス・UART の内部状態は各デバイスが自分の表を持つ。 |
 | `Environment.cs` | `EmuEnvironment`（既定 256 MB メモリ、64 KB I/O ポート、ATA 接続）と、メモリ/レジスタ/スタックアクセス、ページング変換と TLB、GDT ディスクリプタデコード、IDT 経由の割り込み配送、文字列・ビット操作、I/O ポートの振り分け。 |
 | `Environment.Devices.cs` | 環境ごとのデバイス所有と、既存の状態名への転送プロパティ。保存形式のバイト順・バージョンは変更しない。 |
 | `PicDevice.cs` / `PitDevice.cs` / `CmosDevice.cs` / `KeyboardController.cs` / `MouseDevice.cs` / `AcpiPmDevice.cs` | PIC・PIT・CMOS・8042・PS/2 マウス・ACPI 電源管理の状態と入出力処理。PIC のマスタ/スレーブは共通実装の独立したインスタンス。 |

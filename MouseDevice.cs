@@ -100,22 +100,20 @@ public sealed class MouseDevice
         }
     }
 
-    public void SaveState(BinaryWriter writer)
-    {
-        writer.Write(Output.Count);
-        foreach (var value in Output) writer.Write(value);
-        writer.Write(Enabled); writer.Write(Remote); writer.Write(SampleRate); writer.Write(Resolution);
-        writer.Write(Scaling2); writer.Write(Id); writer.Write(PendingCommand); writer.Write(LastButtons);
-        writer.Write(rateHistory);
-    }
+    // スナップショット(v9 から)。
+    static readonly Codec<MouseDevice> Layout = new Codec<MouseDevice>()
+        .ByteQueue(m => m.Output, 1 << 16)
+        .Bool(m => m.Enabled, (m, v) => m.Enabled = v)
+        .Bool(m => m.Remote, (m, v) => m.Remote = v)
+        .U8(m => m.SampleRate, (m, v) => m.SampleRate = v)
+        .U8(m => m.Resolution, (m, v) => m.Resolution = v)
+        .Bool(m => m.Scaling2, (m, v) => m.Scaling2 = v)
+        .U8(m => m.Id, (m, v) => m.Id = v)
+        .I32(m => m.PendingCommand, (m, v) => m.PendingCommand = v)
+        .U8(m => m.LastButtons, (m, v) => m.LastButtons = v)
+        .Bytes(m => m.rateHistory);
 
-    public void LoadState(BinaryReader reader)
-    {
-        Output.Clear();
-        var count = SnapshotStore.ReadCount(reader, 1 << 16);
-        for (var index = 0; index < count; index++) Output.Enqueue(reader.ReadByte());
-        Enabled = reader.ReadBoolean(); Remote = reader.ReadBoolean(); SampleRate = reader.ReadByte(); Resolution = reader.ReadByte();
-        Scaling2 = reader.ReadBoolean(); Id = reader.ReadByte(); PendingCommand = reader.ReadInt32(); LastButtons = reader.ReadByte();
-        reader.BaseStream.ReadExactly(rateHistory);
-    }
+    public void SaveState(BinaryWriter writer) => Layout.Save(writer, this);
+
+    public void LoadState(BinaryReader reader) => Layout.Load(reader, this, SnapshotStore.Version);
 }

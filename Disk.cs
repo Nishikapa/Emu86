@@ -727,9 +727,13 @@ public class AtaDevice(DiskImage disk) : IDisposable
         disk = image;
     }
 
-    internal void SaveInterruptState(BinaryWriter writer) => writer.Write(IrqPending);
+    // INTRQ はデバイス状態(v7 から)の末尾に別途保存する。
+    static readonly Codec<AtaDevice> Interrupt = new Codec<AtaDevice>()
+        .Bool(a => a.IrqPending, (a, v) => a.IrqPending = v);
 
-    internal void LoadInterruptState(BinaryReader reader) => IrqPending = reader.ReadBoolean();
+    internal void SaveInterruptState(BinaryWriter writer) => Interrupt.Save(writer, this);
+
+    internal void LoadInterruptState(BinaryReader reader) => Interrupt.Load(reader, this, SnapshotStore.Version);
 
     // --atalog: コマンド/制御レジスタ書き込みとデータ転送完了を標準エラーへ記録する(OS のプローブ手順の調査用)。
     public bool Log;
@@ -740,32 +744,25 @@ public class AtaDevice(DiskImage disk) : IDisposable
 
     // スナップショット保存/復元。接続先の DiskImage 自体は書き込みのたびに
     // ファイルへ反映済みのため、ここでは PIO レジスタとバッファのみを扱う。
-    public void SaveState(BinaryWriter w)
-    {
-        w.Write(feature); w.Write(sectorCount); w.Write(lbaLow); w.Write(lbaMid); w.Write(lbaHigh); w.Write(drive);
-        w.Write(status); w.Write(error);
-        w.Write(buf.Length);
-        w.Write(buf);
-        w.Write(bufPos);
-        w.Write(pendingWrite);
-        w.Write(writeLba);
-        w.Write(writeSectorsLeft);
-    }
+    static readonly Codec<AtaDevice> Layout = new Codec<AtaDevice>()
+        .U8(a => a.feature, (a, v) => a.feature = v)
+        .U8(a => a.sectorCount, (a, v) => a.sectorCount = v)
+        .U8(a => a.lbaLow, (a, v) => a.lbaLow = v)
+        .U8(a => a.lbaMid, (a, v) => a.lbaMid = v)
+        .U8(a => a.lbaHigh, (a, v) => a.lbaHigh = v)
+        .U8(a => a.drive, (a, v) => a.drive = v)
+        .U8(a => a.status, (a, v) => a.status = v)
+        .U8(a => a.error, (a, v) => a.error = v)
+        .ByteArray(a => a.buf, (a, v) => a.buf = v, 256 * DiskImage.SectorSize)
+        .I32(a => a.bufPos, (a, v) => a.bufPos = v)
+        .Bool(a => a.pendingWrite, (a, v) => a.pendingWrite = v)
+        .I64(a => a.writeLba, (a, v) => a.writeLba = v)
+        .I32(a => a.writeSectorsLeft, (a, v) => a.writeSectorsLeft = v)
+        .Check(a => a.bufPos >= 0 && a.bufPos <= a.buf.Length && a.writeSectorsLeft is >= 0 and <= 256, "Invalid ATA transfer state");
 
-    public void LoadState(BinaryReader r)
-    {
-        feature = r.ReadByte(); sectorCount = r.ReadByte(); lbaLow = r.ReadByte();
-        lbaMid = r.ReadByte(); lbaHigh = r.ReadByte(); drive = r.ReadByte();
-        status = r.ReadByte(); error = r.ReadByte();
-        buf = new byte[SnapshotStore.ReadCount(r, 256 * DiskImage.SectorSize)];
-        r.BaseStream.ReadExactly(buf);
-        bufPos = r.ReadInt32();
-        pendingWrite = r.ReadBoolean();
-        writeLba = r.ReadInt64();
-        writeSectorsLeft = r.ReadInt32();
-        if (bufPos < 0 || bufPos > buf.Length || writeSectorsLeft is < 0 or > 256)
-            throw new InvalidDataException("Invalid ATA transfer state");
-    }
+    public void SaveState(BinaryWriter writer) => Layout.Save(writer, this);
+
+    public void LoadState(BinaryReader reader) => Layout.Load(reader, this, SnapshotStore.Version);
 
     public byte ReadReg(int port)
     {

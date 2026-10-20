@@ -378,26 +378,29 @@ public sealed class VgaDevice
         }
     }
 
-    /// スナップショット ///////////////////////////////
-    public void SaveState(BinaryWriter writer)
-    {
-        writer.Write(Vram);
-        writer.Write(Sequencer); writer.Write(Graphics); writer.Write(Crtc); writer.Write(Attribute); writer.Write(Dac);
-        writer.Write(SequencerIndex); writer.Write(GraphicsIndex); writer.Write(CrtcIndex); writer.Write(AttributeIndex);
-        writer.Write(DacWriteIndex); writer.Write(DacReadIndex); writer.Write(DacWritePhase); writer.Write(DacReadPhase); writer.Write(DacMask);
-        writer.Write(MiscOutput); writer.Write(FeatureControl); writer.Write(AttributeData);
-        writer.Write(latch);
-    }
+    /// スナップショット(v8 から) ///////////////////////////////
+    static readonly Codec<VgaDevice> Layout = new Codec<VgaDevice>()
+        .Bytes(v => v.Vram)
+        .Bytes(v => v.Sequencer).Bytes(v => v.Graphics).Bytes(v => v.Crtc).Bytes(v => v.Attribute).Bytes(v => v.Dac)
+        .U8(v => v.SequencerIndex, (v, x) => v.SequencerIndex = x)
+        .U8(v => v.GraphicsIndex, (v, x) => v.GraphicsIndex = x)
+        .U8(v => v.CrtcIndex, (v, x) => v.CrtcIndex = x)
+        .U8(v => v.AttributeIndex, (v, x) => v.AttributeIndex = x)
+        .U8(v => v.DacWriteIndex, (v, x) => v.DacWriteIndex = x)
+        .U8(v => v.DacReadIndex, (v, x) => v.DacReadIndex = x)
+        .U8(v => v.DacWritePhase, (v, x) => v.DacWritePhase = x)
+        .U8(v => v.DacReadPhase, (v, x) => v.DacReadPhase = x)
+        .U8(v => v.DacMask, (v, x) => v.DacMask = x)
+        .U8(v => v.MiscOutput, (v, x) => v.MiscOutput = x)
+        .U8(v => v.FeatureControl, (v, x) => v.FeatureControl = x)
+        .Bool(v => v.AttributeData, (v, x) => v.AttributeData = x)
+        .Bytes(v => v.latch);
+
+    public void SaveState(BinaryWriter writer) => Layout.Save(writer, this);
 
     public void LoadState(BinaryReader reader)
     {
-        reader.BaseStream.ReadExactly(Vram);
-        reader.BaseStream.ReadExactly(Sequencer); reader.BaseStream.ReadExactly(Graphics); reader.BaseStream.ReadExactly(Crtc);
-        reader.BaseStream.ReadExactly(Attribute); reader.BaseStream.ReadExactly(Dac);
-        SequencerIndex = reader.ReadByte(); GraphicsIndex = reader.ReadByte(); CrtcIndex = reader.ReadByte(); AttributeIndex = reader.ReadByte();
-        DacWriteIndex = reader.ReadByte(); DacReadIndex = reader.ReadByte(); DacWritePhase = reader.ReadByte(); DacReadPhase = reader.ReadByte(); DacMask = reader.ReadByte();
-        MiscOutput = reader.ReadByte(); FeatureControl = reader.ReadByte(); AttributeData = reader.ReadBoolean();
-        reader.BaseStream.ReadExactly(latch);
+        Layout.Load(reader, this, SnapshotStore.Version);
         Dirty = true;
     }
 }
