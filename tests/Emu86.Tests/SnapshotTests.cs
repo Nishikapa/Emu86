@@ -262,9 +262,75 @@ static class SnapshotTests
         Equal(true, exclusive.CanWrite, "failed disk open releases handle");
     }
 
+    // すべての保存対象に既定値と異なる値を入れる(Populate に加えて CPU の残り・VGA・マウス・UART・ATA)。
+    static void PopulateAll(EmuEnvironment env, CPU cpu)
+    {
+        Populate(env, cpu);
+        CPU._cs.setter(cpu)(0x0008); CPU._ds.setter(cpu)(0x0023); CPU._es.setter(cpu)(0x002B);
+        CPU._ss.setter(cpu)(0x0010); CPU._fs.setter(cpu)(0x0030); CPU._gs.setter(cpu)(0x0038);
+        cpu.cs_base = 0x1000; cpu.ds_base = 0x2000; cpu.es_base = 0x3000; cpu.ss_base = 0x4000; cpu.fs_base = 0xFFDFF000; cpu.gs_base = 0x6000;
+        cpu.idt_limit = 0x7FF; cpu.idt_base = 0x8003F400; cpu.gdt_limit = 0x3FF; cpu.gdt_base = 0x8003F000;
+        CPU._cr0.setter(cpu)(0x8001003B); cpu.cr2 = 0xC0DEC0DE; CPU._cr3.setter(cpu)(0x39000); CPU._cr4.setter(cpu)(0x2D1);
+        cpu.fpu_cw = 0x027F; cpu.fpu_sw = 0x3800; cpu.fpu_st[0] = -2.5; cpu.fpu_st[7] = 1e300;
+        cpu.ebp = 0xF9E7C000; cpu.ecx = 0x11; cpu.edx = 0x22; cpu.esi = 0x33; cpu.edi = 0x44;
+        env.OneMegaMemory_[0x9F] = 0xA5; env.IoPort[0x60] = 0x1C; env.Cmos[0x7F] = 0x7E;
+        env.Msrs[0x1B] = 0xFEE00900; env.Dr[7] = 0x401;
+        env.Vga.Vram[1] = 0x11; env.Vga.Vram[0x10001] = 0x22; env.Vga.Vram[0x20001] = 0x33; env.Vga.Vram[0x30001] = 0x44;
+        env.Vga.Read(0xB8002); // ラッチを読み込む
+        EnvOutPort(env, 0x3C0, 0x11); EnvOutPort(env, 0x3C0, 0x09); EnvOutPort(env, 0x3C0, 0x14);
+        EnvOutPort(env, 0x3C2, 0xE3); EnvOutPort(env, 0x3C6, 0x3F); EnvOutPort(env, 0x3C7, 5); EnvInPort(env, 0x3C9);
+        EnvOutPort(env, 0x3CE, 4); EnvOutPort(env, 0x3CF, 2); EnvOutPort(env, 0x3D4, 0x13); EnvOutPort(env, 0x3D5, 0x28);
+        EnvOutPort(env, 0x3DA, 1);
+        foreach (var value in new byte[] { 0xF3, 200, 0xF3, 100, 0xF3, 80 }) env.Mouse.Command(value);
+        env.Mouse.Enabled = true; env.Mouse.Remote = true; env.Mouse.Resolution = 1; env.Mouse.Scaling2 = true;
+        env.Mouse.PendingCommand = 0xE8; env.Mouse.LastButtons = 5; env.Mouse.Output.Enqueue(0x08); env.Mouse.Output.Enqueue(0xFE);
+        env.Com1.Write(3, 0x83); env.Com1.Write(0, 0x0C); env.Com1.Write(1, 0x00); env.Com1.Write(3, 0x03);
+        env.Com1.Write(1, 0x0F); env.Com1.Write(2, 0xC7); env.Com1.Write(4, 0x0B); env.Com1.Write(7, 0x5A);
+        env.Com1.Rx.Enqueue(0x41); env.Com1.Rx.Enqueue(0x42);
+        env.Com2.Write(3, 0x80); env.Com2.Write(0, 0x06); env.Com2.Write(3, 0x1B); env.Com2.Write(1, 0x02); env.Com2.Write(4, 0x1F);
+        env.Com2.Rx.Enqueue(0x7F);
+        var ata = new AtaDevice(null);
+        ata.WriteReg(0x1F1, 0x11); ata.WriteReg(0x1F2, 2); ata.WriteReg(0x1F3, 0x21); ata.WriteReg(0x1F4, 0x43);
+        ata.WriteReg(0x1F5, 0x65); ata.WriteReg(0x1F6, 0xE7); ata.WriteReg(0x1F7, 0x30); // WRITE SECTORS: 1 セクタ分のバッファを待つ
+        ata.WriteData(4, 0x44434241); ata.IrqPending = true;
+        env.Ata = ata;
+    }
+
+    static string Sha256(byte[] data) => Convert.ToHexString(SHA256.HashData(data));
+
+    // v10 形式のバイト列を固定する。直列化の実装を差し替えても、同じ状態からは同じバイト列が出ること。
+    static void Layout()
+    {
+        var env = Environment(); var cpu = Cpu(); PopulateAll(env, cpu);
+        using var stream = new MemoryStream();
+        using (var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true))
+        {
+            cpu.WriteTo(writer); env.SaveState(writer); env.SaveRuntimeState(writer); cpu.SaveRuntimeState(writer);
+            env.SaveDeviceState(writer); env.Vga.SaveState(writer); env.Mouse.SaveState(writer); env.Com1.SaveState(writer); env.Com2.SaveState(writer);
+        }
+        Equal(396430L, stream.Length, "v10 state length");
+        Equal("12CDF6644C63FEA0D2795570D16B0BEC6C259307581A776069A97A1584B4D42B", Sha256(stream.ToArray()), "v10 state layout");
+        var restored = Environment();
+        using (var reader = new BinaryReader(new MemoryStream(stream.ToArray()), Encoding.UTF8))
+        {
+            var loaded = CPU.ReadFrom(reader); restored.LoadState(reader); restored.LoadRuntimeState(reader, 10, 0); loaded.LoadRuntimeState(reader, 10);
+            restored.LoadDeviceState(reader); restored.Vga.LoadState(reader); restored.Mouse.LoadState(reader); restored.Com1.LoadState(reader); restored.Com2.LoadState(reader);
+            Equal(reader.BaseStream.Length, reader.BaseStream.Position, "load consumes the whole state");
+            using var again = new MemoryStream();
+            using var rewriter = new BinaryWriter(again, Encoding.UTF8, leaveOpen: true);
+            loaded.WriteTo(rewriter); restored.SaveState(rewriter); restored.SaveRuntimeState(rewriter); loaded.SaveRuntimeState(rewriter);
+            restored.SaveDeviceState(rewriter); restored.Vga.SaveState(rewriter); restored.Mouse.SaveState(rewriter); restored.Com1.SaveState(rewriter); restored.Com2.SaveState(rewriter);
+            rewriter.Flush();
+            Equal(Sha256(stream.ToArray()), Sha256(again.ToArray()), "load then save reproduces the bytes");
+        }
+        Close(restored.Ata); Close(env.Ata); env.Ata = null;
+        SnapshotStore.Save("layout.snap", 777, cpu, env);
+        Equal("EE38A543461E14F6DAC5AB60F6B74B190FC9D23466D102955B59663A7C0871B0", Sha256(File.ReadAllBytes("layout.snap")), "v10 file layout");
+    }
+
     public static void Run()
     {
-        Instructions(); Snapshots(); Disks();
+        Instructions(); Snapshots(); Disks(); Layout();
         Console.WriteLine($"State/snapshot checks passed: {assertions} assertions");
     }
 }
