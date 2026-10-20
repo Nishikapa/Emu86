@@ -762,13 +762,7 @@ static public partial class Ext
     // ss : BP/EBP/ESP ベースの既定 SS(こちらもオーバーライドで置換される)
     static private (uint seg, uint ss) EnvSegBases(CPU cpu)
     {
-        uint? ovr =
-            cpu.es_prefix ? cpu.es_base :
-            cpu.cs_prefix ? cpu.cs_base :
-            cpu.ss_prefix ? cpu.ss_base :
-            cpu.ds_prefix ? cpu.ds_base :
-            cpu.fs_prefix ? cpu.fs_base :
-            cpu.gs_prefix ? cpu.gs_base : null;
+        var ovr = OverrideBase(cpu.Decode.Prefixes, cpu);
         return (ovr ?? cpu.ds_base, ovr ?? cpu.ss_base);
     }
 
@@ -1085,7 +1079,7 @@ static public partial class Ext
     static byte EnvReadOutsideRam(EmuEnvironment env, uint addr) =>
         env.Pci.RomContains(addr) ? env.Pci.RomRead(addr) : (byte)0xFF;
 
-    static private ushort EnvGetMemoryData16(EmuEnvironment env, uint addr)
+    static internal ushort EnvGetMemoryData16(EmuEnvironment env, uint addr)
     {
         if (env.PagingOn)
         {
@@ -1099,7 +1093,7 @@ static public partial class Ext
             : (ushort)(EnvReadOutsideRam(env, addr) | (EnvReadOutsideRam(env, addr + 1) << 8));
     }
 
-    static private uint EnvGetMemoryData32(EmuEnvironment env, uint addr)
+    static internal uint EnvGetMemoryData32(EmuEnvironment env, uint addr)
     {
         if (env.PagingOn)
         {

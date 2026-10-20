@@ -178,9 +178,10 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | `CPU.cs` | `CPU` 状態、レジスタアクセサ、共通 ALU/フラグ更新処理を呼び出すモナド操作、シフト計算。 |
 | `Alu.cs` | 通常コアと高速コアで共有する算術・論理演算、フラグ更新、条件分岐の判定。 |
 | `Fpu.cs` | x87 FPU。ST スタック 8 本を double で保持し、80 ビット拡張実数と相互変換。ロード/ストア、四則演算、比較、超越関数、FNSAVE/FRSTOR。 |
-| `FastCore.cs` | 高速実行コア。演算規則は `Alu.cs`、メモリアクセスは `Environment.cs` の共通処理を使用し、未対応命令は通常コアへ委譲。 |
+| `FastCore.cs` | 高速実行コア。プレフィックスと ModRM のデコードは `CodeParser.cs`、演算規則は `Alu.cs`、メモリアクセスは `Environment.cs` の共通処理を使用し、未対応命令は通常コアへ委譲。 |
 | `InstructionExecutor.cs` | 両コアの実行・CPU 復元境界、命令ごとのデコード状態、REP の再開位置。 |
-| `InstructionDecoding.cs` / `Registers.cs` | 通常コアの ModRM/SIB 実効アドレス計算と、両コア共通の配列を作らないレジスタ参照。変位・即値は必要な幅だけを直接読み取る。 |
+| `CodeParser.cs` | 命令バイト列の読み口 `CodeSource`（CS:(E)IP 相対、16 ビット IP の折り返し、必要なバイトだけを遅延フェッチ）と Parser モナド `Parser<T>`（`Select`/`SelectMany`/`Where`/`Or`/`Fold`）。両コアが共有するプレフィックスの畳み込み（`Prefixes`）、ModRM/SIB/変位の構造（`ParseModRm`）、実効アドレスの計算（`EffectiveAddress`）。 |
+| `InstructionDecoding.cs` / `Registers.cs` | 通常コアの ModRM 読み取り State（`CodeParser.cs` の共有デコーダを呼び、消費した分だけ EIP を進める）と、両コア共通の配列を作らないレジスタ参照。 |
 | `Program.Runner.cs` / `RunOptions.cs` | CLI の起動処理、オプションの表（名前・引数・説明・値のパーサ・適用）、ウィンドウ付き実行と別スレッドでの実行ループ、ゲストリセット時の環境再生成、セクタダンプ。解析と `--help` の一覧は同じ表から作る。 |
 | `ArgumentParsing.cs` | 引数列のパーサコンビネータ（`ArgParser<T>`: `Select`/`SelectMany`/`Choice`/`Many`/`Optional`/`Require` と `Value`/`Decimal`/`Hex`）と `CommandOption`。 |
 | `EmulationRunner.cs` | 命令実行ループ、例外配送、デバイスのポンプ、定期保存の呼び出し。 |

@@ -15,108 +15,34 @@ static public partial class Ext
         var csBase = cpu.cs_base;
         uint len = 0;
 
-        // コードフェッチ。16 ビットコードでは IP(下位 16 ビット)でラップする(モナド版と同一)。
-        uint FetchAddr() => csBase + (code32 ? startEip + len : (ushort)(startEip + len));
-        byte F8() { var v = EnvGetMemoryData8(env, FetchAddr()); len += 1; return v; }
-        ushort F16() { var v = EnvGetMemoryData16(env, FetchAddr()); len += 2; return v; }
-        uint F32() { var v = EnvGetMemoryData32(env, FetchAddr()); len += 4; return v; }
+        // コードフェッチ。16 ビットコードでは IP(下位 16 ビット)でラップする(CodeSource がモナド版と共有)。
+        var code = new CodeSource(env, csBase, startEip, code32);
+        byte F8() { var v = code.Byte((int)len); len += 1; return v; }
+        ushort F16() { var v = code.Word((int)len); len += 2; return v; }
+        uint F32() { var v = code.Dword((int)len); len += 4; return v; }
         uint FImm(int type) => type == 0 ? F8() : type == 1 ? F16() : F32();
 
-        // プレフィックス(モナド版と同じく、複数のセグメントオーバーライドは ES>CS>SS>DS>FS>GS の優先順)。
-        bool p66 = false, p67 = false, pes = false, pcs = false, pss = false, pds = false, pfs = false, pgs = false;
-        while (true)
-        {
-            var b = EnvGetMemoryData8(env, FetchAddr());
-            if (b == 0x66) p66 = true;
-            else if (b == 0x67) p67 = true;
-            else if (b == 0x26) pes = true;
-            else if (b == 0x2E) pcs = true;
-            else if (b == 0x36) pss = true;
-            else if (b == 0x3E) pds = true;
-            else if (b == 0x64) pfs = true;
-            else if (b == 0x65) pgs = true;
-            else if (b == 0xF0) { } // LOCK: 単一CPUなので無視して消費するだけ
-            else break;
-            len++;
-        }
+        // プレフィックス(モナド版と同じパーサ。複数のセグメントオーバーライドは ES>CS>SS>DS>FS>GS の優先順)。
+        len = (uint)ScanPrefixes(code, 0, out var prefixes);
+        var p66 = (prefixes & Prefix.OperandSize) != 0;
+        var p67 = (prefixes & Prefix.AddressSize) != 0;
 
         var typeW = (code32 != p66) ? 2 : 1;  // w=1 の実効オペランドサイズ(1=word, 2=dword)
         var a32 = code32 != p67;              // 実効アドレスサイズ
 
-        uint? ovr =
-            pes ? cpu.es_base :
-            pcs ? cpu.cs_base :
-            pss ? cpu.ss_base :
-            pds ? cpu.ds_base :
-            pfs ? cpu.fs_base :
-            pgs ? cpu.gs_base : null;
+        var ovr = OverrideBase(prefixes, cpu);
         var segBase = ovr ?? cpu.ds_base;
         var ssSegBase = ovr ?? cpu.ss_base;
 
         // ModRM(+SIB+disp)を読み、(メモリか, 実効オフセット, セグメント基底, reg フィールド) を返す。
-        // mod=3 のときオフセットはレジスタ番号。式の型と演算順はモナド版の実装と揃えてある。
+        // mod=3 のときオフセットはレジスタ番号。構造の読み取りと実効アドレスの計算はモナド版と共有する。
         (bool isMem, uint off, uint segB, int reg) ReadModRM()
         {
-            var modrm = F8();
-            var mod = (modrm >> 6) & 3;
-            var reg = (modrm >> 3) & 7;
-            var rm = modrm & 7;
-            if (mod == 3)
-                return (false, (uint)rm, 0, reg);
-
-            if (!a32)
-            {
-                if (mod == 0 && rm == 6) // [d16]
-                    return (true, F16(), segBase, reg);
-                var regsum = rm switch
-                {
-                    0 => (ushort)(cpu.bx + cpu.si),
-                    1 => (ushort)(cpu.bx + cpu.di),
-                    2 => (ushort)(cpu.bp + cpu.si),
-                    3 => (ushort)(cpu.bp + cpu.di),
-                    4 => cpu.si,
-                    5 => cpu.di,
-                    6 => cpu.bp,
-                    _ => cpu.bx,
-                };
-                var sb = rm is 2 or 3 or 6 ? ssSegBase : segBase;
-                // 実効アドレスは 16 ビットで折り返す(モナド版と同一)。
-                return mod switch
-                {
-                    0 => (true, regsum, sb, reg),
-                    1 => (true, (ushort)(regsum + (sbyte)F8()), sb, reg),
-                    _ => (true, (ushort)(regsum + F16()), sb, reg),
-                };
-            }
-
-            if (rm == 4) // SIB
-            {
-                var sib = F8();
-                var idx = (sib >> 3) & 7;
-                var scaled = (uint)((1 << ((sib >> 6) & 3)) * (idx == 4 ? 0 : ReadRegister32(cpu, idx)));
-                var basef = sib & 7;
-                var sb = basef is 4 or 5 ? ssSegBase : segBase;
-                if (mod == 0 && basef == 5) // ベースなし + disp32
-                    return (true, scaled + F32(), segBase, reg);
-                var bval = ReadRegister32(cpu, basef);
-                return mod switch
-                {
-                    0 => (true, scaled + bval, sb, reg),
-                    1 => (true, (uint)(scaled + bval + (sbyte)F8()), sb, reg),
-                    _ => (true, scaled + bval + F32(), sb, reg),
-                };
-            }
-
-            if (mod == 0 && rm == 5) // [d32]
-                return (true, F32(), segBase, reg);
-            var sb2 = rm == 5 ? ssSegBase : segBase;
-            var rv = ReadRegister32(cpu, rm);
-            return mod switch
-            {
-                0 => (true, rv, sb2, reg),
-                1 => (true, (uint)(rv + (sbyte)F8()), sb2, reg),
-                _ => (true, rv + F32(), sb2, reg),
-            };
+            var modrmByte = F8();
+            var modrm = ParseModRm(code, (int)len, modrmByte, a32);
+            len += (uint)(modrm.Length - 1);
+            var (isMem, off, segB) = EffectiveAddress(cpu, modrm, a32, segBase, ssSegBase);
+            return (isMem, off, segB, modrm.Reg);
         }
 
         uint RegGet(int type, int r) => type == 0 ? FReg8(cpu, r) : type == 1 ? FReg16(cpu, r) : ReadRegister32(cpu, r);

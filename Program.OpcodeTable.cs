@@ -12,28 +12,6 @@ struct OpecodeDic
 
 static partial class Program
 {
-    static readonly Dictionary<int, Accessor<CPU, bool>> PrefixStates =
-        new()
-        {
-            { 0x26, _es_prefix },
-            { 0x2E, _cs_prefix },
-            { 0x36, _ss_prefix },
-            { 0x3E, _ds_prefix },
-            { 0x64, _fs_prefix },
-            { 0x65, _gs_prefix },
-            { 0x66, _operand_size_prefix },
-            { 0x67, _address_size_prefix },
-            { 0xF0, _lock_prefix }
-        };
-
-    // 毎命令の再構築を避けるため、オペコードテーブルは static readonly でキャッシュする。
-    static readonly OpecodeDic[] dicPrefixes =
-        [.. Enumerable.Range(0, 256).Select(
-            index => PrefixStates.TryGetValue(index, out var acc) ?
-                new OpecodeDic() { state = acc.Set(true) } :
-                default
-        )];
-
     static (byte ope, int len, State<Unit> state)[] OneByteStates =>
     [
         (0x00, 6, Arithmetic),
@@ -220,24 +198,14 @@ static partial class Program
                 } : default
         )];
 
-    // プレフィックスを 0 個以上消費する。
-    // CPU が参照型なので「読み進めてから巻き戻す」ことはできない。
-    // 先に覗き見(peek)して、プレフィックスと分かったときだけ 1 バイト消費する。
-    static public State<Unit> CheckPrefixes => (env, cpu, ope) =>
+    // プレフィックスを 0 個以上消費し、デコード文脈に立てる(Prefixes パーサは CPU を変えないので、
+    // 読み取った長さだけ EIP を進める)。
+    static public readonly State<Unit> CheckPrefixes = (env, cpu, ope) =>
     {
-        while (true)
-        {
-            var op1 = EnvGetMemoryData8(env, GetCodeAddr(cpu).addr);
-            var data1 = dicPrefixes[op1];
-            if (default == data1.state)
-                return (true, unit, cpu, string.Empty);
-
-            cpu = _eip.setter(cpu)(cpu.eip + 1);
-            var (ok, _, cpu2, _) = data1.state(env, cpu, [op1]);
-            if (!ok)
-                return (false, default, cpu2, string.Empty);
-            cpu = cpu2;
-        }
+        var (_, prefixes, length) = Prefixes(CodeSource.At(env, cpu), 0);
+        cpu.Decode.Prefixes |= prefixes;
+        cpu.eip += (uint)length;
+        return (true, unit, cpu, string.Empty);
     };
 
     static public State<Unit> Execute => (env, cpu1, ope) =>
