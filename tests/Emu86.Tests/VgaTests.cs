@@ -560,9 +560,71 @@ static class VgaTests
         Equal(true, output.ToString().Contains("Debugging Mode selected"), "progress logged");
     }
 
+    // 自動操作の待ち時間: メニュー最終行の再判定間隔(KeyInterval/4)、↓ の上限(40 回)、OS メニューのタイムアウト(41×KeyInterval)。
+    static void BootMenuTimeouts()
+    {
+        using var env = new EmuEnvironment(memory: new byte[0x100000]);
+        void Line(int row, string text, bool highlighted = false)
+        {
+            for (var column = 0; column < 80; column++)
+            {
+                env.Vga.Vram[row * 80 + column] = (byte)(column < text.Length ? text[column] : ' ');
+                env.Vga.Vram[0x10000 + row * 80 + column] = (byte)(highlighted ? 0x70 : 0x07);
+            }
+        }
+        void Drain() { while (env.Keyboard.Injected.TryDequeue(out _)) { } }
+        VgaBiosStub.Install(env);
+        using var output = new StringWriter();
+        var automation = new BootAutomation();
+        automation.Step(env, 0, output);
+        Equal(2, env.Keyboard.Injected.Count, "F8 pressed immediately after boot");
+        Drain();
+        automation.Step(env, 100_000, output);
+        Equal(0, env.Keyboard.Injected.Count, "F8 repeats only after the key interval");
+        Line(0, "Windows Advanced Options Menu");
+        Line(2, "    Safe Mode", highlighted: true);
+        automation.Step(env, 200_000, output);
+        Equal("SelectDebugging", automation.Status, "menu detected on the next key interval");
+        automation.Step(env, 400_000, output);
+        Line(4, "    Return to OS Choices Menu");
+        automation.Step(env, 440_000, output);
+        Equal(0, env.Keyboard.Injected.Count, "last menu line re-checked only after a quarter interval");
+        automation.Step(env, 450_000, output);
+        Equal(4, env.Keyboard.Injected.Count, "down arrow sent once the last line is visible");
+        var at = 450_000L;
+        for (var presses = 2; presses <= 40; presses++)
+        {
+            Drain();
+            at += 200_000;
+            automation.Step(env, at, output);
+            Equal(4, env.Keyboard.Injected.Count, $"down arrow {presses}");
+        }
+        Drain();
+        automation.Step(env, at + 200_000, output);
+        Equal(0, env.Keyboard.Injected.Count, "no key after giving up");
+        Equal(true, automation.Completed, "gives up after 40 presses");
+        Equal(true, output.ToString().Contains("giving up: highlighted line is 'Safe Mode'"), "giving up is logged");
+
+        using var quiet = new StringWriter();
+        var timeout = new BootAutomation();
+        Line(2, "    Safe Mode");
+        Line(3, "    Debugging Mode", highlighted: true);
+        timeout.Step(env, 0, quiet);
+        Equal(0, env.Keyboard.Injected.Count, "menu already shown: no F8");
+        timeout.Step(env, 200_000, quiet);
+        Equal("1C,9C", string.Join(",", env.Keyboard.Injected.Select(b => b.ToString("X2"))), "Enter sent on Debugging Mode");
+        Drain();
+        timeout.Step(env, 8_400_000, quiet);
+        Equal(false, timeout.Completed, "still waiting for the OS menu at the deadline");
+        timeout.Step(env, 8_410_000, quiet);
+        Equal(true, timeout.Completed, "assumes automatic selection after the deadline");
+        Equal(0, env.Keyboard.Injected.Count, "no key on timeout");
+        Equal(true, quiet.ToString().Contains("no operating system menu, assuming automatic selection (instr 8410000)"), "timeout is logged");
+    }
+
     public static void Run()
     {
-        MemoryWindow(); PlanarAndChain4(); Registers(); Rendering(); VirtualMode(); KeyboardInterrupt(); BiosStub(); PciRom(); IretPrivilegeCheck(); Mouse(); ResetRequest(); Serial(); BootMenuAutomation();
+        MemoryWindow(); PlanarAndChain4(); Registers(); Rendering(); VirtualMode(); KeyboardInterrupt(); BiosStub(); PciRom(); IretPrivilegeCheck(); Mouse(); ResetRequest(); Serial(); BootMenuAutomation(); BootMenuTimeouts();
         Console.WriteLine($"VGA/V86/keyboard assertions passed: {assertions}");
     }
 }
