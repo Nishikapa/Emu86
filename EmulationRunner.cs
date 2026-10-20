@@ -24,7 +24,6 @@ internal static class EmulationRunner
         if (env.NextIrq == 0) env.NextIrq = count + IrqPeriod;
         long nextSnapshot = count + snapshotInterval;
         long nextService = count + IrqPeriod;
-        var timerPending = false;
         while (count < options.Limit)
         {
             // ホストから注入されたスキャンコードを 8042 の出力バッファへ移し、表示ウィンドウが
@@ -54,153 +53,30 @@ internal static class EmulationRunner
                 }
             }
 
-            // 仮想タイマ割り込み(IRQ0): 一定命令数ごとに、IF=1 かつ PIC でマスクされて
-            // いなければ、PIC のベクタベース+0 へ配送する(リアルモードは IVT 経由で
-            // SeaBIOS の handle_08 が BDA ティックを進め、プロテクトモードは IDT 経由で
-            // Linux の jiffies が進む)。IDT 未設定(limit 不足)の間は配送しない。
-            // 周期が来たら要求を立て、配送できる状態(IF=1 など)になるまで保留する。実機の 8259 と同じく
-            // 要求は消えないので、IF=1 の区間が短いポーリングループ(SeaBIOS の sti; nop; cli)でも
-            // ティックが進む。
-            if (!options.NoIrq && count >= env.NextIrq)
+            // 仮想タイマ割り込み(IRQ0): 一定命令数ごとに要求を立て、配送できる状態(IF=1 など)になるまで
+            // 保留する。実機の 8259 と同じく要求は消えないので、IF=1 の区間が短いポーリングループ
+            // (SeaBIOS の sti; nop; cli)でもティックが進む。リアルモードは IVT 経由で SeaBIOS の handle_08 が
+            // BDA ティックを進め、プロテクトモードは IDT 経由で Linux の jiffies が進む。
+            if (!options.NoIrq)
             {
-                env.NextIrq = count + IrqPeriod;
-                timerPending = true;
-            }
-            if (timerPending)
-            {
-                var vec = env.PicMasterBase + 0;
-                // 配送条件: IF=1、IRQ0 が PIC でマスクされておらず、かつ前回の IRQ0 が
-                // まだ処理中(in-service)でないこと。in-service は実機 8259 と同じく EOI で降りる。
-                // これがないとハンドラ完了前に次を注入して多重ネストし、SAVE_ALL の push が
-                // スタックを .text へ押し下げてコードを破壊する(割り込みストーム)。
-                // プロテクトモードでは OS が PIC を再プログラム(base>=0x20)し IDT ゲートが
-                // 用意されるまで待つ。
-                var deliverable = cpu.jf && (env.PicMasterMask & 1) == 0 && (env.PicMasterIsr & 1) == 0 &&
-                    (cpu.pe
-                        ? env.PicMasterBase >= 0x20 && cpu.idt_limit >= (vec + 1) * 8 - 1
-                        : true);
-                if (deliverable)
+                if (count >= env.NextIrq)
                 {
-                    try
-                    {
-                        var irq = executor.Execute(env, cpu, Interrupt(vec));
-                        if (irq.IsSuccess)
-                        {
-                            cpu = irq.cpu;
-                            env.PicMasterIsr |= 1; // IRQ0 を in-service にする(EOI まで再配送しない)
-                            timerPending = false;
-                        }
-                    }
-                    catch (PageFaultException pf)
-                    {
-                        output.WriteLine($"FAULT during IRQ delivery: lin={pf.Linear:x8} err={pf.ErrorCode:x} at {cpu.cs:x4}:{cpu.eip:x8} esp={cpu.esp:x8} (instr {count})");
-                        break;
-                    }
+                    env.NextIrq = count + IrqPeriod;
+                    env.TimerIrqPending = true;
                 }
-            }
-
-            // キーボード(IRQ1)の配送。8042 の出力バッファにデータがあり、コマンドバイトで割り込みが
-            // 許可されていれば、IRQ0 と同じ条件(IF・マスク・in-service、保護モードでは IDT の準備)で
-            // ベクタベース+1 へ配送する。ハンドラがポート 0x60 を読んでバッファが空になれば要求は下がる。
-            if (!options.NoIrq && env.Keyboard.IrqAsserted && cpu.jf && (env.PicMasterMask & 2) == 0 && (env.PicMasterIsr & 2) == 0)
-            {
-                var vec = env.PicMasterBase + 1;
-                if (!cpu.pe || (env.PicMasterBase >= 0x20 && cpu.idt_limit >= (vec + 1) * 8 - 1))
+                // ハードウェア割り込み(タイマ・キーボード・シリアル・マウス・ATA)の配送。IF・PIC のマスク・
+                // in-service、プロテクトモードでは IDT の準備を確認し、優先順で 1 本だけ配送する。
+                var line = IrqDelivery.Select(env, cpu);
+                if (line >= 0)
                 {
                     try
                     {
-                        var irq = executor.Execute(env, cpu, Interrupt(vec));
-                        if (irq.IsSuccess)
-                        {
-                            cpu = irq.cpu;
-                            env.PicMasterIsr |= 2;
-                        }
+                        var irq = executor.Execute(env, cpu, IrqDelivery.Pending(line));
+                        if (irq.IsSuccess) cpu = irq.cpu;
                     }
                     catch (PageFaultException pf)
                     {
-                        output.WriteLine($"FAULT during keyboard IRQ delivery: lin={pf.Linear:x8} err={pf.ErrorCode:x} at {cpu.cs:x4}:{cpu.eip:x8} (instr {count})");
-                        break;
-                    }
-                }
-            }
-
-            // シリアル(COM1=IRQ4、COM2=IRQ3、マスタ PIC 入力)の配送。条件は IRQ1 と同じ。
-            if (!options.NoIrq && cpu.jf)
-            {
-                foreach (var (uart, line) in new[] { (env.Com1, 4), (env.Com2, 3) })
-                {
-                    if (!uart.IrqAsserted || (env.PicMasterMask & (1 << line)) != 0 || (env.PicMasterIsr & (1 << line)) != 0) continue;
-                    var vec = env.PicMasterBase + line;
-                    if (cpu.pe && (env.PicMasterBase < 0x20 || cpu.idt_limit < (vec + 1) * 8 - 1)) continue;
-                    try
-                    {
-                        var irq = executor.Execute(env, cpu, Interrupt(vec));
-                        if (irq.IsSuccess)
-                        {
-                            cpu = irq.cpu;
-                            env.PicMasterIsr |= (byte)(1 << line);
-                        }
-                    }
-                    catch (PageFaultException pf)
-                    {
-                        output.WriteLine($"FAULT during serial IRQ delivery: lin={pf.Linear:x8} err={pf.ErrorCode:x} at {cpu.cs:x4}:{cpu.eip:x8} (instr {count})");
-                        return count;
-                    }
-                    break;
-                }
-            }
-
-            // マウス(IRQ12, スレーブ PIC 入力4)の配送。IRQ1 と同じ条件で、カスケードの in-service も立てる。
-            if (!options.NoIrq && env.Keyboard.AuxIrqAsserted && cpu.jf
-                && (env.PicSlaveMask & 0x10) == 0 && (env.PicMasterMask & 0x04) == 0 && (env.PicSlaveIsr & 0x10) == 0)
-            {
-                var vec = env.PicSlaveBase + 4;
-                if (!cpu.pe || (env.PicMasterBase >= 0x20 && cpu.idt_limit >= (vec + 1) * 8 - 1))
-                {
-                    try
-                    {
-                        var irq = executor.Execute(env, cpu, Interrupt(vec));
-                        if (irq.IsSuccess)
-                        {
-                            cpu = irq.cpu;
-                            env.PicSlaveIsr |= 0x10;
-                            env.PicMasterIsr |= 0x04;
-                        }
-                    }
-                    catch (PageFaultException pf)
-                    {
-                        output.WriteLine($"FAULT during mouse IRQ delivery: lin={pf.Linear:x8} err={pf.ErrorCode:x} at {cpu.cs:x4}:{cpu.eip:x8} (instr {count})");
-                        break;
-                    }
-                }
-            }
-
-            // ATA(IRQ14, スレーブ PIC 入力6)の配送。IDE ディスクがコマンド完了/データ準備で
-            // INTRQ を上げたら、プロテクトモードで IF=1・非マスク・非 in-service のとき配送する。
-            // レガシー IDE の IRQ14 はスレーブ経由なので、カスケード(マスタ IRQ2)の
-            // in-service も同時に立てる。EOI(0xA0/0x20)で両方降りる。
-            if (!options.NoIrq && env.Ata is { IrqPending: true } && cpu.pe && cpu.jf
-                && env.PicMasterBase >= 0x20  // OS が PIC を保護モードベースへ再プログラム済み(SeaBIOS は除外)
-                && (env.PicSlaveMask & 0x40) == 0 && (env.PicMasterMask & 0x04) == 0
-                && (env.PicSlaveIsr & 0x40) == 0)
-            {
-                var vec = env.PicSlaveBase + 6;
-                if (cpu.idt_limit >= (vec + 1) * 8 - 1)
-                {
-                    try
-                    {
-                        var irq = executor.Execute(env, cpu, Interrupt(vec));
-                        if (irq.IsSuccess)
-                        {
-                            cpu = irq.cpu;
-                            env.Ata.IrqPending = false;
-                            env.PicSlaveIsr |= 0x40;  // スレーブ入力6 in-service
-                            env.PicMasterIsr |= 0x04; // カスケード(マスタ入力2)in-service
-                        }
-                    }
-                    catch (PageFaultException pf)
-                    {
-                        output.WriteLine($"FAULT during ATA IRQ delivery: lin={pf.Linear:x8} err={pf.ErrorCode:x} at {cpu.cs:x4}:{cpu.eip:x8} (instr {count})");
+                        output.WriteLine($"FAULT during {IrqDelivery.Name(line)} IRQ delivery: lin={pf.Linear:x8} err={pf.ErrorCode:x} at {cpu.cs:x4}:{cpu.eip:x8} esp={cpu.esp:x8} (instr {count})");
                         break;
                     }
                 }

@@ -249,9 +249,71 @@ static class RunnerTests
         Equal(10000L, cancelControl.Count, "cancelled while paused keeps the pause count");
     }
 
+    // 割り込み線の選択: IF・PIC のマスク・in-service・IDT の準備を見て、
+    // 優先順(タイマ、キーボード、COM1、COM2、マウス、ATA)に 1 本だけ選ぶ。
+    static void InterruptSelection()
+    {
+        using var env = new EmuEnvironment(memory: new byte[0x10000]);
+        var cpu = new CPU { eflags = 2 };
+        Equal(-1, IrqDelivery.Select(env, cpu), "nothing pending");
+        env.TimerIrqPending = true;
+        Equal(-1, IrqDelivery.Select(env, cpu), "IF=0 holds the timer");
+        cpu.jf = true;
+        Equal(0, IrqDelivery.Select(env, cpu), "timer selected");
+        Equal(0x08, IrqDelivery.Vector(env, 0), "timer vector at the default base");
+        env.PicMasterMask = 0x01;
+        Equal(-1, IrqDelivery.Select(env, cpu), "masked timer is held");
+        env.PicMasterMask = 0;
+        env.PicMasterIsr = 0x01;
+        Equal(-1, IrqDelivery.Select(env, cpu), "in-service timer is held");
+        env.PicMasterIsr = 0;
+        env.Keyboard.CommandByte = 0x47; // キーボード・AUX の割り込みを許可
+        env.Keyboard.Output.Enqueue(0x1C);
+        Equal(0, IrqDelivery.Select(env, cpu), "timer precedes the keyboard");
+        env.TimerIrqPending = false;
+        Equal(1, IrqDelivery.Select(env, cpu), "keyboard selected");
+        env.Com2.Ier = 1; env.Com2.Rx.Enqueue(0x41);
+        env.Com1.Ier = 1; env.Com1.Rx.Enqueue(0x42);
+        env.Keyboard.Mouse.Output.Enqueue(0x08);
+        Equal(1, IrqDelivery.Select(env, cpu), "keyboard precedes serial");
+        env.Keyboard.Output.Clear();
+        Equal(4, IrqDelivery.Select(env, cpu), "COM1 precedes COM2");
+        env.Com1.Rx.Clear();
+        Equal(3, IrqDelivery.Select(env, cpu), "COM2 precedes the mouse");
+        env.Com2.Rx.Clear();
+        Equal(12, IrqDelivery.Select(env, cpu), "mouse selected");
+        Equal(0x74, IrqDelivery.Vector(env, 12), "mouse vector at the default slave base");
+        env.PicMasterMask = 0x04;
+        Equal(-1, IrqDelivery.Select(env, cpu), "cascade mask holds slave lines");
+        env.PicMasterMask = 0;
+        env.PicSlaveMask = 0x10;
+        Equal(-1, IrqDelivery.Select(env, cpu), "slave mask holds the mouse");
+        env.PicSlaveMask = 0;
+        env.PicSlaveIsr = 0x10;
+        Equal(-1, IrqDelivery.Select(env, cpu), "in-service mouse is held");
+        env.PicSlaveIsr = 0;
+        env.Keyboard.Mouse.Output.Clear();
+        env.Ata = new AtaDevice(null) { IrqPending = true };
+        Equal(-1, IrqDelivery.Select(env, cpu), "ATA is not delivered in real mode");
+        CPU._cr0.setter(cpu)(1);
+        Equal(-1, IrqDelivery.Select(env, cpu), "protected mode waits for the PIC to be reprogrammed");
+        env.PicMasterBase = 0x20; env.PicSlaveBase = 0x28;
+        Equal(-1, IrqDelivery.Select(env, cpu), "protected mode waits for the IDT gate");
+        cpu.idt_limit = (0x2E + 1) * 8 - 2;
+        Equal(-1, IrqDelivery.Select(env, cpu), "IDT limit one byte short of the gate");
+        cpu.idt_limit = (0x2E + 1) * 8 - 1;
+        Equal(14, IrqDelivery.Select(env, cpu), "ATA selected");
+        Equal(0x2E, IrqDelivery.Vector(env, 14), "ATA vector");
+        env.PicSlaveIsr = 0x40;
+        Equal(-1, IrqDelivery.Select(env, cpu), "in-service ATA is held");
+        env.PicSlaveIsr = 0;
+        cpu.jf = false;
+        Equal(-1, IrqDelivery.Select(env, cpu), "IF=0 holds every line");
+    }
+
     public static void Run()
     {
-        Options(); Runners(); Environments(); CommandLine(); PauseResume();
+        Options(); Runners(); Environments(); CommandLine(); PauseResume(); InterruptSelection();
         Console.WriteLine($"Runner/environment checks passed: {assertions} assertions");
     }
 
