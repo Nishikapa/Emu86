@@ -66,6 +66,28 @@ static class RunnerTests
             ["--overlay", "overlay.avhdx"]
         ];
         foreach (var args in invalid) Throws<ArgumentException>(() => RunOptions.Parse(args), "invalid " + string.Join(' ', args));
+        string Message(params string[] args)
+        {
+            try { RunOptions.Parse(args); return ""; }
+            catch (ArgumentException exception) { return exception.Message; }
+        }
+        Equal("--limit: missing value", Message("--limit"), "missing value names the option");
+        Equal("--limit: missing value", Message("--limit", "--slow"), "an option is not a value");
+        Equal("--limit: expected a non-negative decimal integer", Message("--limit", "abc"), "decimal error");
+        Equal("--breakeip: expected a 32-bit hexadecimal address", Message("--breakeip", "-1"), "hex error");
+        Equal("--watch: expected lo < hi", Message("--watch", "20", "10"), "range order error");
+        Equal("--dumplba: invalid sector range", Message("--dumplba", "0", "0"), "sector range error");
+        Equal("--intlog: expected 1..100000", Message("--intlog", "0"), "interrupt log tail error");
+        Equal("Unknown option: --bogus", Message("--bogus"), "unknown option");
+        Equal("Unknown option: stray", Message("--slow", "stray"), "stray argument after valid options");
+        Equal("--overlay requires --disk", Message("--overlay", "x.avhdx"), "post-parse validation");
+        Equal(9_000_000L, RunOptions.Parse(["--limit", "1", "--limit", "9000000"]).Limit, "later option wins");
+        Equal(long.MaxValue, RunOptions.Parse(["--limit", "max"]).Limit, "limit max");
+        Equal(long.MaxValue, RunOptions.Parse(["--snapshot-interval", "0"]).SnapshotInterval, "interval 0 means at the end");
+        // 使い方は同じ表から生成されるので、すべてのオプションが載っている。
+        foreach (var name in arguments.Where(argument => argument.StartsWith("--")).Append("--help").Append("--snapshot-interval"))
+            Equal(true, RunOptions.Usage.Contains("  " + name + " ") || RunOptions.Usage.Contains("  " + name + "\n") || RunOptions.Usage.Contains("  " + name + "\r"), "usage lists " + name);
+        Equal(true, RunOptions.Usage.StartsWith("Usage: Emu86") && RunOptions.Usage.Contains("--dumplba start count"), "usage shows argument syntax");
     }
 
     static string StateHash(CPU cpu, EmuEnvironment env)
