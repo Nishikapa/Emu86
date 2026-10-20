@@ -4,6 +4,10 @@ public partial class EmuEnvironment
 {
     public long NextIrq;
 
+    // タイマ割り込み(IRQ0)の要求が立っていてまだ配送できていない(IF=0・マスク・in-service 中など)。
+    // 周期ごとに立ち、配送で降りる。スナップショットには含めない(再開時は次の周期から)。
+    public bool TimerIrqPending;
+
     internal void SaveRuntimeState(BinaryWriter writer)
     {
         writer.Write(Tsc);

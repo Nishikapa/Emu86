@@ -153,7 +153,7 @@ static State<Unit> Mov_8C =>
 
 ### 実行ループとタイマー割り込み
 
-`Main`（`Program.Runner.cs`）は引数解析・起動環境の組み立て・再開処理を担当し、`--window` では `VgaWindow`（Windows Forms）を UI スレッドで開いてエミュレーションを別スレッドで走らせます。`EmulationRunner` が命令実行、タイマー IRQ0・キーボード IRQ1・シリアル IRQ3/IRQ4・マウス IRQ12・ATA IRQ14 の配送、ホストから注入されたスキャンコード・マウスパケット・受信バイトの 8042/UART への受け渡し、NTLDR メニューの自動操作（`BootAutomation`）、中断・再開（`EmulationControl`）、ゲストのリセット要求と停止要求の確認、定期保存を制御します。割り込みは IF・PIC のマスク・in-service 状態を確認し、リアルモードでは IVT、プロテクトモードでは準備済みの IDT を経由して配送します。トレース・監視点・停止診断は `RunDiagnostics`、Windows 固有の IRP・デバッグ文字列・EBP チェーンの解釈は `WindowsDiagnostics` に分離しています。
+`Main`（`Program.Runner.cs`）は引数解析・起動環境の組み立て・再開処理を担当し、`--window` では `VgaWindow`（Windows Forms）を UI スレッドで開いてエミュレーションを別スレッドで走らせます。`EmulationRunner` が命令実行、タイマー IRQ0・キーボード IRQ1・シリアル IRQ3/IRQ4・マウス IRQ12・ATA IRQ14 の配送、ホストから注入されたスキャンコード・マウスパケット・受信バイトの 8042/UART への受け渡し、NTLDR メニューの自動操作（`BootAutomation`）、中断・再開（`EmulationControl`）、ゲストのリセット要求と停止要求の確認、定期保存を制御します。ハードウェア割り込みは `IrqDelivery` が IF・PIC のマスク・in-service 状態（プロテクトモードでは IDT の準備も）を確認し、優先順（タイマー、キーボード、COM1、COM2、マウス、ATA）に 1 命令につき 1 本を選びます。選ばれた線の配送（リアルモードは IVT、プロテクトモードは IDT 経由）と in-service の設定・要求の取り下げは `State` として `InstructionExecutor` で実行し、配送中のページフォルトでは配送前の CPU に戻します。トレース・監視点・停止診断は `RunDiagnostics`、Windows 固有の IRP・デバッグ文字列・EBP チェーンの解釈は `WindowsDiagnostics` に分離しています。
 
 実行は `InstructionLimit`（既定 5 億命令、`--limit max` で上限なし）に達するか、配送できない未対応命令・例外に遭遇するか、表示ウィンドウが閉じられるまで続きます。実行中は一定間隔（`SnapshotInterval`）ごとに `SnapshotStore` が状態を `snapshot.snap` へ保存し、`--resume` で続きを再開できます。
 
@@ -182,7 +182,8 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | `InstructionExecutor.cs` | 両コアの実行・CPU 復元境界、命令ごとのデコード状態、REP の再開位置。 |
 | `InstructionDecoding.cs` / `Registers.cs` | 通常コアの ModRM/SIB 実効アドレス計算と、両コア共通の配列を作らないレジスタ参照。変位・即値は必要な幅だけを直接読み取る。 |
 | `Program.Runner.cs` / `RunOptions.cs` | CLI の起動処理、引数解析・検証、ウィンドウ付き実行と別スレッドでの実行ループ、ゲストリセット時の環境再生成、セクタダンプ。 |
-| `EmulationRunner.cs` | 命令実行ループ、割り込み配送、デバイスのポンプ、定期保存の呼び出し。 |
+| `EmulationRunner.cs` | 命令実行ループ、例外配送、デバイスのポンプ、定期保存の呼び出し。 |
+| `IrqDelivery.cs` | ハードウェア割り込みの選択（優先順・IF・PIC のマスクと in-service・IDT の準備）と、配送・in-service 設定・要求取り下げの `State`。 |
 | `EmulationControl.cs` | UI スレッドからの中断・再開要求と、中断中・停止後の CPU 状態の公開。 |
 | `BootAutomation.cs` | `--boot-debug` の NTLDR 起動メニュー自動操作（VRAM の文字を見ながらキーを送る）。 |
 | `RunDiagnostics.cs` / `WindowsDiagnostics.cs` | トレース・監視点・停止診断と、Windows 固有の構造体・スタック解析。 |
