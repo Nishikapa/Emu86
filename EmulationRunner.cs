@@ -18,9 +18,11 @@ internal static class EmulationRunner
         EnvSyncPaging(env, cpu);
         var diagnostics = new RunDiagnostics(options.Diagnostics, env, cpu, output, trace, count);
         var executor = new InstructionExecutor(useFast: !options.Slow);
+        env.Translations.Enabled = options.Translate && !options.Slow;
         var swatch = System.Diagnostics.Stopwatch.StartNew();
         long lastReport = count;
         long fastCount = 0;
+        long translatedCount = 0;
         if (env.NextIrq == 0) env.NextIrq = count + IrqPeriod;
         long nextSnapshot = count + snapshotInterval;
         long nextService = count + IrqPeriod;
@@ -92,6 +94,7 @@ internal static class EmulationRunner
                 // まず高速コアで 1 命令実行し、未対応の命令だけモナド版へフォールバックする。
                 var result = executor.Step(env, cpu);
                 if (executor.UsedFastPath) fastCount++;
+                if (executor.UsedTranslation) translatedCount++;
                 if (result.IsSuccess)
                     cpu = result.cpu;
                 else if (!VgaBiosStub.TryService(env, cpu)) // VGA BIOS スタブ(C000:0060 の UD2)なら C# 側で処理済み
@@ -156,6 +159,8 @@ internal static class EmulationRunner
         saveSnapshot?.Invoke(count, cpu, env);
         if (!options.Slow && count > 0)
             output.WriteLine($"fast-path coverage: {fastCount:N0}/{count:N0} ({100.0 * fastCount / count:F2}%)");
+        if (env.Translations.Enabled && count > 0)
+            error.WriteLine($"[translation] {env.Translations.Translated:N0} sites lowered, {env.Translations.Compiled:N0} compiled; {translatedCount:N0}/{count:N0} instructions ({100.0 * translatedCount / count:F2}%: {env.Translations.Interpreted:N0} interpreted, {env.Translations.Executed:N0} compiled); {env.Translations.Invalidations:N0} page invalidations, {env.Translations.CompileMilliseconds:F0} ms compiling");
         diagnostics.ReportStop(count);
         control?.Stopped(cpu, count);
         return count;

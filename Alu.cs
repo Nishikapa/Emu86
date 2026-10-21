@@ -68,7 +68,7 @@ static public partial class Ext
         cpu.af = ((value ^ result) & 0x10) != 0;
     }
 
-    static bool EvaluateCondition(CPU cpu, int condition) => condition switch
+    static internal bool EvaluateCondition(CPU cpu, int condition) => condition switch
     {
         0 => cpu.of,
         1 => !cpu.of,

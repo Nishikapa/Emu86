@@ -92,7 +92,11 @@ public partial class EmuEnvironment
 
     public void SaveState(BinaryWriter writer) => Memory.Save(writer, this);
 
-    public void LoadState(BinaryReader reader) => Memory.Load(reader, this, SnapshotStore.Version);
+    public void LoadState(BinaryReader reader)
+    {
+        Memory.Load(reader, this, SnapshotStore.Version);
+        Translations.InvalidateAll(); // RAM が差し替わった
+    }
 
     internal void SaveRuntimeState(BinaryWriter writer) => Runtime.Save(writer, this);
 

@@ -25,6 +25,7 @@ static class DecodeTests
         using var env = new EmuEnvironment(memory: new byte[0x10000]);
         var slow = new InstructionExecutor(false);
         var fast = new InstructionExecutor(true);
+
         foreach (var code32 in new[] { false, true })
         foreach (var addressPrefix in new[] { false, true })
         foreach (var segmentPrefix in new[] { false, true })

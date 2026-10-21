@@ -19,7 +19,7 @@ static public partial class Ext
 
     // 線形→物理アドレス変換(2レベルページテーブル + 直結 TLB)。
     // リング0 のブートコードが対象のため、U/S・R/W の保護チェックは行わない(存在チェックのみ)。
-    static uint EnvTranslate(EmuEnvironment env, uint lin, bool write)
+    static internal uint EnvTranslate(EmuEnvironment env, uint lin, bool write)
     {
         var vpn = lin >> 12;
         var idx = vpn & (EmuEnvironment.TlbSize - 1);
@@ -256,10 +256,10 @@ static public partial class Ext
     static uint StrSrc(CPU cpu) => cpu.ds_base + (StrA32(cpu) ? cpu.esi : cpu.si);
     static uint StrDst(CPU cpu) => cpu.es_base + (StrA32(cpu) ? cpu.edi : cpu.di);
 
-    static uint EnvReadN(EmuEnvironment env, uint addr, int size) =>
+    static internal uint EnvReadN(EmuEnvironment env, uint addr, int size) =>
         size == 1 ? EnvGetMemoryData8(env, addr) : size == 2 ? EnvGetMemoryData16(env, addr) : EnvGetMemoryData32(env, addr);
 
-    static void EnvWriteN(EmuEnvironment env, uint addr, int size, uint val)
+    static internal void EnvWriteN(EmuEnvironment env, uint addr, int size, uint val)
     {
         switch (size)
         {
@@ -982,7 +982,7 @@ static public partial class Ext
     // 同じ内容を映す。SeaBIOS の 32bit flat コードは自身を高位エイリアス経由で call/jmp する
     // (例: 0xffff1edd = 低位 0xf1edd)。ページング無効時の物理アクセスでここへ折り返す。
     // ページング有効時は変換後の物理が先頭 RAM 内なので実質何もしない。
-    static uint EnvAlias(uint addr) => addr >= 0xFFF00000 ? addr - 0xFFF00000 : addr;
+    static internal uint EnvAlias(uint addr) => addr >= 0xFFF00000 ? addr - 0xFFF00000 : addr;
 
     static private void EnvWriteByte(EmuEnvironment env, uint addr, byte val)
     {
@@ -992,7 +992,11 @@ static public partial class Ext
         if (env.WriteLog != null && addr >= env.WLogLo && addr < env.WLogHi)
             env.WriteLog.Add($"{env.CurEip:x8}: [{addr:x8}]={val:x2}");
         if (VgaDevice.Contains(addr)) { env.Vga.Write(addr, val); return; }
-        if (addr < (uint)env.OneMegaMemory_.Length) env.OneMegaMemory_[addr] = val;
+        if (addr < (uint)env.OneMegaMemory_.Length)
+        {
+            env.Translations.OnWrite(addr);
+            env.OneMegaMemory_[addr] = val;
+        }
     }
 
     static void EnvWriteWord(EmuEnvironment env, uint addr, ushort value) =>
@@ -1026,6 +1030,7 @@ static public partial class Ext
         var memory = env.OneMegaMemory_;
         if ((ulong)addr + (uint)size <= (uint)memory.Length)
         {
+            env.Translations.OnWrite(addr); // ページ境界はまたがない(先頭で分岐済み)
             memory[addr] = (byte)value;
             memory[addr + 1] = (byte)(value >> 8);
             if (size == 4)
@@ -1110,6 +1115,7 @@ public partial class EmuEnvironment : IDisposable
             bios.CopyTo(OneMegaMemory_, 0x100000 - bios.Length);
         }
         CmosRtc = new CmosDevice(OneMegaMemory_.Length);
+        Translations = new TranslationCache(OneMegaMemory_.Length);
         Ata = ata;
     }
 
@@ -1129,6 +1135,9 @@ public partial class EmuEnvironment : IDisposable
     public byte[] OneMegaMemory_;
 
     public byte[] IoPort = new byte[0x10000];
+
+    // 翻訳キャッシュ(docs/adr/0002)。RAM への書き込みで該当ページの翻訳を捨てる。スナップショットには含めない。
+    public TranslationCache Translations;
 
     // ページング変換状態(CPU の CR0.PG/CR3 のミラー。EnvSyncPaging で同期)。
     // TLB は直結マップ(tag = 0x80000000 | vpn、0 は無効)。読み取り用と、
