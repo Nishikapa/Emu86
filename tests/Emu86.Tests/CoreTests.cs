@@ -172,6 +172,95 @@ static class CoreTests
         }
     }
 
+    // ページテーブルウォークの挙動を固定する: 4K ページと大ページ(PSE 4MB / PAE 2MB)の変換、
+    // Accessed/Dirty の更新規則(PDE は A のみ、PTE/大ページは A と D、PDPTE は更新しない)、
+    // 各段の不在フォルトのエラーコード、CR0.WP と R/W(PDE と PTE の論理積)、TLB の読み書き別の充填。
+    static void PageWalk()
+    {
+        foreach (var pae in new[] { false, true })
+        {
+            var env = SlowEnv;
+            Reset(env, []);
+            env.OneMegaMemory_[0x5005] = 0xAB; env.OneMegaMemory_[0x1234] = 0xCD; env.OneMegaMemory_[0x7000] = 0xEF;
+            var cpu = CreateCpu();
+            void Entry(int address, uint value, int size) { BitConverter.GetBytes(value).CopyTo(env.OneMegaMemory_, address); if (size == 8) BitConverter.GetBytes(0u).CopyTo(env.OneMegaMemory_, address + 4); }
+            uint Raw(int address) => BitConverter.ToUInt32(env.OneMegaMemory_, address);
+            int directory, table, readOnlyDirectory, large, missingDirectory, size;
+            uint largeLinear, missingDirectoryLinear, readOnlyDirectoryLinear;
+            if (!pae)
+            {
+                size = 4; directory = 0x9000; table = 0xA000; readOnlyDirectory = 0xB000;
+                Entry(directory + 0 * 4, 0xA003, size);          // lin 0x000000-0x3FFFFF -> PT 0xA000
+                Entry(directory + 1 * 4, 0x00000083, size);      // lin 0x400000-0x7FFFFF -> 4MB ページ(物理 0)
+                Entry(directory + 2 * 4, 0xB001, size);          // lin 0x800000-: 読み取り専用 PDE -> PT 0xB000
+                large = directory + 1 * 4; largeLinear = 0x401234; missingDirectoryLinear = 0xC00000; readOnlyDirectoryLinear = 0x800000; missingDirectory = directory + 3 * 4;
+                env.PaeOn = false; env.Cr3Base = 0x9000;
+            }
+            else
+            {
+                size = 8; directory = 0xD000; table = 0xE000; readOnlyDirectory = 0xB000;
+                Entry(0xC000, 0xD001, size);                     // PDPTE[0] -> PD 0xD000(PDPTE は A/D を更新しない)
+                Entry(directory + 0 * 8, 0xE003, size);          // lin 0x000000-0x1FFFFF -> PT 0xE000
+                Entry(directory + 1 * 8, 0x00000083, size);      // lin 0x200000-0x3FFFFF -> 2MB ページ(物理 0)
+                Entry(directory + 2 * 8, 0xB001, size);          // lin 0x400000-: 読み取り専用 PDE -> PT 0xB000
+                large = directory + 1 * 8; largeLinear = 0x201234; missingDirectoryLinear = 0x600000; readOnlyDirectoryLinear = 0x400000; missingDirectory = directory + 3 * 8;
+                env.PaeOn = true; env.Cr3Base = 0xC000;
+            }
+            Entry(table + 2 * size, 0x5003, size);               // lin 0x2000 -> 0x5000(R/W)
+            Entry(table + 3 * size, 0x6001, size);               // lin 0x3000 -> 0x6000(読み取り専用)
+            Entry(readOnlyDirectory + 0 * size, 0x7003, size);   // 読み取り専用 PDE の下の R/W PTE -> 0x7000
+            env.PagingOn = true; env.WpOn = false; env.FlushTlb();
+            var label = pae ? "PAE" : "legacy";
+
+            void Write(uint linear, byte value) => SetMemOrRegData((true, linear), value.ToTypeData())(env, cpu, null);
+            (uint linear, uint code)? Fault(Action action)
+            {
+                try { action(); return null; }
+                catch (PageFaultException fault) { return (fault.Linear, fault.ErrorCode); }
+            }
+
+            Equal((byte)0xAB, EnvGetMemoryData8(env, 0x2005), $"{label} 4K read");
+            Equal(0x20u, Raw(directory) & 0x60, $"{label} read sets Accessed on the directory entry only");
+            Equal(0x20u, Raw(table + 2 * size) & 0x60, $"{label} read sets Accessed but not Dirty on the page entry");
+            Equal(0x80000002u, env.TlbTagR[2], $"{label} read fills the read TLB");
+            Equal(0u, env.TlbTagW[2], $"{label} read leaves the write TLB empty");
+            Write(0x2006, 0xCD);
+            Equal((byte)0xCD, env.OneMegaMemory_[0x5006], $"{label} 4K write lands in the mapped page");
+            Equal(0x60u, Raw(table + 2 * size) & 0x60, $"{label} write sets Dirty on the page entry");
+            Equal(0x20u, Raw(directory) & 0x60, $"{label} write leaves the directory entry without Dirty");
+            Equal(0x80000002u, env.TlbTagW[2], $"{label} write fills the write TLB");
+            Write(0x3000, 0x11);
+            Equal((byte)0x11, env.OneMegaMemory_[0x6000], $"{label} ring0 writes a read-only page while CR0.WP=0");
+            Equal(0x60u, Raw(table + 3 * size) & 0x60, $"{label} WP=0 write marks the read-only page dirty");
+            env.WpOn = true; env.FlushTlb();
+            Equal((0x3001u, 3u), Fault(() => Write(0x3001, 0x22)), $"{label} WP=1 write to a read-only page faults with protection+write");
+            Equal((byte)0x11, EnvGetMemoryData8(env, 0x3000), $"{label} read-only page still readable");
+            Equal((readOnlyDirectoryLinear, 3u), Fault(() => Write(readOnlyDirectoryLinear, 0x33)), $"{label} read-only PDE overrides a R/W PTE");
+            Equal((byte)0xEF, EnvGetMemoryData8(env, readOnlyDirectoryLinear), $"{label} read through a read-only PDE");
+            Equal(0x20u, Raw(readOnlyDirectory) & 0x60, $"{label} read-only PDE path sets Accessed on the page entry");
+            Equal((0x4000u, 0u), Fault(() => EnvGetMemoryData8(env, 0x4000)), $"{label} not-present page entry on read");
+            Equal((0x4000u, 2u), Fault(() => Write(0x4000, 0x44)), $"{label} not-present page entry on write");
+            Equal((missingDirectoryLinear, 0u), Fault(() => EnvGetMemoryData8(env, missingDirectoryLinear)), $"{label} not-present directory entry");
+            Equal(0u, Raw(missingDirectory), $"{label} missing directory entry untouched");
+            env.WpOn = false; env.FlushTlb();
+            Equal((byte)0xCD, EnvGetMemoryData8(env, largeLinear), $"{label} large page read");
+            Equal(0x20u, Raw(large) & 0x60, $"{label} large page read sets Accessed only");
+            Write(largeLinear + 1, 0x55);
+            Equal((byte)0x55, env.OneMegaMemory_[0x1235], $"{label} large page write");
+            Equal(0x60u, Raw(large) & 0x60, $"{label} large page write sets Dirty");
+            env.WpOn = true; env.FlushTlb();
+            Entry(large, 0x00000081 | 0x60, size); // 読み取り専用の大ページ
+            Equal((largeLinear, 3u), Fault(() => Write(largeLinear, 0x66)), $"{label} read-only large page faults on write with WP=1");
+            if (pae)
+            {
+                Equal((0x40000000u, 0u), Fault(() => EnvGetMemoryData8(env, 0x40000000)), "PAE not-present PDPTE");
+                Equal(0xD001u, Raw(0xC000), "PAE PDPTE never gets Accessed/Dirty");
+            }
+            cases++;
+        }
+        Reset(SlowEnv, []);
+    }
+
     static void Integration()
     {
         foreach (var code in new byte[][] { [0xF3, 0xA5], [0x66, 0xF3, 0xAB], [0xF3, 0xAA], [0xA6], [0xA7], [0xAE], [0xAF], [0xAD], [0x50], [0x66, 0x50], [0x58], [0x66, 0x58] })
@@ -231,6 +320,7 @@ static class CoreTests
         Equal("E956129AF77B2263DAB0B3463C62E6310B7114FB93E814B91FA01BC22DA1140F", baselineHash, "pre-refactor results");
         Console.WriteLine($"Baseline-compatible cases: {cases}; SHA256={baselineHash}");
         Memory(true);
+        PageWalk();
         Integration();
         OperandTransfers();
         Console.WriteLine($"Core cases passed: {cases}");
