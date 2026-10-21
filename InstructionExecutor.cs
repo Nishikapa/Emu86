@@ -47,6 +47,8 @@ public sealed class InstructionExecutor(bool useFast = true)
     readonly CPU checkpoint = new();
     readonly State<Unit> decoded = Program.ExecuteDecoded;
     public bool UsedFastPath { get; private set; }
+    // 翻訳キャッシュのコンパイル済みデリゲートで実行した(UsedFastPath も真)。
+    public bool UsedTranslation { get; private set; }
 
     public (bool IsSuccess, Unit value, CPU cpu, string log) Step(EmuEnvironment env, CPU cpu) =>
         Execute(env, cpu, decoded, useFast);
@@ -59,8 +61,16 @@ public sealed class InstructionExecutor(bool useFast = true)
         cpu.Decode = default;
         cpu.CopyTo(checkpoint);
         UsedFastPath = false;
+        UsedTranslation = false;
         try
         {
+            // 翻訳済みの命令はコンパイル済みデリゲートで、次に高速コアで、未対応の命令だけモナド版で実行する。
+            if (tryFast && env.Translations.Enabled && env.Translations.TryRun(env, cpu))
+            {
+                UsedFastPath = true;
+                UsedTranslation = true;
+                return (true, Unit.unit, cpu, string.Empty);
+            }
             if (tryFast && FastStep(env, cpu))
             {
                 UsedFastPath = true;

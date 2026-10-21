@@ -600,7 +600,7 @@ static public partial class Ext
 
     // PUSH: SP/ESP を減らしてからスタックトップへ書く(Push と同一)。
     // スタック幅は SS.B(stack32)で決まる(CS.D ではない)。
-    static void FPush(EmuEnvironment env, CPU c, int type, uint v)
+    static internal void FPush(EmuEnvironment env, CPU c, int type, uint v)
     {
         var size = type == 0 ? 1 : type == 1 ? 2 : 4;
         if (c.stack32) c.esp = (uint)(c.esp - size); else c.sp = (ushort)(c.sp - size);
@@ -611,7 +611,7 @@ static public partial class Ext
     }
 
     // POP: スタックトップから読んでから SP/ESP を増やす(Pop と同一)。
-    static uint FPop(EmuEnvironment env, CPU c, int type)
+    static internal uint FPop(EmuEnvironment env, CPU c, int type)
     {
         var addr = c.ss_base + (c.stack32 ? c.esp : c.sp);
         var v = type == 0 ? EnvGetMemoryData8(env, addr)

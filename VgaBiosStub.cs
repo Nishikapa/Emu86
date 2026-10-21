@@ -59,6 +59,7 @@ public static class VgaBiosStub
         var ram = env.OneMegaMemory_;
         if (ram.Length < RomBase + RomSize) return;
         Rom.CopyTo(ram, (int)RomBase);
+        env.Translations.InvalidateAll(); // RAM への直接書き込み
         ram[0x40] = ServiceOffset; ram[0x41] = 0x00; ram[0x42] = 0x00; ram[0x43] = 0xC0;
         if (ram[0x449] == 0) SetMode(env, 0x03);
     }

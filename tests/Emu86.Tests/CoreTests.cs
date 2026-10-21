@@ -261,11 +261,13 @@ static class CoreTests
         Reset(SlowEnv, []);
     }
 
-    // IR の概念実証(docs/adr/0002): ALU/MOV/INC/DEC のレジスタ形式について、IR の解釈器とコンパイル済み
-    // デリゲートが通常コアと同じ CPU 状態(レジスタとフラグ)を作ること。あわせて 1 命令あたりの時間を表示する。
+    // IR(docs/adr/0002): ALU/MOV/TEST/CMP/INC/DEC/LEA/MOVZX/PUSH/POP/Jcc のレジスタ形式とメモリ形式について、IR の解釈器と
+    // コンパイル済みデリゲートが通常コアと同じ CPU 状態(レジスタとフラグ)とメモリを作ること。1 命令あたりの時間も表示する。
     static void SemanticsIr()
     {
-        var env = SlowEnv;
+        var reference = SlowEnv;
+        var interpreterEnv = FastEnv;
+        using var compilerEnv = CreateEnvironment();
         byte[][] encodings =
         [
             [0x01, 0xD8], [0x66, 0x29, 0xC3], [0x02, 0xC3], [0x1A, 0xDC], [0x3B, 0xC3], [0x33, 0xD8], [0x66, 0x21, 0xC3],
@@ -274,42 +276,69 @@ static class CoreTests
             [0x81, 0xF3, 0xFF, 0x00, 0xFF, 0x00], [0x83, 0xE8, 0x80], [0x80, 0xC4, 0x7F], [0x66, 0x83, 0xD0, 0xFF],
             [0x89, 0xC3], [0x8A, 0xE0], [0x66, 0x8B, 0xD8], [0x88, 0xDC],
             [0xB0, 0x5A], [0xB8, 0x78, 0x56, 0x34, 0x12], [0x66, 0xBB, 0x34, 0x12], [0xB7, 0x80],
+            // メモリオペランド([ebx]、[ebx+disp8]、SIB、moffs、セグメントオーバーライド、16 ビットアドレッシング)
+            [0x01, 0x03], [0x03, 0x03], [0x66, 0x29, 0x03], [0x3B, 0x03], [0x38, 0x03], [0x8B, 0x03], [0x89, 0x03], [0x8A, 0x43, 0x10], [0x88, 0x43, 0x10],
+            [0x83, 0x03, 0x10], [0x81, 0x03, 0x78, 0x56, 0x34, 0x12], [0x80, 0x03, 0x7F], [0x85, 0x03], [0x84, 0x03], [0xA9, 0x01, 0x00, 0x00, 0x80],
+            [0xFF, 0x03], [0xFF, 0x0B], [0xFE, 0x03], [0xC7, 0x03, 0x78, 0x56, 0x34, 0x12], [0xC6, 0x03, 0x5A], [0x66, 0xC7, 0x03, 0x34, 0x12],
+            [0x8D, 0x44, 0x98, 0xF0], [0x66, 0x8D, 0x43, 0x10],
+            [0xA1, 0x00, 0x30, 0x00, 0x00], [0xA3, 0x00, 0x30, 0x00, 0x00], [0xA0, 0x01, 0x30, 0x00, 0x00], [0xA2, 0x02, 0x30, 0x00, 0x00],
+            [0x0F, 0xB6, 0x03], [0x0F, 0xBE, 0x03], [0x0F, 0xB7, 0xC3], [0x0F, 0xBF, 0x03], [0x66, 0x0F, 0xB6, 0xC3],
+            [0x64, 0x8B, 0x03], [0x36, 0x8B, 0x03], [0x67, 0x8B, 0x07],
+            // スタックと分岐
+            [0x50], [0x53], [0x66, 0x50], [0x58], [0x66, 0x5B], [0x68, 0x78, 0x56, 0x34, 0x12], [0x6A, 0x80], [0x66, 0x68, 0x34, 0x12],
+            [0x74, 0x10], [0x75, 0x10], [0x7C, 0xF0], [0x72, 0x7F], [0x0F, 0x87, 0x00, 0x01, 0x00, 0x00], [0x0F, 0x82, 0xF0, 0xFF, 0xFF, 0xFF], [0xEB, 0x05], [0xE9, 0xFF, 0xFF, 0xFF, 0xFF],
         ];
-        uint[] values = [0, 1, 0x7F, 0x80, 0xFF, 0x7FFF, 0x8000, 0xFFFF, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF, 0x12345678];
-        var decodedAdd = DecodeInstruction(env, new CPU { code32 = true });
-        Reset(env, [0x01, 0xD8]);
-        var add = Semantics.Lower(DecodeInstruction(env, new CPU { code32 = true }));
+        uint[] values = [0, 1, 0x7F, 0x80, 0xFF, 0x7FFF, 0x8000, 0xFFFF, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF, 0x12345678, 0x3000];
+        static void Prepare(EmuEnvironment env, byte[] code)
+        {
+            Reset(env, code);
+            for (var offset = 0; offset < 32; offset++) env.OneMegaMemory_[0x3000 + offset] = (byte)(0x80 + offset);
+        }
+        static string Memory(EmuEnvironment env) => Convert.ToHexString(SHA256.HashData(env.OneMegaMemory_));
+        Prepare(reference, [0x01, 0xD8]);
+        var add = Semantics.Lower(DecodeInstruction(reference, new CPU { code32 = true }));
         Equal(true, add.Statements.Count == 2
             && add.Statements[0] is SetRegStmt { Reg: 0, Type: 2, Value: AluExpr { Kind: 0, Left: RegExpr { Reg: 0, Type: 2 }, Right: RegExpr { Reg: 3, Type: 2 } } }
             && add.Statements[1] is AdvanceStmt { Length: 2 }, "ADD eax, ebx lowers to a register write of an ALU expression and an EIP advance");
-        Reset(env, [0x8B, 0x03]);
-        Equal(true, Semantics.Lower(DecodeInstruction(env, new CPU { code32 = true })) == null, "memory operands are outside the PoC");
+        Prepare(reference, [0x75, 0x10]);
+        Equal(true, Semantics.Lower(DecodeInstruction(reference, new CPU { code32 = true })) is { Statements: [IfStmt { Condition: 5, Then: SetEipStmt { Value: BranchTargetExpr { Length: 2, Displacement: 0x10 } }, Else: AdvanceStmt { Length: 2 } }] },
+            "JNE lowers to a conditional EIP assignment");
+        Prepare(reference, [0x0F, 0xAF, 0xC3]);
+        Equal(true, Semantics.Lower(DecodeInstruction(reference, new CPU { code32 = true })) == null, "IMUL is outside the IR");
+        Prepare(reference, [0xF3, 0xAB]);
+        Equal(true, Semantics.Lower(DecodeInstruction(reference, new CPU { code32 = true })) == null, "REP is outside the IR");
         foreach (var code in encodings)
         {
-            Reset(env, code);
-            var block = Semantics.Lower(DecodeInstruction(env, new CPU { code32 = true }));
+            Prepare(reference, code);
+            var block = Semantics.Lower(DecodeInstruction(reference, new CPU { code32 = true }));
             Equal(true, block != null, $"lowered {Convert.ToHexString(code)}");
             var run = Semantics.Compile(block);
             foreach (var left in values)
             foreach (var right in values)
             foreach (var carry in new uint[] { 0, 1 })
             {
-                var reference = CreateCpu(left, right, 0x202 | carry);
-                Reset(env, code);
-                Equal(true, SlowStep(env, reference, null).IsSuccess, $"reference {Convert.ToHexString(code)}");
-                var expected = Convert.ToHexString(CpuBytes(reference));
-                var interpreted = CreateCpu(left, right, 0x202 | carry);
-                Semantics.Interpret(block, interpreted);
-                Equal(expected, Convert.ToHexString(CpuBytes(interpreted)), $"interpreter {Convert.ToHexString(code)} {left:x} {right:x} cf={carry}");
-                var compiled = CreateCpu(left, right, 0x202 | carry);
-                run(compiled);
-                Equal(expected, Convert.ToHexString(CpuBytes(compiled)), $"compiled {Convert.ToHexString(code)} {left:x} {right:x} cf={carry}");
+                var flags = 0x202 | carry | (left == right ? 0x40u : 0) | (left > right ? 0x80u : 0);
+                var expected = CreateCpu(left, right, flags);
+                Prepare(reference, code);
+                Equal(true, SlowStep(reference, expected, null).IsSuccess, $"reference {Convert.ToHexString(code)}");
+                var expectedBytes = Convert.ToHexString(CpuBytes(expected));
+                var expectedMemory = Memory(reference);
+                var interpreted = CreateCpu(left, right, flags);
+                Prepare(interpreterEnv, code);
+                Semantics.Interpret(block, interpreterEnv, interpreted);
+                Equal(expectedBytes, Convert.ToHexString(CpuBytes(interpreted)), $"interpreter {Convert.ToHexString(code)} {left:x} {right:x} cf={carry}");
+                Equal(expectedMemory, Memory(interpreterEnv), $"interpreter memory {Convert.ToHexString(code)} {left:x} {right:x}");
+                var compiled = CreateCpu(left, right, flags);
+                Prepare(compilerEnv, code);
+                run(compilerEnv, compiled);
+                Equal(expectedBytes, Convert.ToHexString(CpuBytes(compiled)), $"compiled {Convert.ToHexString(code)} {left:x} {right:x} cf={carry}");
+                Equal(expectedMemory, Memory(compilerEnv), $"compiled memory {Convert.ToHexString(code)} {left:x} {right:x}");
                 cases++;
             }
         }
         // 1 命令あたりの時間(ADD eax, ebx): 高速コア、IR 解釈器、IR コンパイル済み。
-        Reset(env, [0x01, 0xD8]);
-        var block2 = Semantics.Lower(DecodeInstruction(env, new CPU { code32 = true }));
+        Prepare(reference, [0x01, 0xD8]);
+        var block2 = Semantics.Lower(DecodeInstruction(reference, new CPU { code32 = true }));
         var compiledAdd = Semantics.Compile(block2);
         const int iterations = 5_000_000;
         var cpu = CreateCpu(1, 2);
@@ -320,10 +349,89 @@ static class CoreTests
             for (var index = 0; index < iterations; index++) { step(); cpu.eip = 0; }
             return watch.Elapsed.TotalMilliseconds * 1_000_000.0 / iterations;
         }
-        var fast = Measure(() => FastStep(env, cpu));
-        var interpreterTime = Measure(() => Semantics.Interpret(block2, cpu));
-        var compiledTime = Measure(() => compiledAdd(cpu));
+        var fast = Measure(() => FastStep(reference, cpu));
+        var interpreterTime = Measure(() => Semantics.Interpret(block2, reference, cpu));
+        var compiledTime = Measure(() => compiledAdd(reference, cpu));
         Console.WriteLine($"ADD eax, ebx ns/op: fast core {fast:F1}, IR interpreter {interpreterTime:F1}, IR compiled {compiledTime:F1}");
+    }
+
+    // 翻訳キャッシュ: 実行器の前段で TranslateAfter 回目から翻訳済みデリゲートが使われ、結果は通常コアと同じ。
+    // コードのあるページへの書き込みで翻訳が捨てられ、翻訳済み命令のメモリアクセスで #PF が起きても命令開始時に戻る。
+    static void TranslationCacheExecution()
+    {
+        using var env = new EmuEnvironment(memory: new byte[0x10000]);
+        using var mirror = new EmuEnvironment(memory: new byte[0x10000]);
+        // ループ: add eax, ebx ; mov [data], eax ; inc ebx ; cmp ebx, 100 ; jne loop
+        static byte[] Loop(uint data) => [0x01, 0xD8, 0xA3, (byte)data, (byte)(data >> 8), 0x00, 0x00, 0x43, 0x81, 0xFB, 0x64, 0x00, 0x00, 0x00, 0x75, 0xF0];
+        static CPU Start() => new() { code32 = true, stack32 = true, eip = 0x100, esp = 0x8000, eflags = 2 };
+        Loop(0x3000).CopyTo(env.OneMegaMemory_, 0x100);
+        Loop(0x3000).CopyTo(mirror.OneMegaMemory_, 0x100);
+        var fast = new InstructionExecutor(true);
+        env.Translations.Enabled = true;
+        var slow = new InstructionExecutor(false);
+        var cpu = Start();
+        var expected = Start();
+        for (var step = 0; step < 100 * 5; step++)
+        {
+            Equal(true, fast.Step(env, cpu).IsSuccess, $"translated step {step}");
+            Equal(true, slow.Step(mirror, expected).IsSuccess, $"reference step {step}");
+            Equal(Convert.ToHexString(CpuBytes(expected)), Convert.ToHexString(CpuBytes(cpu)), $"state after step {step}");
+            if (step >= 5 * TranslationCache.TranslateAfter + 4) Equal(true, fast.UsedTranslation, $"step {step} ran compiled");
+        }
+        Equal(5L, env.Translations.Translated, "five loop instructions lowered to IR");
+        Equal(true, env.Translations.Interpreted + env.Translations.Executed >= 400, "most iterations ran through the IR");
+        Equal(true, env.OneMegaMemory_.AsSpan().SequenceEqual(mirror.OneMegaMemory_), "memory after the loop");
+        // 自己書き換え: ループ先頭の ADD を SUB に書き換える(翻訳済みコードのあるページへの書き込み)。
+        byte[] patch = [0xC6, 0x05, 0x00, 0x01, 0x00, 0x00, 0x29]; // mov byte [0x100], 0x29
+        patch.CopyTo(env.OneMegaMemory_, 0x200);
+        patch.CopyTo(mirror.OneMegaMemory_, 0x200);
+        cpu.eip = 0x200; expected.eip = 0x200;
+        Equal(true, fast.Step(env, cpu).IsSuccess && slow.Step(mirror, expected).IsSuccess, "patch instruction");
+        Equal(1L, env.Translations.Invalidations, "code page invalidated by the write");
+        cpu.eip = 0x100; expected.eip = 0x100; cpu.ebx = 0; expected.ebx = 0;
+        for (var step = 0; step < 100 * 5; step++)
+        {
+            Equal(true, fast.Step(env, cpu).IsSuccess && slow.Step(mirror, expected).IsSuccess, $"patched step {step}");
+            Equal(Convert.ToHexString(CpuBytes(expected)), Convert.ToHexString(CpuBytes(cpu)), $"patched state after step {step}");
+        }
+        Equal(10L, env.Translations.Translated, "loop lowered again after the patch");
+        // ページング有効で、データページを翻訳後に外す: 翻訳済みの MOV [data] が #PF を投げ、CPU は命令開始時に戻る。
+        using var paged = new EmuEnvironment(memory: new byte[0x10000]);
+        Loop(0x1800).CopyTo(paged.OneMegaMemory_, 0x100);
+        MapPages(paged);
+        var pagedCpu = Start();
+        CPU._cr0.setter(pagedCpu)(0x80000001); CPU._cr3.setter(pagedCpu)(0x9000);
+        EnvSyncPaging(paged, pagedCpu);
+        var pagedExecutor = new InstructionExecutor(true);
+        paged.Translations.Enabled = true;
+        for (var step = 0; step < 10 * 5; step++) Equal(true, pagedExecutor.Step(paged, pagedCpu).IsSuccess, $"paged step {step}");
+        Equal(true, pagedExecutor.UsedTranslation, "paged loop runs compiled");
+        BitConverter.GetBytes(0u).CopyTo(paged.OneMegaMemory_, 0xA004); // 線形 0x1000-0x1FFF を不在に
+        paged.FlushTlb();
+        while (pagedCpu.eip != 0x102) Equal(true, pagedExecutor.Step(paged, pagedCpu).IsSuccess, "advance to the store");
+        var before = Convert.ToHexString(CpuBytes(pagedCpu));
+        var faulted = false;
+        try { pagedExecutor.Step(paged, pagedCpu); }
+        catch (PageFaultException fault) { faulted = true; Equal((0x1800u, 2u), (fault.Linear, fault.ErrorCode), "store fault from compiled code"); }
+        Equal(true, faulted, "translated store faults");
+        Equal(before, Convert.ToHexString(CpuBytes(pagedCpu)), "CPU restored to the start of the translated instruction");
+        cases++;
+        // 実行器を通した 1 命令あたりの時間(5 命令のループ): 翻訳キャッシュあり(コンパイル済み段階)と高速コアのみ。
+        using var timing = new EmuEnvironment(memory: new byte[0x10000]);
+        Loop(0x3000).CopyTo(timing.OneMegaMemory_, 0x100);
+        double Steps(bool translate)
+        {
+            timing.Translations.Enabled = translate;
+            timing.Translations.InvalidateAll();
+            var executor = new InstructionExecutor(true);
+            var state = Start();
+            for (var warm = 0; warm < 100_000; warm++) { executor.Step(timing, state); if (state.eip == 0x110) state.eip = 0x100; }
+            const int steps = 2_000_000;
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            for (var index = 0; index < steps; index++) { executor.Step(timing, state); if (state.eip == 0x110) state.eip = 0x100; }
+            return watch.Elapsed.TotalMilliseconds * 1_000_000.0 / steps;
+        }
+        Console.WriteLine($"executor ns/step over a 5-instruction loop: fast core {Steps(false):F1}, translated {Steps(true):F1}");
     }
 
     static void Integration()
@@ -387,6 +495,7 @@ static class CoreTests
         Memory(true);
         PageWalk();
         SemanticsIr();
+        TranslationCacheExecution();
         Integration();
         OperandTransfers();
         Console.WriteLine($"Core cases passed: {cases}");
