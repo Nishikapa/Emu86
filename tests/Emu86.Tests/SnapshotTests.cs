@@ -328,9 +328,61 @@ static class SnapshotTests
         Equal("EE38A543461E14F6DAC5AB60F6B74B190FC9D23466D102955B59663A7C0871B0", Sha256(File.ReadAllBytes("layout.snap")), "v10 file layout");
     }
 
+    // フォルトの統一経路: #GP は例外として命令開始時の状態へ戻り、Raise が #PF/#UD と同じ形で IDT 経由で配送する。
+    static void Faults()
+    {
+        using var env = new EmuEnvironment(memory: new byte[0x10000]);
+        var executor = new InstructionExecutor(false);
+        // GDT: 0x08 = ring0 32 ビットコード、0x10 = データ。IDT: ベクタ 13 の割り込みゲート → 0008:00003000。
+        byte[] code = [0xFF, 0xFF, 0x00, 0x00, 0x00, 0x9A, 0xCF, 0x00];
+        byte[] data = [0xFF, 0xFF, 0x00, 0x00, 0x00, 0x92, 0xCF, 0x00];
+        code.CopyTo(env.OneMegaMemory_, 0x7008); data.CopyTo(env.OneMegaMemory_, 0x7010);
+        byte[] gate = [0x00, 0x30, 0x08, 0x00, 0x00, 0x8E, 0x00, 0x00];
+        gate.CopyTo(env.OneMegaMemory_, 0x8000 + 13 * 8);
+        var cpu = new CPU { eip = 0x100, code32 = true, stack32 = true, esp = 0x6000, eflags = 0x202, idt_base = 0x8000, idt_limit = 0xFF, gdt_base = 0x7000, gdt_limit = 0x1F };
+        CPU._cr0.setter(cpu)(1); CPU._cs.setter(cpu)(0x08); CPU._ss.setter(cpu)(0x10); cpu.cs_base = 0; cpu.ss_base = 0;
+        // IRETD の復帰先 CS=000Bh(ring0 の非適合コードに RPL 3)は #GP(selector)。NT の BOP 復帰経路が意図的に使う。
+        env.OneMegaMemory_[0x100] = 0xCF;
+        BitConverter.GetBytes(0x200u).CopyTo(env.OneMegaMemory_, 0x6000);
+        BitConverter.GetBytes(0x0Bu).CopyTo(env.OneMegaMemory_, 0x6004);
+        BitConverter.GetBytes(0x202u).CopyTo(env.OneMegaMemory_, 0x6008);
+        var before = CpuState(cpu);
+        GeneralProtectionException raised = null;
+        try { executor.Step(env, cpu); }
+        catch (GeneralProtectionException exception) { raised = exception; }
+        Equal(true, raised != null, "IRETD to a ring0 segment with RPL 3 raises #GP");
+        Equal(new Fault(13, 0x08), raised.Fault, "#GP carries the selector as error code");
+        Equal("GENERAL PROTECTION err=8", raised.Message, "#GP message");
+        Equal(before, CpuState(cpu), "faulting instruction leaves the CPU at its start");
+        Equal(true, raised.Fault.IdtReady(cpu), "IDT holds the #GP gate");
+        var delivered = executor.Execute(env, cpu, Raise(raised.Fault));
+        Equal(true, delivered.IsSuccess, "#GP delivered");
+        Equal((0x3000u, (ushort)0x08, 0x5FF0u), (cpu.eip, cpu.cs, cpu.esp), "handler entered with the error code pushed");
+        Equal((0x08u, 0x100u, 0x08u, 0x202u), (Dword(env, 0x5FF0), Dword(env, 0x5FF4), Dword(env, 0x5FF8), Dword(env, 0x5FFC)), "frame: error code, EIP of the faulting instruction, CS, EFLAGS");
+        Equal(false, cpu.jf, "interrupt gate clears IF");
+
+        // #PF は従来の形式のメッセージを保ち、CR2 を設定して配送する。#UD はエラーコードなし。
+        var pageFault = new PageFaultException(0xDEADB000, 2);
+        Equal("PAGE FAULT lin=deadb000 err=2 (not-present, write)", pageFault.Message, "page fault message");
+        Equal("lin=deadb000 err=2", pageFault.Fault.Describe(), "page fault summary");
+        Equal(new Fault(14, 2, 0xDEADB000), pageFault.Fault, "page fault record");
+        cpu.idt_limit = 14 * 8 + 6;
+        Equal(false, pageFault.Fault.IdtReady(cpu), "IDT one byte short of the #PF gate");
+        cpu.idt_limit = 14 * 8 + 7;
+        Equal(true, pageFault.Fault.IdtReady(cpu), "IDT covers the #PF gate");
+        Equal((false, true), (Fault.UndefinedOpcode.IdtReady(new CPU { idt_limit = 0xFF }), Fault.UndefinedOpcode.ErrorCode is null), "#UD needs protected mode and has no error code");
+        cpu.eip = 0x100; cpu.esp = 0x6000;
+        byte[] pageFaultGate = [0x00, 0x40, 0x08, 0x00, 0x00, 0x8E, 0x00, 0x00];
+        pageFaultGate.CopyTo(env.OneMegaMemory_, 0x8000 + 14 * 8);
+        Equal(true, executor.Execute(env, cpu, Raise(pageFault.Fault)).IsSuccess, "#PF delivered");
+        Equal((0xDEADB000u, 0x4000u, 2u), (cpu.cr2, cpu.eip, Dword(env, 0x5FF0)), "#PF sets CR2 and pushes the error code");
+    }
+
+    static uint Dword(EmuEnvironment env, int address) => BitConverter.ToUInt32(env.OneMegaMemory_, address);
+
     public static void Run()
     {
-        Instructions(); Snapshots(); Disks(); Layout();
+        Instructions(); Snapshots(); Disks(); Layout(); Faults();
         Console.WriteLine($"State/snapshot checks passed: {assertions} assertions");
     }
 }

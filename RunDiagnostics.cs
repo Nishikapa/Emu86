@@ -62,7 +62,7 @@ internal sealed class RunDiagnostics
                 for (var offset = 0u; offset < 0x40; offset += 4)
                     output.WriteLine($"  [esp+{offset:x2}] = {WindowsDiagnostics.ReadDword(env, cpu.ss_base + cpu.esp + offset):x8}");
             }
-            catch (PageFaultException) { output.WriteLine("  (stack unreadable)"); }
+            catch (CpuFaultException) { output.WriteLine("  (stack unreadable)"); }
             return true;
         }
         if (env.Ata != null) env.Ata.LogReads = env.PagingOn;
@@ -121,22 +121,32 @@ internal sealed class RunDiagnostics
         return false;
     }
 
-    public void UndefinedInstruction(long count)
+    // フォルト発生時の診断。true を返すと実行を止める(配送前に呼ばれる)。
+    public bool Fault(Fault fault, long count)
     {
-        if (udLogLeft <= 0) return;
-        udLogLeft--;
-        output.WriteLine($"[cpu] #UD at {cpu.cs:x4}:{cpu.eip:x8} opcode {OpcodeBytes()} (instr {count}) -> IDT vector 6");
-    }
-
-    public bool PageFault(PageFaultException fault, long count)
-    {
-        if (options.UserPageFaultMin is long minimum && (cpu.cs & 3) == 3 && count >= minimum)
-            output.WriteLine($"[upf] {count} cr3={cpu.cr3:x8} {cpu.cs:x4}:{cpu.eip:x8} cr2={fault.Linear:x8} err={fault.ErrorCode:x} esp={cpu.esp:x8}");
-        if (!cpu.pe || cpu.idt_limit < 14 * 8 + 7) return false;
-        if (!options.PfTrap || (fault.ErrorCode & 1) == 0) return false;
-        output.WriteLine($"PFTRAP: protection #PF lin={fault.Linear:x8} err={fault.ErrorCode:x} at {cpu.cs:x4}:{cpu.eip:x8} (instr {count})");
-        WriteMemoryLog();
-        return true;
+        switch (fault.Vector)
+        {
+            case 6:
+                // 配送できる #UD は先頭数十回をログに残す(診断用)。
+                if (fault.IdtReady(cpu) && udLogLeft > 0)
+                {
+                    udLogLeft--;
+                    output.WriteLine($"[cpu] #UD at {cpu.cs:x4}:{cpu.eip:x8} opcode {OpcodeBytes()} (instr {count}) -> IDT vector 6");
+                }
+                return false;
+            case 14:
+                var linear = fault.Linear ?? 0;
+                var errorCode = fault.ErrorCode ?? 0;
+                if (options.UserPageFaultMin is long minimum && (cpu.cs & 3) == 3 && count >= minimum)
+                    output.WriteLine($"[upf] {count} cr3={cpu.cr3:x8} {cpu.cs:x4}:{cpu.eip:x8} cr2={linear:x8} err={errorCode:x} esp={cpu.esp:x8}");
+                if (!fault.IdtReady(cpu)) return false;
+                if (!options.PfTrap || (errorCode & 1) == 0) return false;
+                output.WriteLine($"PFTRAP: protection #PF lin={linear:x8} err={errorCode:x} at {cpu.cs:x4}:{cpu.eip:x8} (instr {count})");
+                WriteMemoryLog();
+                return true;
+            default:
+                return false;
+        }
     }
 
     string OpcodeBytes()
@@ -146,7 +156,7 @@ internal sealed class RunDiagnostics
         {
             return string.Join(" ", Enumerable.Range(0, 6).Select(offset => EnvGetMemoryData8(env, address + (uint)offset).ToString("x2")));
         }
-        catch (PageFaultException) { return "(unmapped)"; }
+        catch (CpuFaultException) { return "(unmapped)"; }
     }
 
     void WriteMemoryLog()
