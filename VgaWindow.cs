@@ -106,7 +106,7 @@ internal sealed class VgaWindow : Form
     {
         var cpu = control.Snapshot();
         if (cpu == null) return;
-        registers.Update(cpu, control.Count, control.HasStopped ? "stopped" : "paused");
+        registers.Update(cpu, control.Count, control.HasStopped ? "stopped" : "paused", Disassembler.Describe(env, cpu));
         if (!registers.Visible) registers.Show(this);
         else registers.Activate();
     }
@@ -124,7 +124,7 @@ internal sealed class VgaWindow : Form
             : paused ? $"paused at {control.Count:N0} instructions"
             : control.PauseRequested ? "pausing..." : "running") + (stopped ? "" : mouse);
         if (registers.Visible && (paused || stopped))
-            registers.Update(control.Snapshot(), control.Count, stopped ? "stopped" : "paused");
+            registers.Update(control.Snapshot(), control.Count, stopped ? "stopped" : "paused", Disassembler.Describe(env, control.Snapshot()));
     }
 
     void Refresh(bool force)

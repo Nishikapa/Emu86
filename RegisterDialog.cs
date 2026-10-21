@@ -38,19 +38,20 @@ internal sealed class RegisterDialog : Form
         base.OnFormClosing(e);
     }
 
-    public void Update(CPU cpu, long count, string state)
+    public void Update(CPU cpu, long count, string state, string nextInstruction = null)
     {
-        text.Text = Format(cpu, count, state);
+        text.Text = Format(cpu, count, state, nextInstruction);
         text.Select(0, 0);
     }
 
-    public static string Format(CPU cpu, long count, string state)
+    public static string Format(CPU cpu, long count, string state, string nextInstruction = null)
     {
         var builder = new StringBuilder();
         var cr0 = CPU._cr0.getter(cpu);
         var mode = !cpu.pe ? "real" : cpu.vm ? "virtual-8086" : $"protected ring{cpu.cpl} {(cpu.code32 ? "32" : "16")}-bit";
         builder.AppendLine($"{state}  instructions={count:N0}");
         builder.AppendLine($"mode={mode}  paging={(cpu.pg ? "on" : "off")}  stack={(cpu.stack32 ? "32" : "16")}-bit");
+        if (nextInstruction != null) builder.AppendLine($"next: {nextInstruction}");
         builder.AppendLine();
         builder.AppendLine($"EAX={cpu.eax:X8}  EBX={cpu.ebx:X8}  ECX={cpu.ecx:X8}  EDX={cpu.edx:X8}");
         builder.AppendLine($"ESI={cpu.esi:X8}  EDI={cpu.edi:X8}  EBP={cpu.ebp:X8}  ESP={cpu.esp:X8}");

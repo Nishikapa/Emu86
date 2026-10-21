@@ -186,6 +186,7 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | `InstructionExecutor.cs` | 両コアの実行・CPU 復元境界、命令ごとのデコード状態、REP の再開位置。 |
 | `Fault.cs` | CPU 例外の値 `Fault`（ベクタ・エラーコード・#PF の線形アドレス）と、命令の途中で投げる `CpuFaultException`（`PageFaultException`/`GeneralProtectionException`）。ランナーは #UD/#PF/#GP を同じ `Raise` で配送する。 |
 | `CodeParser.cs` | 命令バイト列の読み口 `CodeSource`（CS:(E)IP 相対、16 ビット IP の折り返し、必要なバイトだけを遅延フェッチ）と Parser モナド `Parser<T>`（`Select`/`SelectMany`/`Where`/`Or`/`Fold`）。両コアが共有するプレフィックスの畳み込み（`Prefixes`）、ModRM/SIB/変位の構造（`ParseModRm`）、実効アドレスの計算（`EffectiveAddress`）。 |
+| `Instruction.cs` | オペコード属性表 `OpcodeTable`（ModRM の有無・即値の形・ニーモニック・オペランド書式）、命令全体のパーサ `InstructionParser`（Parser モナドのクエリ合成）と `Instruction` レコード、逆アセンブラ `Disassembler`。実行には使わず、診断（レジスタダイアログの次命令表示）とデコードキャッシュの土台。 |
 | `InstructionDecoding.cs` / `Registers.cs` | 通常コアの ModRM 読み取り State（`CodeParser.cs` の共有デコーダを呼び、消費した分だけ EIP を進める）と、両コア共通の配列を作らないレジスタ参照。 |
 | `Program.Runner.cs` / `RunOptions.cs` | CLI の起動処理、オプションの表（名前・引数・説明・値のパーサ・適用）、ウィンドウ付き実行と別スレッドでの実行ループ、ゲストリセット時の環境再生成、セクタダンプ。解析と `--help` の一覧は同じ表から作る。 |
 | `ArgumentParsing.cs` | 引数列のパーサコンビネータ（`ArgParser<T>`: `Select`/`SelectMany`/`Choice`/`Many`/`Optional`/`Require` と `Value`/`Decimal`/`Hex`）と `CommandOption`。 |
