@@ -79,13 +79,12 @@ static partial class Program
     // Group1 (0x83): r/m op imm8(符号拡張)
     static State<Unit> Group1_83 =>
         from _ in SetLog("Group1_83")
-        from d1 in ModRegRm()
-        from d2 in GetMemOrRegAddr(d1.mod, d1.rm)
-        from d3 in GetMemoryDataIp8
-        from d4 in GetMemOrRegData(d2, true)
-        from d5 in Calc(d4, ((uint)(sbyte)d3).ToTypeData(d4.type), d1.reg)
-        from d6 in SetMemOrRegData(d2, d5)
-        select d6;
+        from m in ModRegRm()
+        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from imm in GetMemoryDataIp8
+        from type in OperandType(true)
+        from _2 in Binary(Rm(addr, type), Const(((uint)(sbyte)imm).ToTypeData(type)), m.reg)
+        select unit;
 
     static State<Unit> Movs_A4_A5 =>
         from _1 in SetLog("Movs_A4_A5")
@@ -357,14 +356,13 @@ static partial class Program
         let w = 0 != (opecode[1] & 0x01)
         from m in ModRegRm()
         from addr in GetMemOrRegAddr(m.mod, m.rm)
-        from dst in GetMemOrRegData(addr, w)
-        from acc in GetRegData(0, dst.type)
-        from _f in Calc(acc, dst, 7) // CMP acc, r/m のフラグ
-        from _2 in acc.Value() == dst.Value()
-            ? from src in GetRegData(m.reg, dst.type)
-              from _w in SetMemOrRegData(addr, src)
-              select unit
-            : SetRegData(0, dst)
+        from type in OperandType(w)
+        let rm = Rm(addr, type)
+        let acc = Reg(0, type)
+        from dst in rm.Read
+        from old in acc.Read
+        from _f in Calc(old, dst, 7) // CMP acc, r/m のフラグ
+        from _2 in old.Value() == dst.Value() ? Move(rm, Reg(m.reg, type)) : acc.Write(dst)
         select unit;
 
     // XADD r/m, r (0F C0/C1): temp = r/m + reg(フラグは ADD)、reg <- r/m 旧値、r/m <- temp。
@@ -374,11 +372,14 @@ static partial class Program
         let w = 0 != (opecode[1] & 0x01)
         from m in ModRegRm()
         from addr in GetMemOrRegAddr(m.mod, m.rm)
-        from dst in GetMemOrRegData(addr, w)
-        from src in GetRegData(m.reg, dst.type)
+        from type in OperandType(w)
+        let rm = Rm(addr, type)
+        let reg = Reg(m.reg, type)
+        from dst in rm.Read
+        from src in reg.Read
         from sum in Calc(dst, src, 0)
-        from _2 in SetRegData(m.reg, dst)
-        from _3 in SetMemOrRegData(addr, sum)
+        from _2 in reg.Write(dst)
+        from _3 in rm.Write(sum)
         select unit;
 
     // BSWAP r32 (0F C8+r): 32 ビットレジスタのバイト順を反転する(ModRM なし)。
@@ -578,16 +579,16 @@ static partial class Program
         from _2 in SetRegData(reg, data.data)
         select unit;
 
+    // d=1: reg <- r/m (0x8A/0x8B)、d=0: r/m <- reg (0x88/0x89)。転送元だけを読む(転送先のメモリは読まない)。
     static State<Unit> Mov_88_8B =>
         from _1 in SetLog("Mov_88_8B")
         from opecode in Opecodes
         let w = 0 != (opecode[0] & 0x01)
         let d = 0 != (opecode[0] & 0x02)
         from m in ModRegRm()
-        from rmData in GetMemOrRegData(m.mod, m.rm, w)
-        from regData in GetRegData(m.reg, rmData.data.type)
-        // d=1: reg <- r/m (0x8A/0x8B) , d=0: r/m <- reg (0x88/0x89)
-        from _2 in d ? SetRegData(m.reg, rmData.data) : SetMemOrRegData(rmData.input, regData)
+        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from type in OperandType(w)
+        from _2 in d ? Move(Reg(m.reg, type), Rm(addr, type)) : Move(Rm(addr, type), Reg(m.reg, type))
         select unit;
 
     static State<Unit> Arithmetic =>
@@ -599,25 +600,21 @@ static partial class Program
         from _2 in (form < 4) ? ArithmeticModRM(kind) : ArithmeticAccImm(kind, 0 != (form & 1))
         select unit;
 
+    // d=1 (02/03 など): reg <- reg op r/m、d=0 (00/01 など): r/m <- r/m op reg。
     static State<Unit> ArithmeticModRM(int kind) =>
         from opecode in Opecodes
         let w = 0 != (opecode[0] & 1)
         let d = 0 != (opecode[0] & 2)
         from m in ModRegRm()
-        from rmData in GetMemOrRegData(m.mod, m.rm, w)
-        from regData in GetRegData(m.reg, rmData.data.type)
-        let d1 = d ? regData : rmData.data
-        let d2 = d ? rmData.data : regData
-        from ret in Calc(d1, d2, kind)
-        from _2 in d ? SetRegData(m.reg, ret) : SetMemOrRegData(rmData.input, ret)
+        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from type in OperandType(w)
+        from _ in d ? Binary(Reg(m.reg, type), Rm(addr, type), kind) : Binary(Rm(addr, type), Reg(m.reg, type), kind)
         select unit;
 
     static State<Unit> ArithmeticAccImm(int kind, bool w) =>
         from type in OperandType(w)
         from imm in GetMemoryDataIp_(type)
-        from acc in GetRegData(0, type)
-        from ret in Calc(acc, imm, kind)
-        from _ in SetRegData(0, ret)
+        from _ in Binary(Reg(0, type), Const(imm), kind)
         select unit;
 
     // Group2 (0xD0/0xD1): r/m, 1
@@ -969,10 +966,12 @@ static partial class Program
         from opecode in Opecodes
         let w = 0 != (opecode[0] & 0x01)
         from m in ModRegRm()
-        from rmData in GetMemOrRegData(m.mod, m.rm, w)
-        from regData in GetRegData(m.reg, rmData.data.type)
+        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from type in OperandType(w)
+        from rmData in Rm(addr, type).Read
+        from regData in Reg(m.reg, type).Read
         // TEST は AND の結果を捨ててフラグ(CF=OF=0, ZF/SF)だけ更新する。
-        from _2 in update_eflags((rmData.data.Value() & regData.Value()).ToTypeData(rmData.data.type))
+        from _2 in update_eflags((rmData.Value() & regData.Value()).ToTypeData(type))
         select unit;
 
     static State<Unit> Test_A8_A9 =>
@@ -991,10 +990,9 @@ static partial class Program
         from opecode in Opecodes
         let w = 0 != (opecode[0] & 0x01)
         from m in ModRegRm()
-        from rmData in GetMemOrRegData(m.mod, m.rm, w)
-        from regData in GetRegData(m.reg, rmData.data.type)
-        from _2 in SetMemOrRegData(rmData.input, regData)
-        from _3 in SetRegData(m.reg, rmData.data)
+        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from type in OperandType(w)
+        from _2 in Swap(Rm(addr, type), Reg(m.reg, type))
         select unit;
 
     static State<Unit> Xchg_91_97 =>
@@ -1002,10 +1000,7 @@ static partial class Program
         from opecode in Opecodes
         let reg = opecode[0] & 0x07
         from type in OperandType(true)
-        from ax in GetRegData(0, type)
-        from rv in GetRegData(reg, type)
-        from _2 in SetRegData(0, rv)
-        from _3 in SetRegData(reg, ax)
+        from _2 in Swap(Reg(0, type), Reg(reg, type))
         select unit;
 
     static State<Unit> Inc_40_47 =>
@@ -1515,14 +1510,15 @@ static partial class Program
         from _ in SetCpu((env, cpu) => { env.FlushTlb(); return cpu; })
         select unit;
 
+    // Group1 (0x80/0x81): r/m op imm。即値は r/m のデータより先に取得する(高速コアと同じ順)。
     static State<Unit> Group1_80_81 =>
         from _1 in SetLog("Group1_80_81")
         from opecode in Opecodes
         let w = 0 != (opecode[0] & 0x01)
         from m in ModRegRm()
-        from data1 in GetMemOrRegData(m.mod, m.rm, w)
-        from data2 in GetMemoryDataIp_(data1.data.type)
-        from ret in Calc(data1.data, data2, m.reg)
-        from _ in SetMemOrRegData(data1.input, ret)
+        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from type in OperandType(w)
+        from imm in GetMemoryDataIp_(type)
+        from _ in Binary(Rm(addr, type), Const(imm), m.reg)
         select unit;
 }
