@@ -86,7 +86,7 @@ internal sealed class RunOptions
             Integer, (o, v) => o.SnapshotInterval = v == 0 ? long.MaxValue : v),
         Flag("Run", "--slow", "Run every instruction on the LINQ core instead of the fast core", o => o.Slow = true),
         Flag("Run", "--noirq", "Do not deliver hardware interrupts", o => o.NoIrq = true),
-        Flag("Run", "--translate", "Run hot basic blocks through the IR translation cache (about 20% faster; disabled with per-instruction diagnostics; see docs/adr/0002)", o => o.Translate = true),
+        Flag("Run", "--translate", "Run hot basic blocks through the IR translation cache (about 35% faster; disabled with per-instruction diagnostics; see docs/adr/0002)", o => o.Translate = true),
         Of("Run", "--compile-after", "count", $"With --translate: compile a block to a delegate after count executions (default {TranslationCache.CompileAfter})",
             Integer, (o, v) => TranslationCache.CompileAfter = v > int.MaxValue ? int.MaxValue : (int)v),
         Flag("Run", "--window", "Show the VGA display in a 640x480 window (keyboard and mouse go to the guest)", o => o.Window = true),

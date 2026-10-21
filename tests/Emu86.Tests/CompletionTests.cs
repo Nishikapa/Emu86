@@ -75,6 +75,19 @@ static class CompletionTests
         Equal(1, snapshots.Count, "exhausted budget still saves final state");
     }
 
+    // 再開(count > 0)で定期保存なし(間隔 long.MaxValue): 次の保存時刻の計算が溢れて毎命令保存にならないこと。
+    static void ResumeWithoutPeriodicSnapshots()
+    {
+        using var env = new EmuEnvironment(memory: new byte[0x10000]);
+        var cpu = Prepare(env);
+        var snapshots = new List<long>();
+        var count = EmulationRunner.Run(RunOptions.Parse(["--limit", "1050", "--notrace", "--noirq"]), env, cpu, 1000,
+            output: TextWriter.Null, error: TextWriter.Null,
+            saveSnapshot: (savedCount, savedCpu, savedEnv) => snapshots.Add(savedCount), snapshotInterval: long.MaxValue);
+        Equal(1050L, count, "resumed run reaches the limit");
+        Equal("1050", string.Join(",", snapshots), "only the final snapshot is saved when resuming without periodic snapshots");
+    }
+
     static void HandlerExecution(bool slow)
     {
         using var env = new EmuEnvironment(memory: new byte[0x10000]);
@@ -107,6 +120,7 @@ static class CompletionTests
     {
         foreach (var slow in new[] { false, true }) { FaultAtLimit(slow); HandlerExecution(slow); }
         EmptyBudget(0, 0); EmptyBudget(8, 8); EmptyBudget(9, 8);
+        ResumeWithoutPeriodicSnapshots();
         FailedDelivery();
         Console.WriteLine($"Completion checks passed: {assertions} assertions");
     }

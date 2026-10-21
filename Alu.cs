@@ -31,7 +31,7 @@ static public partial class Ext
         return result;
     }
 
-    static void SetSubtractionFlags(CPU cpu, int type, uint left, uint right)
+    static internal void SetSubtractionFlags(CPU cpu, int type, uint left, uint right)
     {
         var mask = Mask(type);
         var signBit = Msb(type);

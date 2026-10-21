@@ -5,6 +5,7 @@ namespace Emu86;
 internal static class EmulationRunner
 {
     const long IrqPeriod = 10_000;
+    static long NextSnapshot(long count, long interval) => interval > long.MaxValue - count ? long.MaxValue : count + interval;
     const long SnapshotInterval = 100_000_000;
 
     public static long Run(RunOptions options, EmuEnvironment env, CPU cpu, long count = 0,
@@ -25,7 +26,8 @@ internal static class EmulationRunner
         long fastCount = 0;
         long translatedCount = 0;
         if (env.NextIrq == 0) env.NextIrq = count + IrqPeriod;
-        long nextSnapshot = count + snapshotInterval;
+        // 定期保存なし(間隔 = long.MaxValue)のときは、再開後の count との加算が溢れないように飽和させる。
+        long nextSnapshot = NextSnapshot(count, snapshotInterval);
         long nextService = count + IrqPeriod;
         while (count < options.Limit)
         {
@@ -167,7 +169,7 @@ internal static class EmulationRunner
             if (count >= nextSnapshot)
             {
                 saveSnapshot?.Invoke(count, cpu, env);
-                nextSnapshot = count + snapshotInterval;
+                nextSnapshot = NextSnapshot(count, snapshotInterval);
             }
         }
 
