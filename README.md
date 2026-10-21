@@ -141,6 +141,8 @@ static State<Unit> Mov_8C =>
 
 各 `from` 句が CPU 状態を次へ受け渡し、いずれかが失敗すると以降は短絡します。`State` のコンビネータ自体はロールバックせず、失敗した操作が返した CPU を伝えます。命令を実行する場合は `InstructionExecutor.Step`（通常コアのみなら `Program.Execute2`）を使用します。
 
+オペランドは `Operand`（読み出す `State<Data>` と書き戻す関数の組、`Reg`/`Rm`/`Const`）で表し、`Binary(dst, src, kind)` が「読む → 計算 → 書き戻す」を担います。`ADD r/m, r` と `ADD r, r/m` のように d ビットで向きが決まる命令は、`d ? Binary(reg, rm) : Binary(rm, reg)` の 1 行です。
+
 クエリ構文の `where` 句はガードです（`Where` が実装されており、述語が偽なら失敗になります）。`POP r/m` の `where 0 == m.reg` のように、ModRM の `reg` フィールドで有効性を判定する命令に使います。失敗を返す句は CPU を変更する句より前に置いてください。`Choice` や `Many0` は失敗した枝の変更を巻き戻さないためです。条件付きの実行は `When(cond, state)` / `Unless(cond, state)`（偽なら何もしない `Pass`）、アクセサ経由の読み書き更新は `_cf.Modify(cf => !cf)` のように `Modify` で書きます。
 
 `InstructionExecutor` は命令開始前の CPU を退避し、未対応命令・例外時にレジスタと FPU を復元してページング状態を同期します。フォルト（#PF/#GP）は命令の途中で `CpuFaultException` として投げられ、復元後にランナーへ伝わります。ランナーは未対応命令（#UD）も含めて `Fault` 値にまとめ、IDT が整っていれば `Raise` で命令開始時の状態から配送し、整っていなければ停止します。命令ごとのプレフィックスは `DecodeContext` に分離し、成功・失敗のどちらでも終了時に消去します。REP の途中でページフォルトが起きた場合は完了済みの反復の ECX・ESI・EDI・EAX・EFLAGS を保持し、命令先頭から残りの反復を再開します。メモリや I/O の既発生の副作用は取り消しません。割り込み配送にも同じ CPU 復元境界を適用します。
@@ -202,6 +204,8 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | `Pci.cs` | PCI コンフィグ空間（0xCF8/0xCFC）。i440FX ホストブリッジ、PIIX4 ISA/IDE/電源管理、VGA 互換デバイスと拡張 ROM BAR。 |
 | `SerialPort.cs` | 16550 互換 UART と、ホストの名前付きパイプへの橋渡し（送受信は専用タスク）。 |
 | `VgaDevice.cs` / `VgaBiosStub.cs` | VGA のレジスタ・VRAM ウィンドウ・描画と、拡張 ROM として見せる最小 VGA BIOS（INT 10h を C# 側で処理）。 |
+| `RomBuilder.cs` | オプション ROM のバイト列ビルダ（Writer）。ラベルで `jmp short` の変位やポインタを解決し、末尾でチェックサムを埋める。 |
+| `Operand.cs` | オペランド Lens `Operand`（読み出す State と書き戻す関数）と `Reg`/`Rm`/`Const`、その上の `Move`/`Binary`/`Swap`。d ビットで向きが決まる命令はオペランドを入れ替えるだけで書く。 |
 | `VgaWindow.cs` / `RegisterDialog.cs` | Windows Forms の表示ウィンドウ（描画、キー入力とマウス捕捉、中断・再開ボタン）とレジスタ表示ダイアログ。 |
 | `Ext.cs` | 型変換ユーティリティ（`ToTypeData`/`MapType`/`Choice_` 等）。 |
 | `Program.cs` / `Program.*.cs` | 命令の実装とオペコードテーブル。起動処理は `Program.Runner.cs`。 |

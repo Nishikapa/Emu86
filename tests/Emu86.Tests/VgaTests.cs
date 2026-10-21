@@ -1,4 +1,5 @@
 using Emu86;
+using System.Security.Cryptography;
 using static Emu86.Ext;
 
 // VGA デバイス(VRAM の振り分け・レジスタ・描画)、V86 モードの遷移、キーボード IRQ1 の回帰テスト。
@@ -297,6 +298,7 @@ static class VgaTests
         Equal((byte)0x80, EnvGetMemoryData8(env, 0xFEBF0000u + pcir + 0x15), "PCIR last image");
         Equal((byte)0xFF, EnvGetMemoryData8(env, 0xFEBF0000u + VgaBiosStub.RomSize), "beyond the ROM image");
         Equal(0, Enumerable.Range(0, VgaBiosStub.RomSize).Sum(index => VgaBiosStub.Rom[index]) & 0xFF, "ROM checksum");
+        Equal("B070D8AB830F68C14EF33FBAB98D315E9ED5F08B5D27D4B1717C4FA0B3D3D080", Convert.ToHexString(SHA256.HashData(VgaBiosStub.Rom)), "ROM bytes");
         Write(0x30, 0xFEBF0000);
         Equal((byte)0xFF, EnvGetMemoryData8(env, 0xFEBF0000), "ROM window hidden again");
         // 旧スナップショット(VGA デバイス追加前、PCI 関数 4 つ)の PCI 状態は読み込め、VGA は初期値のまま。
