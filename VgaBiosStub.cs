@@ -275,51 +275,52 @@ public static class VgaBiosStub
         vga.Dirty = true;
     }
 
-    // 既定の DAC: 先頭 64 色は EGA 互換、256 色モードでは BIOS 標準の 256 色(16 色 + 16 階調グレー + 色相環 216 色)。
+    // 既定の DAC: 先頭 64 色は EGA 互換、256 色モードでは BIOS 標準の 256 色。
     static void LoadDefaultPalette(VgaDevice vga, bool colors256)
     {
         Array.Clear(vga.Dac);
-        for (var index = 0; index < 64; index++)
-        {
-            vga.Dac[index * 3 + 0] = (byte)(((index >> 2) & 1) * 0x2A + ((index >> 5) & 1) * 0x15);
-            vga.Dac[index * 3 + 1] = (byte)(((index >> 1) & 1) * 0x2A + ((index >> 4) & 1) * 0x15);
-            vga.Dac[index * 3 + 2] = (byte)((index & 1) * 0x2A + ((index >> 3) & 1) * 0x15);
-        }
-        if (!colors256) return;
-        byte[] ega = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x14, 0x07, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F];
-        var table = new byte[256 * 3];
-        for (var index = 0; index < 16; index++)
-            Array.Copy(vga.Dac, ega[index] * 3, table, index * 3, 3);
-        byte[] grays = [0x00, 0x05, 0x08, 0x0B, 0x0E, 0x11, 0x14, 0x18, 0x1C, 0x20, 0x24, 0x28, 0x2D, 0x32, 0x38, 0x3F];
-        for (var index = 0; index < 16; index++)
-            table[(16 + index) * 3] = table[(16 + index) * 3 + 1] = table[(16 + index) * 3 + 2] = grays[index];
-        byte[][] levels =
-        [
-            [0x3F, 0x10, 0x1F, 0x2F, 0x37, 0x38, 0x3B],
-            [0x1C, 0x07, 0x0E, 0x15, 0x19, 0x1A, 0x1B],
-            [0x10, 0x04, 0x08, 0x0C, 0x0E, 0x0F, 0x0F],
-        ];
-        // 色相環 216 色: 3 段階の明度 × 3 段階の彩度 × 24 色相(青→赤紫→赤→黄→緑→シアン→青 を補間)。
-        var entry = 32;
-        foreach (var level in levels)
-        {
-            int high = level[0];
-            foreach (var low in new int[] { level[1], level[2], level[3] })
-            {
-                int[] anchorsR = [low, high, high, high, low, low, low];
-                int[] anchorsG = [low, low, low, high, high, high, low];
-                int[] anchorsB = [high, high, low, low, low, high, high];
-                for (var hue = 0; hue < 24; hue++, entry++)
-                {
-                    var segment = hue / 4; var fraction = hue % 4;
-                    table[entry * 3] = (byte)(anchorsR[segment] + (anchorsR[segment + 1] - anchorsR[segment]) * fraction / 4);
-                    table[entry * 3 + 1] = (byte)(anchorsG[segment] + (anchorsG[segment + 1] - anchorsG[segment]) * fraction / 4);
-                    table[entry * 3 + 2] = (byte)(anchorsB[segment] + (anchorsB[segment + 1] - anchorsB[segment]) * fraction / 4);
-                }
-            }
-        }
-        table.CopyTo(vga.Dac, 0);
+        (colors256 ? Vga256Dac : VgaDevice.EgaDac).CopyTo(vga.Dac, 0);
     }
+
+    // BIOS 標準の 256 色: EGA の既定パレット順の 16 色 + 16 階調グレー + 色相環 216 色
+    // (3 段階の明度 × 3 段階の彩度 × 24 色相。青→赤紫→赤→黄→緑→シアン→青 を 4 分割で補間)。残り 8 色は黒。
+    static readonly byte[] Vga256Dac = BuildVga256Dac();
+
+    static byte[] BuildVga256Dac()
+    {
+        byte[] ega = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x14, 0x07, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F];
+        byte[] grays = [0x00, 0x05, 0x08, 0x0B, 0x0E, 0x11, 0x14, 0x18, 0x1C, 0x20, 0x24, 0x28, 0x2D, 0x32, 0x38, 0x3F];
+        int[][] levels =
+        [
+            [0x3F, 0x10, 0x1F, 0x2F],
+            [0x1C, 0x07, 0x0E, 0x15],
+            [0x10, 0x04, 0x08, 0x0C],
+        ];
+        var sixteen =
+            from index in ega
+            select (r: VgaDevice.EgaDac[index * 3], g: VgaDevice.EgaDac[index * 3 + 1], b: VgaDevice.EgaDac[index * 3 + 2]);
+        var grayscale =
+            from gray in grays
+            select (r: gray, g: gray, b: gray);
+        var hues =
+            from level in levels
+            let high = level[0]
+            from low in level.Skip(1)
+            from hue in Enumerable.Range(0, 24)
+            let segment = hue / 4
+            let fraction = hue % 4
+            select (
+                r: Blend([low, high, high, high, low, low, low], segment, fraction),
+                g: Blend([low, low, low, high, high, high, low], segment, fraction),
+                b: Blend([high, high, low, low, low, high, high], segment, fraction));
+        var dac = new byte[256 * 3];
+        sixteen.Concat(grayscale).Concat(hues).SelectMany(color => new[] { color.r, color.g, color.b }).ToArray().CopyTo(dac, 0);
+        return dac;
+    }
+
+    // 色相環の 1 区間(4 色相)を anchors[segment] から anchors[segment+1] へ線形補間する(整数演算、切り捨て)。
+    static byte Blend(int[] anchors, int segment, int fraction) =>
+        (byte)(anchors[segment] + (anchors[segment + 1] - anchors[segment]) * fraction / 4);
 
     static readonly (byte misc, byte[] seq, byte[] crtc, byte[] gc, byte[] attr) Mode3 = (
         0x67,

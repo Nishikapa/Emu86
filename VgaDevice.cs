@@ -36,6 +36,12 @@ public sealed class VgaDevice
     // プレーン 2 にフォントが無いとき(VGA BIOS 無しの直接書き込み)に使う 8×16 フォント(256 文字 × 16 行)。
     public byte[] FallbackFont;
 
+    // 既定 DAC の先頭 64 色(EGA 互換): 色 index の bit0-2 が B/G/R の高輝度(0x2A)、bit3-5 が低輝度(0x15)の加算。
+    public static readonly byte[] EgaDac =
+        [.. from index in Enumerable.Range(0, 64)
+            from component in new[] { 2, 1, 0 } // R, G, B の順
+            select (byte)(((index >> component) & 1) * 0x2A + ((index >> (component + 3)) & 1) * 0x15)];
+
     public VgaDevice() => Reset();
 
     public void Reset()
@@ -48,13 +54,7 @@ public sealed class VgaDevice
         new byte[] { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x14, 0x07, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F,
             0x0C, 0x00, 0x0F, 0x08, 0x00 }.CopyTo(Attribute, 0);
         Array.Clear(Dac);
-        // 既定 DAC: 先頭 64 色は EGA 互換(bit0-2=BGR 高輝度 0x2A、bit3-5=低輝度 0x15 を加算)。
-        for (var index = 0; index < 64; index++)
-        {
-            Dac[index * 3 + 0] = (byte)(((index >> 2) & 1) * 0x2A + ((index >> 5) & 1) * 0x15);
-            Dac[index * 3 + 1] = (byte)(((index >> 1) & 1) * 0x2A + ((index >> 4) & 1) * 0x15);
-            Dac[index * 3 + 2] = (byte)((index & 1) * 0x2A + ((index >> 3) & 1) * 0x15);
-        }
+        EgaDac.CopyTo(Dac, 0);
         SequencerIndex = GraphicsIndex = CrtcIndex = AttributeIndex = 0;
         DacWriteIndex = DacReadIndex = DacWritePhase = DacReadPhase = 0;
         DacMask = 0xFF; MiscOutput = 0x67; FeatureControl = 0;
