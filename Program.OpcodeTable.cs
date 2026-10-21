@@ -4,12 +4,6 @@ using static Emu86.Unit;
 
 namespace Emu86;
 
-struct OpecodeDic
-{
-    public State<Unit> state;
-    public OpecodeDic[] next;
-}
-
 static partial class Program
 {
     static (byte ope, int len, State<Unit> state)[] OneByteStates =>
@@ -183,20 +177,31 @@ static partial class Program
                 .ToDictionary(j => (int)j.ope, j => j.state)
             );
 
-    static readonly OpecodeDic[] dic =
-        [.. Enumerable.Range(0, 256).Select(
-            index =>
-                oneByte.TryGetValue(index, out var state) ? new OpecodeDic() { state = state } :
-                twoBytes.TryGetValue(index, out var _dic) ? new OpecodeDic()
-                {
-                    next = [.. Enumerable.Range(0, 256).Select(
-                        index2 =>
-                            _dic.TryGetValue(index2, out var state2) ?
-                                new OpecodeDic() { state = state2 } :
-                                default
-                    )]
-                } : default
-        )];
+    // オペコード 1 バイトを読んで表で引く。未定義(null)なら失敗。ハンドラにはここまでに読んだ
+    // オペコード列(1 バイト目、または 0F と 2 バイト目)を渡す。
+    static State<Unit> Dispatch(State<Unit>[] table) => (env, cpu, ope) =>
+    {
+        var (ok, op, next, log) = GetMemoryDataIp8(env, cpu, ope);
+        if (!ok)
+            return (false, default, cpu, log);
+        var handler = table[op];
+        if (handler == null)
+            return (false, default, next, log);
+        var result = handler(env, next, ope == null ? [op] : [.. ope, op]);
+        return result.IsSuccess ? result : (false, default, result.cpu, result.log);
+    };
+
+    // 1 バイト目の表。0F は 2 バイト目の表へ(Dispatch を入れ子にした State)。
+    static readonly State<Unit>[] opcodeTable = BuildOpcodeTable();
+
+    static State<Unit>[] BuildOpcodeTable()
+    {
+        var table = new State<Unit>[256];
+        foreach (var (op, state) in oneByte) table[op] = state;
+        foreach (var (op1, inner) in twoBytes)
+            table[op1] = Dispatch([.. Enumerable.Range(0, 256).Select(op2 => inner.GetValueOrDefault(op2))]);
+        return table;
+    }
 
     // プレフィックスを 0 個以上消費し、デコード文脈に立てる(Prefixes パーサは CPU を変えないので、
     // 読み取った長さだけ EIP を進める)。
@@ -208,45 +213,7 @@ static partial class Program
         return (true, unit, cpu, string.Empty);
     };
 
-    static public State<Unit> Execute => (env, cpu1, ope) =>
-    {
-        var (IsSuccess1, op1, cpu2, log1) = GetMemoryDataIp8(env, cpu1, ope);
-
-        if (!IsSuccess1)
-        {
-            return (false, default, cpu1, log1);
-        }
-
-        var data1 = dic[op1];
-
-        if (default != data1.state)
-        {
-            var ret = data1.state(env, cpu2, [(byte)op1]);
-            return ret.IsSuccess ? ret : (false, default, ret.cpu, ret.log);
-        }
-
-        if (default == data1.next)
-        {
-            return (false, default, cpu2, log1);
-        }
-
-        var (IsSuccess2, op2, cpu3, log2) = GetMemoryDataIp8(env, cpu2, ope);
-
-        if (!IsSuccess2)
-        {
-            return (false, default, cpu2, log1);
-        }
-
-        var data2 = data1.next[op2];
-
-        if (default != data2.state)
-        {
-            var ret = data2.state(env, cpu3, [(byte)op1, (byte)op2]);
-            return ret.IsSuccess ? ret : (false, default, ret.cpu, ret.log);
-        }
-
-        return (false, default, cpu3, log1 + log2);
-    };
+    static public readonly State<Unit> Execute = Dispatch(opcodeTable);
 
     internal static readonly State<Unit> ExecuteDecoded =
         from prefixes in CheckPrefixes

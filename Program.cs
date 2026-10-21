@@ -167,9 +167,9 @@ static partial class Program
         if (op == 0x0F)
         {
             var (okB, op2, cpuB, logB) = GetMemoryDataIp8(env, cpu2, ope);
-            if (!okB || dic[0x0F].next[op2].state == default)
+            if (!okB || !twoBytes[0x0F].TryGetValue(op2, out var twoByte))
                 return (false, default, cpu1, log);
-            return dic[0x0F].next[op2].state(env, cpuB, [0x0F, op2]);
+            return twoByte(env, cpuB, [0x0F, op2]);
         }
 
         if (!stringOps.Contains(op) || !oneByte.TryGetValue(op, out var state))
@@ -177,22 +177,15 @@ static partial class Program
 
         // 比較系のみ ZF 条件を適用する（MOVS/STOS/LODS は CX だけで回す）。
         var checkZf = repZf is bool && zfStringOps.Contains(op);
-
-        var cpu = cpu2;
         // 32ビットアドレスサイズでは ECX、そうでなければ CX でカウントする。
-        var a32 = cpu.code32 != cpu.address_size_prefix;
-        while ((a32 ? cpu.ecx : cpu.cx) != 0)
-        {
-            var (ok2, _, cpuN, _) = state(env, cpu, [op]);
-            if (!ok2)
-                return (false, default, cpu1, log);
-            cpu = a32 ? _ecx.setter(cpuN)(cpuN.ecx - 1) : _cx.setter(cpuN)((ushort)(cpuN.cx - 1));
-            cpu.Decode.CommitRepeat(cpu);
-
-            if (checkZf && _zf.getter(cpu) != repZf.Value)
-                break;
-        }
-        return (true, unit, cpu, log);
+        var a32 = cpu2.code32 != cpu2.address_size_prefix;
+        var stop = false;
+        // 1 反復: 文字列命令を 1 要素実行 → カウンタを減らす → 完了済みの反復として記録し、比較系なら ZF で打ち切りを決める。
+        // 反復は数百万回になる(rep insw のディスク読み込み)ので、各 State は 1 度だけ組み立てて Then で連ねる。
+        State<Unit> instruction = (e, c, _) => state(e, c, [op]);
+        var decrement = a32 ? _ecx.Modify(ecx => ecx - 1) : _cx.Modify(cx => (ushort)(cx - 1));
+        var commit = SetCpu(c => { c.Decode.CommitRepeat(c); stop = checkZf && c.zf != repZf.Value; return c; });
+        return While(c => !stop && (a32 ? c.ecx : c.cx) != 0, instruction.Then(decrement).Then(commit))(env, cpu2, ope);
     };
 
     // REP / REPE / REPZ (0xF3)
