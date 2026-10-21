@@ -261,6 +261,71 @@ static class CoreTests
         Reset(SlowEnv, []);
     }
 
+    // IR の概念実証(docs/adr/0002): ALU/MOV/INC/DEC のレジスタ形式について、IR の解釈器とコンパイル済み
+    // デリゲートが通常コアと同じ CPU 状態(レジスタとフラグ)を作ること。あわせて 1 命令あたりの時間を表示する。
+    static void SemanticsIr()
+    {
+        var env = SlowEnv;
+        byte[][] encodings =
+        [
+            [0x01, 0xD8], [0x66, 0x29, 0xC3], [0x02, 0xC3], [0x1A, 0xDC], [0x3B, 0xC3], [0x33, 0xD8], [0x66, 0x21, 0xC3],
+            [0x05, 0x78, 0x56, 0x34, 0x12], [0x66, 0x2D, 0x01, 0x80], [0x14, 0xFF], [0x3C, 0x80],
+            [0x40], [0x4B], [0x66, 0x48], [0x66, 0x43],
+            [0x81, 0xF3, 0xFF, 0x00, 0xFF, 0x00], [0x83, 0xE8, 0x80], [0x80, 0xC4, 0x7F], [0x66, 0x83, 0xD0, 0xFF],
+            [0x89, 0xC3], [0x8A, 0xE0], [0x66, 0x8B, 0xD8], [0x88, 0xDC],
+            [0xB0, 0x5A], [0xB8, 0x78, 0x56, 0x34, 0x12], [0x66, 0xBB, 0x34, 0x12], [0xB7, 0x80],
+        ];
+        uint[] values = [0, 1, 0x7F, 0x80, 0xFF, 0x7FFF, 0x8000, 0xFFFF, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF, 0x12345678];
+        var decodedAdd = DecodeInstruction(env, new CPU { code32 = true });
+        Reset(env, [0x01, 0xD8]);
+        var add = Semantics.Lower(DecodeInstruction(env, new CPU { code32 = true }));
+        Equal(true, add.Statements.Count == 2
+            && add.Statements[0] is SetRegStmt { Reg: 0, Type: 2, Value: AluExpr { Kind: 0, Left: RegExpr { Reg: 0, Type: 2 }, Right: RegExpr { Reg: 3, Type: 2 } } }
+            && add.Statements[1] is AdvanceStmt { Length: 2 }, "ADD eax, ebx lowers to a register write of an ALU expression and an EIP advance");
+        Reset(env, [0x8B, 0x03]);
+        Equal(true, Semantics.Lower(DecodeInstruction(env, new CPU { code32 = true })) == null, "memory operands are outside the PoC");
+        foreach (var code in encodings)
+        {
+            Reset(env, code);
+            var block = Semantics.Lower(DecodeInstruction(env, new CPU { code32 = true }));
+            Equal(true, block != null, $"lowered {Convert.ToHexString(code)}");
+            var run = Semantics.Compile(block);
+            foreach (var left in values)
+            foreach (var right in values)
+            foreach (var carry in new uint[] { 0, 1 })
+            {
+                var reference = CreateCpu(left, right, 0x202 | carry);
+                Reset(env, code);
+                Equal(true, SlowStep(env, reference, null).IsSuccess, $"reference {Convert.ToHexString(code)}");
+                var expected = Convert.ToHexString(CpuBytes(reference));
+                var interpreted = CreateCpu(left, right, 0x202 | carry);
+                Semantics.Interpret(block, interpreted);
+                Equal(expected, Convert.ToHexString(CpuBytes(interpreted)), $"interpreter {Convert.ToHexString(code)} {left:x} {right:x} cf={carry}");
+                var compiled = CreateCpu(left, right, 0x202 | carry);
+                run(compiled);
+                Equal(expected, Convert.ToHexString(CpuBytes(compiled)), $"compiled {Convert.ToHexString(code)} {left:x} {right:x} cf={carry}");
+                cases++;
+            }
+        }
+        // 1 命令あたりの時間(ADD eax, ebx): 高速コア、IR 解釈器、IR コンパイル済み。
+        Reset(env, [0x01, 0xD8]);
+        var block2 = Semantics.Lower(DecodeInstruction(env, new CPU { code32 = true }));
+        var compiledAdd = Semantics.Compile(block2);
+        const int iterations = 5_000_000;
+        var cpu = CreateCpu(1, 2);
+        double Measure(Action step)
+        {
+            for (var warm = 0; warm < 100_000; warm++) { step(); cpu.eip = 0; }
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            for (var index = 0; index < iterations; index++) { step(); cpu.eip = 0; }
+            return watch.Elapsed.TotalMilliseconds * 1_000_000.0 / iterations;
+        }
+        var fast = Measure(() => FastStep(env, cpu));
+        var interpreterTime = Measure(() => Semantics.Interpret(block2, cpu));
+        var compiledTime = Measure(() => compiledAdd(cpu));
+        Console.WriteLine($"ADD eax, ebx ns/op: fast core {fast:F1}, IR interpreter {interpreterTime:F1}, IR compiled {compiledTime:F1}");
+    }
+
     static void Integration()
     {
         foreach (var code in new byte[][] { [0xF3, 0xA5], [0x66, 0xF3, 0xAB], [0xF3, 0xAA], [0xA6], [0xA7], [0xAE], [0xAF], [0xAD], [0x50], [0x66, 0x50], [0x58], [0x66, 0x58] })
@@ -321,6 +386,7 @@ static class CoreTests
         Console.WriteLine($"Baseline-compatible cases: {cases}; SHA256={baselineHash}");
         Memory(true);
         PageWalk();
+        SemanticsIr();
         Integration();
         OperandTransfers();
         Console.WriteLine($"Core cases passed: {cases}");

@@ -3,7 +3,7 @@ namespace Emu86;
 static public partial class Ext
 {
     // 32ビット汎用レジスタを番号で読む。
-    static private uint ReadRegister32(CPU cpu, int register) => register switch
+    static internal uint ReadRegister32(CPU cpu, int register) => register switch
     {
         0 => cpu.eax,
         1 => cpu.ecx,

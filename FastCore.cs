@@ -622,13 +622,13 @@ static public partial class Ext
         return v;
     }
 
-    static byte FReg8(CPU c, int r) => r switch
+    static internal byte FReg8(CPU c, int r) => r switch
     {
         0 => c.al, 1 => c.cl, 2 => c.dl, 3 => c.bl,
         4 => c.ah, 5 => c.ch, 6 => c.dh, _ => c.bh,
     };
 
-    static void FReg8Set(CPU c, int r, byte v)
+    static internal void FReg8Set(CPU c, int r, byte v)
     {
         switch (r)
         {
@@ -643,13 +643,13 @@ static public partial class Ext
         }
     }
 
-    static ushort FReg16(CPU c, int r) => r switch
+    static internal ushort FReg16(CPU c, int r) => r switch
     {
         0 => c.ax, 1 => c.cx, 2 => c.dx, 3 => c.bx,
         4 => c.sp, 5 => c.bp, 6 => c.si, _ => c.di,
     };
 
-    static void FReg16Set(CPU c, int r, ushort v)
+    static internal void FReg16Set(CPU c, int r, ushort v)
     {
         switch (r)
         {
@@ -664,7 +664,7 @@ static public partial class Ext
         }
     }
 
-    static void FReg32Set(CPU c, int r, uint v)
+    static internal void FReg32Set(CPU c, int r, uint v)
     {
         switch (r)
         {

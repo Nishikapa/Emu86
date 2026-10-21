@@ -2,7 +2,7 @@ namespace Emu86;
 
 static public partial class Ext
 {
-    static uint CalculateAlu(CPU cpu, int type, uint left, uint right, int kind)
+    static internal uint CalculateAlu(CPU cpu, int type, uint left, uint right, int kind)
     {
         var mask = Mask(type);
         var signBit = Msb(type);
@@ -57,7 +57,7 @@ static public partial class Ext
         cpu.af = false;
     }
 
-    static void SetIncDecFlags(CPU cpu, int type, uint value, int delta)
+    static internal void SetIncDecFlags(CPU cpu, int type, uint value, int delta)
     {
         var signBit = Msb(type);
         var result = (uint)(value + delta) & Mask(type);
