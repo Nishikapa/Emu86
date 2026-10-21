@@ -295,11 +295,105 @@ static class DecodeTests
         Equal(0x10000u, new CodeSource(env, 0, 0xFFFE, true).Address(2), "32-bit address continues past 64K");
     }
 
+    // オペコード表の検証: 表から求めた命令長が、通常コアで実行したときの EIP の進みと一致する。
+    // 全 1 バイト命令と 0F 2 バイト命令を、ModRM の形(reg=0/1 × レジスタ/[eax]/[eax+disp8]/[eax+disp32]/SIB)と
+    // 66/67 プレフィックスの組で符号化し、実行に成功した制御転送でない命令について比較する。
+    static void Lengths()
+    {
+        using var env = new EmuEnvironment(memory: new byte[0x10000]);
+        var executor = new InstructionExecutor(false);
+        // プレフィックス、2 バイト目、制御転送、CR 書き込み(ページング状態を変える)は対象外。
+        HashSet<int> skip = [0x26, 0x2E, 0x36, 0x3E, 0x64, 0x65, 0x66, 0x67, 0xF0, 0xF2, 0xF3, 0x0F,
+            0x9A, 0xC2, 0xC3, 0xCA, 0xCB, 0xCC, 0xCD, 0xCE, 0xCF, 0xE0, 0xE1, 0xE2, 0xE8, 0xE9, 0xEA, 0xEB, 0x0F22];
+        for (var condition = 0; condition < 16; condition++) { skip.Add(0x70 + condition); skip.Add(0x0F80 + condition); }
+        byte[][] modrms = [[0x00], [0x08], [0x40], [0x48], [0x80], [0x88], [0xC0], [0xC8], [0x04, 0x24], [0x0C, 0x24]];
+        byte[][] prefixSets = [[], [0x66], [0x67], [0x66, 0x67]];
+        byte[] filler = [0x10, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x30, 0x00];
+        var verified = 0;
+        var attempted = 0;
+        foreach (var opcode in Enumerable.Range(0, 256).Concat(Enumerable.Range(0x0F00, 256)))
+        {
+            if (skip.Contains(opcode)) continue;
+            var info = OpcodeTable.Of(opcode);
+            foreach (var prefixes in prefixSets)
+            foreach (var modrm in info.HasModRm ? modrms : [[]])
+            {
+                attempted++;
+                var code = new List<byte>(prefixes);
+                if (opcode >= 0x0F00) code.Add(0x0F);
+                code.Add((byte)(opcode & 0xFF));
+                code.AddRange(modrm);
+                code.AddRange(filler);
+                Array.Clear(env.OneMegaMemory_);
+                code.CopyTo(env.OneMegaMemory_, 0x100);
+                var cpu = new CPU { code32 = true, stack32 = true, eip = 0x100, eax = 0x3000, ebx = 0x3000, ecx = 5, edx = 0x3000, esi = 0x3000, edi = 0x4000, esp = 0x8000, ebp = 0x3000, eflags = 2 };
+                bool success;
+                try { success = executor.Step(env, cpu).IsSuccess; }
+                catch (Exception) { success = false; } // 未実装の組み合わせ(CR1 など)は対象外
+                if (!success) continue;
+                var executed = cpu.eip - 0x100;
+                var restored = new CPU { code32 = true, eip = 0x100 };
+                var decoded = DecodeInstruction(env, restored);
+                Equal(executed, (uint)decoded.Length, $"length of {Convert.ToHexString(code.ToArray())} ({decoded})");
+                Equal(opcode, decoded.Opcode, $"opcode of {Convert.ToHexString(code.ToArray())}");
+                Equal(info.HasModRm, decoded.ModRm != null, $"ModRM of {Convert.ToHexString(code.ToArray())}");
+                verified++;
+            }
+        }
+        Console.WriteLine($"Opcode table verified against the LINQ core: {verified} of {attempted} encodings");
+        Equal(true, verified >= 1500, "enough encodings verified");
+    }
+
+    // 逆アセンブル: ニーモニック(グループ・条件・オペランドサイズ)、レジスタ、メモリオペランド、即値、分岐先、プレフィックス。
+    static void Disassembly()
+    {
+        using var env = new EmuEnvironment(memory: new byte[0x10000]);
+        string Text(bool code32, params byte[] code)
+        {
+            Array.Clear(env.OneMegaMemory_, 0x100, 32);
+            code.CopyTo(env.OneMegaMemory_, 0x100);
+            var cpu = new CPU { code32 = code32, eip = 0x100 };
+            return DecodeInstruction(env, cpu).ToString();
+        }
+        Equal("CMPXCHG8B eax", Text(true, 0x0F, 0xC7, 0xC8), "group 9 register form (Virtual PC hypercall)");
+        Equal("MOVZX cx, al", Text(true, 0x66, 0x0F, 0xB6, 0xC8), "operand size prefix selects 16-bit destination");
+        Equal("MOV eax, [eax+ebx*4-0x10]", Text(true, 0x8B, 0x44, 0x98, 0xF0), "SIB with scaled index and negative disp8");
+        Equal("MOV eax, fs:[0x10]", Text(true, 0x64, 0xA1, 0x10, 0x00, 0x00, 0x00), "moffs with segment override");
+        Equal("REP STOSD", Text(true, 0xF3, 0xAB), "repeat prefix and 32-bit string op");
+        Equal("REP STOSW", Text(true, 0xF3, 0x66, 0xAB), "operand size prefix after REP");
+        Equal("JMP 0x00000100", Text(true, 0xEB, 0xFE), "short jump to itself");
+        Equal("CALL 0x00001105", Text(true, 0xE8, 0x00, 0x10, 0x00, 0x00), "near call target");
+        Equal("JMPF 0x0008:0x00000000", Text(true, 0xEA, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00), "far jump");
+        Equal("ENTER 0x0010, 0x00", Text(true, 0xC8, 0x10, 0x00, 0x00), "enter frame");
+        Equal("ADD esp, 0x10", Text(true, 0x83, 0xC4, 0x10), "group 1 with sign-extended imm8");
+        Equal("TEST ecx, 0x00000001", Text(true, 0xF7, 0xC1, 0x01, 0x00, 0x00, 0x00), "group 3 TEST carries an immediate");
+        Equal("NEG eax", Text(true, 0xF7, 0xD8), "group 3 NEG has no immediate");
+        Equal("MOV ds, ax", Text(true, 0x8E, 0xD8), "segment register destination");
+        Equal("LGDT [0x00003000]", Text(true, 0x0F, 0x01, 0x15, 0x00, 0x30, 0x00, 0x00), "group 7 with disp32 only");
+        Equal("MOV ax, [bp-0x2]", Text(false, 0x8B, 0x46, 0xFE), "16-bit addressing with BP");
+        Equal("MOV ax, [0x1234]", Text(false, 0xA1, 0x34, 0x12), "16-bit moffs");
+        Equal("INT 0x21", Text(true, 0xCD, 0x21), "software interrupt");
+        Equal("UD2", Text(true, 0x0F, 0x0B), "two-byte opcode without operands");
+        Equal("LOCK CMPXCHG [edx], ecx", Text(true, 0xF0, 0x0F, 0xB1, 0x0A), "lock prefix");
+        Equal("JNE 0x00000104", Text(true, 0x75, 0x02), "conditional jump");
+        Equal("PUSHA", Text(false, 0x60), "16-bit mnemonic variant");
+        Equal("CMPXCHG8B [esi]", Text(true, 0x0F, 0xC7, 0x0E), "group 9 memory form");
+        Equal("(undefined)", Text(true, 0xD6), "undefined opcode");
+        Equal("FPU", Text(true, 0xD9, 0xC9), "FPU escape");
+        env.OneMegaMemory_[0x100] = 0x0F; env.OneMegaMemory_[0x101] = 0xC7; env.OneMegaMemory_[0x102] = 0xC8;
+        Equal("0f c7 c8  CMPXCHG8B eax", Disassembler.Describe(env, new CPU { code32 = true, eip = 0x100 }), "bytes and text");
+        var faulting = new EmuEnvironment(memory: new byte[0x10000]);
+        faulting.PagingOn = true; faulting.Cr3Base = 0x9000; // 空のページディレクトリ: フェッチが #PF
+        Equal("(unmapped)", Disassembler.Describe(faulting, new CPU { code32 = true, eip = 0x100 }), "unreadable code");
+    }
+
     public static void Run()
     {
         Addresses();
         FetchBoundaries();
         Parsers();
+        Lengths();
+        Disassembly();
         Allocations();
         Console.WriteLine($"Decode assertions passed: {checks}");
     }
