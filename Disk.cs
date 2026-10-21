@@ -291,32 +291,29 @@ public class DiskImage : IDisposable
 
     // ============ 読み込み ============
 
+    // セクタの所在。Image が null なら明示的にゼロ(VHDX の BLOCK_ZERO)。
+    readonly record struct SectorSource(DiskImage Image, long Offset);
+
+    // 自分に有ればそこから、無ければ親を順にたどり、どこにも無ければ null(ゼロとして読む)。
+    // 範囲外の LBA はそのイメージでは無いものとして扱う。
+    SectorSource? Locate(long lba) =>
+        lba < 0 || lba >= TotalSectors ? null : LocateOwn(lba) ?? parent?.Locate(lba);
+
+    SectorSource? LocateOwn(long lba) =>
+        vhd ? LocateVhd(lba) : vhdx ? LocateVhdx(lba) : new SectorSource(this, lba * SectorSize); // 生イメージ
+
     public void ReadSector(long lba, byte[] buf, int offset)
     {
-        if (lba < 0 || lba >= TotalSectors)
+        if (Locate(lba) is { Image: { } image, Offset: var position })
         {
-            Array.Clear(buf, offset, SectorSize);
-            return;
+            image.file.Seek(position, SeekOrigin.Begin);
+            image.file.ReadExactly(buf, offset, SectorSize);
         }
-
-        if (vhd) ReadVhd(lba, buf, offset);
-        else if (vhdx) ReadVhdx(lba, buf, offset);
-        else
-        {
-            file.Seek(lba * SectorSize, SeekOrigin.Begin);
-            file.ReadExactly(buf, offset, SectorSize);
-        }
-    }
-
-    void ReadFromParentOrZero(long lba, byte[] buf, int offset)
-    {
-        if (parent != null)
-            parent.ReadSector(lba, buf, offset);
         else
             Array.Clear(buf, offset, SectorSize);
     }
 
-    void ReadVhd(long lba, byte[] buf, int offset)
+    SectorSource? LocateVhd(long lba)
     {
         var block = lba / sectorsPerBlock;
         var sector = (int)(lba % sectorsPerBlock);
@@ -327,14 +324,7 @@ public class DiskImage : IDisposable
         var fromParent = entry == VhdBatUnallocated ||
             (vhdType == VhdTypeDifferencing &&
              (VhdBlockBitmap(block, entry)[sector / 8] >> (7 - sector % 8) & 1) == 0);
-        if (fromParent)
-        {
-            ReadFromParentOrZero(lba, buf, offset);
-            return;
-        }
-
-        file.Seek(((long)entry + vhdBitmapSectors + sector) * SectorSize, SeekOrigin.Begin);
-        file.ReadExactly(buf, offset, SectorSize);
+        return fromParent ? null : new SectorSource(this, ((long)entry + vhdBitmapSectors + sector) * SectorSize);
     }
 
     byte[] VhdBlockBitmap(long block, uint entry)
@@ -348,40 +338,29 @@ public class DiskImage : IDisposable
         return b;
     }
 
-    void ReadVhdx(long lba, byte[] buf, int offset)
+    SectorSource? LocateVhdx(long lba)
     {
         var block = lba / sectorsPerBlock;
         var entry = vhdxBat[vhdxLayout.PayloadIndex(block)];
         var state = (int)(entry & 7);
-        var fileOffset = (long)(entry & ~0xFFFFFUL);
+        var inBlock = new SectorSource(this, (long)(entry & ~0xFFFFFUL) + lba % sectorsPerBlock * SectorSize);
 
         switch (state)
         {
             case PayloadFullyPresent:
-                file.Seek(fileOffset + lba % sectorsPerBlock * SectorSize, SeekOrigin.Begin);
-                file.ReadExactly(buf, offset, SectorSize);
-                return;
+                return inBlock;
 
             case PayloadPartiallyPresent:
-                // VHDX のビットマップは LSB ファースト(bit0 が先頭セクタ)。チャンク単位(1MB)。
+                // VHDX のビットマップは LSB ファースト(bit0 が先頭セクタ)。チャンク単位(1MB)。ビットが 0 なら親。
                 var bmp = VhdxChunkBitmap(vhdxLayout.ChunkIndex(block));
                 var pos = vhdxLayout.SectorInChunk(lba);
-                if (bmp != null && (bmp[pos / 8] >> (int)(pos % 8) & 1) != 0)
-                {
-                    file.Seek(fileOffset + lba % sectorsPerBlock * SectorSize, SeekOrigin.Begin);
-                    file.ReadExactly(buf, offset, SectorSize);
-                    return;
-                }
-                ReadFromParentOrZero(lba, buf, offset);
-                return;
+                return bmp != null && (bmp[pos / 8] >> (int)(pos % 8) & 1) != 0 ? inBlock : null;
 
-            case 2: // BLOCK_ZERO
-                Array.Clear(buf, offset, SectorSize);
-                return;
+            case 2: // BLOCK_ZERO: 親を見ずにゼロ
+                return new SectorSource(null, 0);
 
             default: // NOT_PRESENT / UNDEFINED / UNMAPPED
-                ReadFromParentOrZero(lba, buf, offset);
-                return;
+                return null;
         }
     }
 
