@@ -147,7 +147,9 @@ static State<Unit> Mov_8C =>
 
 ### 命令ディスパッチ
 
-オペコードは 256 要素のテーブル（`OpecodeDic[]`）で引きます。1 バイト命令は `OneByteStates`、`0F` で始まる 2 バイト命令は `TwoBytesStates` に `(オペコード, 個数, 実装)` のタプルで登録され、起動時に展開されます。`Execute` がプレフィックス処理・オペコード読み取り・ディスパッチを行います。
+1 バイト命令は `OneByteStates`、`0F` で始まる 2 バイト命令は `TwoBytesStates` に `(オペコード, 個数, 実装)` のタプルで登録します。`ExecuteDecoded` はプレフィックス処理（`CheckPrefixes`）とディスパッチ（`Execute`）の合成です。
+
+表は起動時に 256 要素の `State<Unit>[]` に展開され、`Execute` は「オペコードを 1 バイト読んで表で引く」`Dispatch` です。`0F` の項には 2 バイト目の表を引く `Dispatch` が入れ子になっています。REP の繰り返しは `While(条件, 1 反復の State)` で書いています。
 
 `Group1`〜`Group8` のように ModRM の `reg` フィールドでサブ命令を選ぶグループ命令は、`Choice(reg, (n, 実装), ...)` で分岐します。オペランド幅は `Data`（`(int type, byte db, ushort dw, uint dd)`、type: 0=byte/1=word/2=dword）型エイリアスで統一的に扱い、`GlobalUsings.cs` で `MemAddr`（`(bool isMem, uint addr)`）と共に定義しています。
 
@@ -174,7 +176,7 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | ファイル | 役割 |
 |---------|------|
 | `GlobalUsings.cs` | `Data`/`MemAddr` 型エイリアスの定義。 |
-| `State.cs` | `State<V>` モナドの定義と LINQ コンビネータ（`Select`/`SelectMany`/`Where`/`When`/`Unless`/`Choice`/`Sequence`/`Many0` 等）。 |
+| `State.cs` | `State<V>` モナドの定義と LINQ コンビネータ（`Select`/`SelectMany`/`Where`/`When`/`Unless`/`While`/`Choice`/`Sequence`/`Many0` 等）。 |
 | `CPU.cs` | `CPU` 状態、レジスタアクセサ、共通 ALU/フラグ更新処理を呼び出すモナド操作、シフト計算。 |
 | `Alu.cs` | 通常コアと高速コアで共有する算術・論理演算、フラグ更新、条件分岐の判定。 |
 | `Fpu.cs` | x87 FPU。ST スタック 8 本を double で保持し、80 ビット拡張実数と相互変換。ロード/ストア、四則演算、比較、超越関数、FNSAVE/FRSTOR。 |
@@ -194,7 +196,7 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | `SnapshotStore.cs` | 保存形式の版管理、チェックサム検証、ディスク差分を含むチェックポイントの確定と復元。 |
 | `Codec.cs` | スナップショットの双方向コーデック `Codec<T>`。フィールドを保存形式の並び順に 1 度だけ登録し（`since:` で追加された版を指定）、保存と復元を同じ記述から導出する。 |
 | `CPU.Snapshot.cs` / `Environment.Snapshot.cs` | CPU レジスタ・FPU と、環境・デバイスの保存形式（`Codec<T>` の表）。PCI・ATA・VGA・マウス・UART の内部状態は各デバイスが自分の表を持つ。 |
-| `Environment.cs` | `EmuEnvironment`（既定 256 MB メモリ、64 KB I/O ポート、ATA 接続）と、メモリ/レジスタ/スタックアクセス、ページング変換と TLB、GDT ディスクリプタデコード、IDT 経由の割り込み配送、文字列・ビット操作、I/O ポートの振り分け。 |
+| `Environment.cs` | `EmuEnvironment`（既定 256 MB メモリ、64 KB I/O ポート、ATA 接続）と、メモリ/レジスタ/スタックアクセス、ページング変換（非 PAE 2 段と PAE 3 段を段の表 `PageLevel[]` で共通に歩く）と TLB、GDT ディスクリプタデコード、IDT 経由の割り込み配送、文字列・ビット操作、I/O ポートの振り分け。 |
 | `Environment.Devices.cs` | 環境ごとのデバイス所有と、既存の状態名への転送プロパティ。保存形式のバイト順・バージョンは変更しない。 |
 | `PicDevice.cs` / `PitDevice.cs` / `CmosDevice.cs` / `KeyboardController.cs` / `MouseDevice.cs` / `AcpiPmDevice.cs` | PIC・PIT・CMOS・8042・PS/2 マウス・ACPI 電源管理の状態と入出力処理。PIC のマスタ/スレーブは共通実装の独立したインスタンス。 |
 | `Pci.cs` | PCI コンフィグ空間（0xCF8/0xCFC）。i440FX ホストブリッジ、PIIX4 ISA/IDE/電源管理、VGA 互換デバイスと拡張 ROM BAR。 |
@@ -203,7 +205,7 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | `VgaWindow.cs` / `RegisterDialog.cs` | Windows Forms の表示ウィンドウ（描画、キー入力とマウス捕捉、中断・再開ボタン）とレジスタ表示ダイアログ。 |
 | `Ext.cs` | 型変換ユーティリティ（`ToTypeData`/`MapType`/`Choice_` 等）。 |
 | `Program.cs` / `Program.*.cs` | 命令の実装とオペコードテーブル。起動処理は `Program.Runner.cs`。 |
-| `Disk.cs` | `DiskImage`（VHD/VHDX/AVHDX/生イメージの CoW ディスクバックエンド）と `AtaDevice`（ATA PIO デバイス、IRQ14）。 |
+| `Disk.cs` | `DiskImage`（VHD/VHDX/AVHDX/生イメージの CoW ディスクバックエンド。セクタの所在は「自分 → 親 → ゼロ」の `Locate` チェーンで解決）と `AtaDevice`（ATA PIO デバイス、IRQ14）。 |
 | `VhdxBatLayout.cs` | VHDX のペイロード・ビットマップの位置、BAT の必要エントリ数・領域サイズ。 |
 | `tests/Emu86.Tests/` | 本体を参照する回帰テストと、実行状態・トレースの比較用データ。 |
 | `tools/win-debug/` | Windows ブート解析用の Python スクリプト（スナップショットの CPU/メモリ読み出し、Unicorn との差分トレース、シンボル付きスタック表示など）。 |
