@@ -61,7 +61,7 @@ static public partial class Ext
 
     // Group2 シフト/ローテートを 1bit ずつ count 回適用する。
     // kind: 0=ROL 1=ROR 2=RCL 3=RCR 4=SHL/SAL 5=SHR 6=SAL 7=SAR
-    static (uint result, bool cf, bool of) ComputeShift(uint v, int count, int kind, int bits, bool cfIn)
+    static internal (uint result, bool cf, bool of) ComputeShift(uint v, int count, int kind, int bits, bool cfIn)
     {
         var mask = bits == 8 ? 0xFFu : bits == 16 ? 0xFFFFu : 0xFFFFFFFFu;
         var msb = 1u << (bits - 1);

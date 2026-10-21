@@ -6,7 +6,7 @@ namespace Emu86;
 // コンパイル済みブロック: 予算(実行してよい命令数)と開始時の世代を受け取り、完了した命令数を返す。
 public delegate int BlockRun(EmuEnvironment env, CPU cpu, int budget, long generation);
 
-// 基本ブロック(docs/adr/0002 段階 3): 先頭から分岐(Jcc/JMP)まで、または IR 対象外の命令の手前・ページ末尾・上限までの
+// 基本ブロック(docs/adr/0002 段階 3): 先頭から分岐(Jcc/JMP/CALL/RET)か STI まで、または IR 対象外の命令の手前・ページ末尾・上限までの
 // IR 命令列。実行は 1 命令ずつ(各命令の IR は独立に完結し、EIP は命令末尾で進む)で、
 //   予算: 次のイベント(割り込み周期・サービス周期・スナップショット・上限)までの命令数を超えない
 //   世代: ブロック内の命令が翻訳済みページへ書いたら(自己書き換え)、そこで止める
@@ -86,6 +86,7 @@ public sealed class TranslationCache
     // 既定は無効(--translate で有効)。
     public bool Enabled;
     public long Generation;   // 無効化のたびに進む(実行中のブロックが自己書き換えを検出する)
+    public readonly uint[] Temps = new uint[4]; // IR 解釈器の Let(一時変数)の置き場
     public long Translated;   // IR に下ろしたブロック数
     public long Compiled;     // コンパイルしたブロック数
     public long Interpreted;  // IR 解釈器で実行した命令数
@@ -175,7 +176,7 @@ public sealed class TranslationCache
     }
 
     // ブロックを先頭からデコードして IR に下ろす。対象外の命令で始まるなら null。
-    // 分岐を含めたらそこで終わる。命令がページ末尾の 15 バイトに掛かる前に止める(デコードが隣のページを読まないため)。
+    // 分岐(または STI)を含めたらそこで終わる。命令がページ末尾の 15 バイトに掛かる前に止める(デコードが隣のページを読まないため)。
     static TranslatedBlock Lower(EmuEnvironment env, CPU cpu, uint physical)
     {
         var instructions = new List<Block>();
@@ -192,7 +193,7 @@ public sealed class TranslationCache
             instructions.Add(lowered);
             offsets.Add(offset);
             offset += (uint)length;
-            if (Semantics.IsBranch(instruction.Opcode)) break;
+            if (Semantics.EndsBlock(instruction)) break;
         }
         return instructions.Count == 0 ? null : new TranslatedBlock([.. instructions], [.. offsets]);
     }
