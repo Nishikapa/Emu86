@@ -34,7 +34,61 @@ static public partial class Ext
     }
 
     static uint EnvWalkPageTable(EmuEnvironment env, uint lin, bool write) =>
-        EnvTlbFill(env, lin, write, env.PaeOn ? EnvWalkPae(env, lin, write) : EnvWalk2Level(env, lin, write));
+        EnvTlbFill(env, lin, write, EnvWalk(env, lin, write, env.PaeOn ? PaeLevels : LegacyLevels));
+
+    // ページテーブルの 1 段。Shift/IndexBits が線形アドレス中のインデックス、EntrySize がエントリ幅。
+    // HasAccessBits は R/W と Accessed を持つ段(PAE の PDPT は持たない)、LargePageMask は PS ビットで
+    // 大ページになれる段(PDE)の物理基底マスク。RAM は 4GB 未満なので 8 バイトエントリの上位 32 ビットは無視する。
+    readonly record struct PageLevel(int Shift, int IndexBits, int EntrySize, bool HasAccessBits, uint LargePageMask)
+    {
+        public readonly uint IndexMask = (1u << IndexBits) - 1;
+        public readonly int EntryShift = EntrySize == 8 ? 3 : 2;
+
+        // エントリのアドレス(表の基底 + インデックス × エントリ幅)。
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public uint EntryAddress(uint tableBase, uint lin) => tableBase + (((lin >> Shift) & IndexMask) << EntryShift);
+    }
+
+    // 非 PAE: PDE(4MB ページ可)→ PTE。PAE: PDPTE → PDE(2MB ページ可)→ PTE。
+    static readonly PageLevel[] LegacyLevels = [new(22, 10, 4, true, 0xFFC00000), new(12, 10, 4, true, 0)];
+    static readonly PageLevel[] PaeLevels = [new(30, 2, 8, false, 0), new(21, 9, 8, true, 0xFFE00000), new(12, 9, 8, true, 0)];
+
+    // 段を順にたどる。不在ならその段でフォルト。大ページ(PS)か最終段に着いたら書き込み可否
+    // (R/W は通った段の論理積)を検査し、Accessed/Dirty を立てて物理ページの基底を返す。
+    // 途中の段(PDE)の Accessed は最終段の検査が通ってから立てる(Linux のページ管理が参照する)。
+    static uint EnvWalk(EmuEnvironment env, uint lin, bool write, PageLevel[] levels)
+    {
+        var tableBase = env.Cr3Base;
+        var writable = true;
+        var pendingAccess = false; // Accessed を後から立てる途中段(PDE)
+        uint pendingAddress = 0, pendingEntry = 0;
+        for (var depth = 0; depth < levels.Length; depth++)
+        {
+            ref readonly var level = ref levels[depth];
+            var address = level.EntryAddress(tableBase, lin);
+            var entry = RawRead32(env, address);
+            if ((entry & 1) == 0)
+                throw new PageFaultException(lin, write ? 2u : 0u);
+            if (level.HasAccessBits) writable &= (entry & 2) != 0;
+            var large = level.LargePageMask != 0 && (entry & 0x80) != 0;
+            if (large || depth == levels.Length - 1)
+            {
+                var dirty = EnvCheckWrite(env, lin, write, writable);
+                if (pendingAccess) RawWrite32(env, pendingAddress, pendingEntry | 0x20u);
+                var updated = entry | 0x20u | dirty;
+                if (large || updated != entry) RawWrite32(env, address, updated);
+                return large ? (entry & level.LargePageMask) | (lin & ~level.LargePageMask & 0xFFFFF000) : entry & 0xFFFFF000;
+            }
+            if (level.HasAccessBits && (entry & 0x20) == 0)
+            {
+                pendingAccess = true;
+                pendingAddress = address;
+                pendingEntry = entry;
+            }
+            tableBase = entry & 0xFFFFF000;
+        }
+        throw new InvalidOperationException("page walk ended without a leaf");
+    }
 
     // 書き込みが許されるか(CR0.WP=1 のときのみ R/W ビットを尊重する)を検査し、
     // 違反なら保護フォルトを投げる。許されるなら Accessed/Dirty 更新用のビットを返す。
@@ -43,71 +97,6 @@ static public partial class Ext
         if (write && env.WpOn && !rw)
             throw new PageFaultException(lin, 0b011); // present + write + supervisor
         return write ? 0x40u : 0u;
-    }
-
-    // 非 PAE: 2 レベル(PDE→PTE、PSE 4MB ページ対応)。ページの物理基底を返す。
-    static uint EnvWalk2Level(EmuEnvironment env, uint lin, bool write)
-    {
-        var pdeAddr = env.Cr3Base + ((lin >> 22) << 2);
-        var pde = RawRead32(env, pdeAddr);
-        if ((pde & 1) == 0)
-            throw new PageFaultException(lin, write ? 2u : 0u);
-
-        if ((pde & 0x80) != 0)
-        {
-            // 4MB ページ(PSE)。Accessed/Dirty を立てる。
-            var dirty = EnvCheckWrite(env, lin, write, (pde & 2) != 0);
-            RawWrite32(env, pdeAddr, pde | 0x20u | dirty);
-            return (pde & 0xFFC00000) | (lin & 0x003FF000);
-        }
-
-        var pteAddr = (pde & 0xFFFFF000) + (((lin >> 12) & 0x3FF) << 2);
-        var pte = RawRead32(env, pteAddr);
-        if ((pte & 1) == 0)
-            throw new PageFaultException(lin, write ? 2u : 0u);
-        // 有効 R/W は PDE と PTE の R/W の論理積。
-        var dirty2 = EnvCheckWrite(env, lin, write, (pde & 2) != 0 && (pte & 2) != 0);
-        // Accessed/Dirty を更新する(Linux のページ管理が参照する)。
-        if ((pde & 0x20) == 0)
-            RawWrite32(env, pdeAddr, pde | 0x20u);
-        var newPte = pte | 0x20u | dirty2;
-        if (newPte != pte)
-            RawWrite32(env, pteAddr, newPte);
-        return pte & 0xFFFFF000;
-    }
-
-    // PAE: 3 レベル(PDPT→PDE→PTE、エントリ 8 バイト、2MB ページ対応)。
-    // RAM は 4GB 未満なので各エントリの上位 32 ビットは無視する。
-    static uint EnvWalkPae(EmuEnvironment env, uint lin, bool write)
-    {
-        var pdpte = RawRead32(env, env.Cr3Base + ((lin >> 30) << 3));
-        if ((pdpte & 1) == 0)
-            throw new PageFaultException(lin, write ? 2u : 0u);
-
-        var pdeAddr = (pdpte & 0xFFFFF000) + (((lin >> 21) & 0x1FF) << 3);
-        var pde = RawRead32(env, pdeAddr);
-        if ((pde & 1) == 0)
-            throw new PageFaultException(lin, write ? 2u : 0u);
-
-        if ((pde & 0x80) != 0)
-        {
-            // 2MB ページ。Accessed/Dirty を立てる。
-            var dirty = EnvCheckWrite(env, lin, write, (pde & 2) != 0);
-            RawWrite32(env, pdeAddr, pde | 0x20u | dirty);
-            return (pde & 0xFFE00000) | (lin & 0x001FF000);
-        }
-
-        var pteAddr = (pde & 0xFFFFF000) + (((lin >> 12) & 0x1FF) << 3);
-        var pte = RawRead32(env, pteAddr);
-        if ((pte & 1) == 0)
-            throw new PageFaultException(lin, write ? 2u : 0u);
-        var dirty2 = EnvCheckWrite(env, lin, write, (pde & 2) != 0 && (pte & 2) != 0);
-        if ((pde & 0x20) == 0)
-            RawWrite32(env, pdeAddr, pde | 0x20u);
-        var newPte = pte | 0x20u | dirty2;
-        if (newPte != pte)
-            RawWrite32(env, pteAddr, newPte);
-        return pte & 0xFFFFF000;
     }
 
     static uint EnvTlbFill(EmuEnvironment env, uint lin, bool write, uint physPage)
