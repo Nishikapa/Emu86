@@ -355,8 +355,9 @@ static class CoreTests
         Console.WriteLine($"ADD eax, ebx ns/op: fast core {fast:F1}, IR interpreter {interpreterTime:F1}, IR compiled {compiledTime:F1}");
     }
 
-    // 翻訳キャッシュ: 実行器の前段で TranslateAfter 回目から翻訳済みデリゲートが使われ、結果は通常コアと同じ。
-    // コードのあるページへの書き込みで翻訳が捨てられ、翻訳済み命令のメモリアクセスで #PF が起きても命令開始時に戻る。
+    // 翻訳ブロック: 実行器の 1 回の Step が分岐までの命令列をまとめて完了し(Executed)、結果は通常コアと同じ。
+    // 予算で途中で止まること、翻訳済みコードのあるページへの書き込み(自己書き換え。ブロック内からの書き込みも)で
+    // ブロックが捨てられること、ブロック途中の #PF で完了した命令数と CPU が失敗した命令の先頭になることを確かめる。
     static void TranslationCacheExecution()
     {
         using var env = new EmuEnvironment(memory: new byte[0x10000]);
@@ -364,6 +365,7 @@ static class CoreTests
         // ループ: add eax, ebx ; mov [data], eax ; inc ebx ; cmp ebx, 100 ; jne loop
         static byte[] Loop(uint data) => [0x01, 0xD8, 0xA3, (byte)data, (byte)(data >> 8), 0x00, 0x00, 0x43, 0x81, 0xFB, 0x64, 0x00, 0x00, 0x00, 0x75, 0xF0];
         static CPU Start() => new() { code32 = true, stack32 = true, eip = 0x100, esp = 0x8000, eflags = 2 };
+        static string Hex(CPU cpu) => Convert.ToHexString(CpuBytes(cpu));
         Loop(0x3000).CopyTo(env.OneMegaMemory_, 0x100);
         Loop(0x3000).CopyTo(mirror.OneMegaMemory_, 0x100);
         var fast = new InstructionExecutor(true);
@@ -371,31 +373,60 @@ static class CoreTests
         var slow = new InstructionExecutor(false);
         var cpu = Start();
         var expected = Start();
-        for (var step = 0; step < 100 * 5; step++)
+        // 1 回の Step が完了した命令数だけ通常コアを進めて比べる。
+        long Advance(long instructions, string label)
         {
-            Equal(true, fast.Step(env, cpu).IsSuccess, $"translated step {step}");
-            Equal(true, slow.Step(mirror, expected).IsSuccess, $"reference step {step}");
-            Equal(Convert.ToHexString(CpuBytes(expected)), Convert.ToHexString(CpuBytes(cpu)), $"state after step {step}");
-            if (step >= 5 * TranslationCache.TranslateAfter + 4) Equal(true, fast.UsedTranslation, $"step {step} ran compiled");
+            Equal(true, fast.Step(env, cpu).IsSuccess, $"{label}: translated step");
+            Equal(true, fast.Executed >= 1, $"{label}: a step completes at least one instruction");
+            for (var index = 0; index < fast.Executed; index++) Equal(true, slow.Step(mirror, expected).IsSuccess, $"{label}: reference step");
+            Equal(Hex(expected), Hex(cpu), $"{label}: state after {instructions + fast.Executed} instructions");
+            return instructions + fast.Executed;
         }
-        Equal(5L, env.Translations.Translated, "five loop instructions lowered to IR");
-        Equal(true, env.Translations.Interpreted + env.Translations.Executed >= 400, "most iterations ran through the IR");
+        long count = 0;
+        var blockSteps = 0;
+        var largest = 0;
+        while (count < 400)
+        {
+            count = Advance(count, "loop");
+            if (fast.UsedTranslation) blockSteps++;
+            largest = Math.Max(largest, fast.Executed);
+        }
+        Equal(5, largest, "the loop body runs as one block of five instructions");
+        Equal(1L, env.Translations.Translated, "one block lowered");
+        Equal(true, blockSteps >= 70, "most iterations ran as blocks");
+        Equal(0x100u, cpu.eip, "block ends after the taken branch");
         Equal(true, env.OneMegaMemory_.AsSpan().SequenceEqual(mirror.OneMegaMemory_), "memory after the loop");
-        // 自己書き換え: ループ先頭の ADD を SUB に書き換える(翻訳済みコードのあるページへの書き込み)。
+        // 予算 3: ブロックの 3 命令目で止まり、次の Step は途中(別のブロックの先頭)から続く。
+        fast.Budget = 3;
+        count = Advance(count, "budget");
+        Equal((3, 0x108u), (fast.Executed, cpu.eip), "budget stops the block after three instructions");
+        fast.Budget = int.MaxValue;
+        while (cpu.eip != 0x100) count = Advance(count, "resume");
+        // 自己書き換え(別の場所から): ループ先頭の ADD を SUB に書き換える。
         byte[] patch = [0xC6, 0x05, 0x00, 0x01, 0x00, 0x00, 0x29]; // mov byte [0x100], 0x29
         patch.CopyTo(env.OneMegaMemory_, 0x200);
         patch.CopyTo(mirror.OneMegaMemory_, 0x200);
         cpu.eip = 0x200; expected.eip = 0x200;
-        Equal(true, fast.Step(env, cpu).IsSuccess && slow.Step(mirror, expected).IsSuccess, "patch instruction");
+        count = Advance(count, "patch");
         Equal(1L, env.Translations.Invalidations, "code page invalidated by the write");
+        var loweredBeforePatch = env.Translations.Translated; // ウォームアップ中に訪れた途中の番地(0x108 など)もブロックになりうる
         cpu.eip = 0x100; expected.eip = 0x100; cpu.ebx = 0; expected.ebx = 0;
-        for (var step = 0; step < 100 * 5; step++)
-        {
-            Equal(true, fast.Step(env, cpu).IsSuccess && slow.Step(mirror, expected).IsSuccess, $"patched step {step}");
-            Equal(Convert.ToHexString(CpuBytes(expected)), Convert.ToHexString(CpuBytes(cpu)), $"patched state after step {step}");
-        }
-        Equal(10L, env.Translations.Translated, "loop lowered again after the patch");
-        // ページング有効で、データページを翻訳後に外す: 翻訳済みの MOV [data] が #PF を投げ、CPU は命令開始時に戻る。
+        var patched = 0L;
+        while (patched < 400) { count = Advance(count, "patched"); patched += fast.Executed; }
+        Equal(true, env.Translations.Translated > loweredBeforePatch, "loop lowered again after the patch");
+        // 自己書き換え(ブロック内から): 先頭の命令が次の命令のオペコードを AL で書き換え(INC ECX と DEC ECX が交互)、
+        // 世代の変化でブロックがそこで止まり、次の Step が書き換え後の命令を実行する。
+        byte[] self = [0x88, 0x05, 0x06, 0x03, 0x00, 0x00, 0x40, 0x34, 0x08, 0xEB, 0xF5]; // mov [0x306], al ; inc eax ; xor al, 8 ; jmp
+        self.CopyTo(env.OneMegaMemory_, 0x300);
+        self.CopyTo(mirror.OneMegaMemory_, 0x300);
+        cpu.eip = 0x300; expected.eip = 0x300; cpu.eax = 0x41; expected.eax = 0x41; cpu.ecx = 0; expected.ecx = 0;
+        var invalidationsBefore = env.Translations.Invalidations;
+        for (var iteration = 0; iteration < 40; iteration++)
+            while (true) { count = Advance(count, "self-modifying"); if (cpu.eip == 0x300) break; }
+        Equal(true, env.Translations.Invalidations > invalidationsBefore + 5, "in-block writes invalidate the block");
+        Equal(0u, cpu.ecx, "ecx returns to zero after 40 alternating iterations");
+        // ページング有効で、データページを翻訳後に外す: ブロック 2 命令目の MOV [data] が #PF を投げ、
+        // 完了数は 1(ADD)、CPU は MOV の先頭の状態。
         using var paged = new EmuEnvironment(memory: new byte[0x10000]);
         Loop(0x1800).CopyTo(paged.OneMegaMemory_, 0x100);
         MapPages(paged);
@@ -404,34 +435,39 @@ static class CoreTests
         EnvSyncPaging(paged, pagedCpu);
         var pagedExecutor = new InstructionExecutor(true);
         paged.Translations.Enabled = true;
-        for (var step = 0; step < 10 * 5; step++) Equal(true, pagedExecutor.Step(paged, pagedCpu).IsSuccess, $"paged step {step}");
-        Equal(true, pagedExecutor.UsedTranslation, "paged loop runs compiled");
+        for (var step = 0; step < 60; step++) Equal(true, pagedExecutor.Step(paged, pagedCpu).IsSuccess, $"paged step {step}");
+        Equal(true, pagedExecutor.UsedTranslation && pagedCpu.eip == 0x100, "paged loop runs as a block");
         BitConverter.GetBytes(0u).CopyTo(paged.OneMegaMemory_, 0xA004); // 線形 0x1000-0x1FFF を不在に
         paged.FlushTlb();
-        while (pagedCpu.eip != 0x102) Equal(true, pagedExecutor.Step(paged, pagedCpu).IsSuccess, "advance to the store");
-        var before = Convert.ToHexString(CpuBytes(pagedCpu));
+        var eaxBefore = pagedCpu.eax;
         var faulted = false;
         try { pagedExecutor.Step(paged, pagedCpu); }
-        catch (PageFaultException fault) { faulted = true; Equal((0x1800u, 2u), (fault.Linear, fault.ErrorCode), "store fault from compiled code"); }
+        catch (PageFaultException fault) { faulted = true; Equal((0x1800u, 2u), (fault.Linear, fault.ErrorCode), "store fault from the block"); }
         Equal(true, faulted, "translated store faults");
-        Equal(before, Convert.ToHexString(CpuBytes(pagedCpu)), "CPU restored to the start of the translated instruction");
+        Equal((1, 0x102u, 0x100u), (pagedExecutor.Executed, pagedCpu.eip, pagedExecutor.LastEip), "one instruction completed before the fault");
+        Equal(eaxBefore + pagedCpu.ebx, pagedCpu.eax, "ADD completed, MOV did not");
         cases++;
-        // 実行器を通した 1 命令あたりの時間(5 命令のループ): 翻訳キャッシュあり(コンパイル済み段階)と高速コアのみ。
+        // 実行器を通した 1 命令あたりの時間(5 命令のループ): 翻訳ブロック(コンパイル済み段階)と高速コアのみ。
         using var timing = new EmuEnvironment(memory: new byte[0x10000]);
         Loop(0x3000).CopyTo(timing.OneMegaMemory_, 0x100);
-        double Steps(bool translate)
+        double PerInstruction(bool translate)
         {
             timing.Translations.Enabled = translate;
             timing.Translations.InvalidateAll();
             var executor = new InstructionExecutor(true);
             var state = Start();
-            for (var warm = 0; warm < 100_000; warm++) { executor.Step(timing, state); if (state.eip == 0x110) state.eip = 0x100; }
-            const int steps = 2_000_000;
+            long executed = 0;
+            void Run(long target)
+            {
+                executed = 0;
+                while (executed < target) { executor.Step(timing, state); executed += executor.Executed; if (state.eip == 0x110) state.eip = 0x100; }
+            }
+            Run(500_000);
             var watch = System.Diagnostics.Stopwatch.StartNew();
-            for (var index = 0; index < steps; index++) { executor.Step(timing, state); if (state.eip == 0x110) state.eip = 0x100; }
-            return watch.Elapsed.TotalMilliseconds * 1_000_000.0 / steps;
+            Run(5_000_000);
+            return watch.Elapsed.TotalMilliseconds * 1_000_000.0 / executed;
         }
-        Console.WriteLine($"executor ns/step over a 5-instruction loop: fast core {Steps(false):F1}, translated {Steps(true):F1}");
+        Console.WriteLine($"executor ns/instruction over a 5-instruction loop: fast core {PerInstruction(false):F1}, translated block {PerInstruction(true):F1}");
     }
 
     static void Integration()

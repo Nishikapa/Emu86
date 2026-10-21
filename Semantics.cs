@@ -90,11 +90,15 @@ public sealed record SetRegStmt(int Reg, int Type, Expr Value) : Stmt
     public override void Run(EmuEnvironment env, CPU cpu) => Semantics.WriteRegister(cpu, Reg, Type, Value.Evaluate(env, cpu));
 }
 
-public sealed record StoreStmt(Expr Address, int Type, Expr Value) : Stmt
+// ReadsFirst は読み書き(RMW: ADD [m], r や INC [m])で、実機と同じく読み取りの検査を先に行う(不在ページでは読み取りフォルトになる)。
+public sealed record StoreStmt(Expr Address, int Type, Expr Value, bool ReadsFirst) : Stmt
 {
+    // 書き込み先を先に検査(Probe)してから値を評価する。値の評価がフラグを変えるので、
+    // ページフォルトは状態を変える前に出す(ブロック翻訳ではこの順序がフォルトの精密性を担う)。
     public override void Run(EmuEnvironment env, CPU cpu)
     {
         var address = Address.Evaluate(env, cpu);
+        Semantics.Probe(env, address, Type, ReadsFirst);
         Semantics.Store(env, address, Type, Value.Evaluate(env, cpu));
     }
 }
@@ -161,9 +165,9 @@ public static class Semantics
     static Emit<Expr> IncDec(Expr value, int delta, int type) => _ => new IncDecExpr(value, delta, type);
     static Emit<Expr> Pop(int type) => _ => new PopExpr(type);
     static Emit<Expr> Extend(Expr value, int fromType, bool signed, int toType) => _ => new ExtendExpr(value, fromType, signed, toType);
-    static Emit<Unit> Write(Place place, int type, Expr value) => sink =>
+    static Emit<Unit> Write(Place place, int type, Expr value, bool readsFirst = false) => sink =>
     {
-        sink.Add(place.Address == null ? new SetRegStmt(place.Reg, type, value) : new StoreStmt(place.Address, type, value));
+        sink.Add(place.Address == null ? new SetRegStmt(place.Reg, type, value) : new StoreStmt(place.Address, type, value, readsFirst));
         return Unit.unit;
     };
     static Emit<Unit> Push(int type, Expr value) => sink => { sink.Add(new PushStmt(type, value)); return Unit.unit; };
@@ -182,7 +186,7 @@ public static class Semantics
         from left in Read(dst, type)
         from right in src
         from result in Alu(kind, left, right, type)
-        from _1 in kind == 7 ? Evaluate(result) : Write(dst, type, result)
+        from _1 in kind == 7 ? Evaluate(result) : Write(dst, type, result, readsFirst: true)
         from _2 in Advance(length)
         select Unit.unit;
 
@@ -211,7 +215,7 @@ public static class Semantics
     static Emit<Unit> IncrementDecrement(Place place, int delta, int type, int length) =>
         from value in Read(place, type)
         from result in IncDec(value, delta, type)
-        from _1 in Write(place, type, result)
+        from _1 in Write(place, type, result, readsFirst: true)
         from _2 in Advance(length)
         select Unit.unit;
 
@@ -285,8 +289,14 @@ public static class Semantics
         return new Block(sink);
     }
 
+    // 制御転送(ブロックの終端になる命令)。
+    public static bool IsBranch(int opcode) => opcode is (>= 0x70 and <= 0x7F) or 0xE9 or 0xEB or (>= 0x0F80 and <= 0x0F8F);
+
     /// 解釈器(各ノードの Evaluate/Run) ///////////////////////////////
     public static void Interpret(Stmt statement, EmuEnvironment env, CPU cpu) => statement.Run(env, cpu);
+
+    // ブロック翻訳向け: 1 命令の IR を、与えられたパラメータ式に対する式木にする。
+    public static Expression CompileInto(Stmt statement, ParameterExpression env, ParameterExpression cpu) => CompileStatement(statement, env, cpu);
 
     /// コンパイラ(System.Linq.Expressions) ///////////////////////////////
     public static Action<EmuEnvironment, CPU> Compile(Block block)
@@ -303,7 +313,7 @@ public static class Semantics
     static Expression CompileStatement(Stmt statement, ParameterExpression env, ParameterExpression cpu) => statement switch
     {
         SetRegStmt set => Call(nameof(WriteRegister), cpu, Expression.Constant(set.Reg), Expression.Constant(set.Type), CompileExpression(set.Value, env, cpu)),
-        StoreStmt store => Call(nameof(Store), env, CompileExpression(store.Address, env, cpu), Expression.Constant(store.Type), CompileExpression(store.Value, env, cpu)),
+        StoreStmt store => CompileStore(store, env, cpu),
         PushStmt push => Call(nameof(Push), env, cpu, Expression.Constant(push.Type), CompileExpression(push.Value, env, cpu)),
         EvalStmt eval => CompileExpression(eval.Value, env, cpu),
         AdvanceStmt advance => Expression.AddAssign(Expression.Property(cpu, nameof(CPU.eip)), Expression.Constant((uint)advance.Length)),
@@ -313,6 +323,16 @@ public static class Semantics
         Block block => Expression.Block(block.Statements.Select(inner => CompileStatement(inner, env, cpu))),
         _ => throw new ArgumentOutOfRangeException(nameof(statement)),
     };
+
+    // アドレスを評価 → 書き込み先を検査 → 値を評価 → 書く(解釈器と同じ順序)。
+    static Expression CompileStore(StoreStmt store, ParameterExpression env, ParameterExpression cpu)
+    {
+        var address = Expression.Variable(typeof(uint), "address");
+        return Expression.Block([address],
+            Expression.Assign(address, CompileExpression(store.Address, env, cpu)),
+            Call(nameof(Probe), env, address, Expression.Constant(store.Type), Expression.Constant(store.ReadsFirst)),
+            Call(nameof(Store), env, address, Expression.Constant(store.Type), CompileExpression(store.Value, env, cpu)));
+    }
 
     static Expression CompileExpression(Expr expr, ParameterExpression env, ParameterExpression cpu) => expr switch
     {
@@ -374,7 +394,33 @@ public static class Semantics
 
     public static void Store(EmuEnvironment env, uint address, int type, uint value) => EnvWriteN(env, address, type == 0 ? 1 : type == 1 ? 2 : 4, value);
 
-    public static void Push(EmuEnvironment env, CPU cpu, int type, uint value) => FPush(env, cpu, type, value);
+    // 書き込み先のページを(ページ境界をまたぐなら両方)変換し、不在・保護違反ならここで #PF にする。
+    // readsFirst(読み書き命令)なら、実機と同じく読み取りの変換を先に行う: 不在ページでは読み取りフォルト(err=0)、
+    // 存在するが書き込み禁止なら書き込みフォルト(err=3)になる。変換結果は TLB に残るので、その後の Store はフォルトしない。
+    public static void Probe(EmuEnvironment env, uint address, int type, bool readsFirst)
+    {
+        if (!env.PagingOn) return;
+        var size = type == 0 ? 1 : type == 1 ? 2 : 4;
+        var crosses = (address & 0xFFF) > 0x1000 - (uint)size;
+        if (readsFirst)
+        {
+            EnvTranslate(env, address, false);
+            if (crosses) EnvTranslate(env, address + (uint)size - 1, false);
+        }
+        EnvTranslate(env, address, true);
+        if (crosses) EnvTranslate(env, address + (uint)size - 1, true);
+    }
+
+    // PUSH: 書き込み先を検査して書いてから SP/ESP を減らす(高速コアは先に減らす。フォルト時に SP を変えないための順序)。
+    public static void Push(EmuEnvironment env, CPU cpu, int type, uint value)
+    {
+        var size = type == 0 ? 1 : type == 1 ? 2 : 4;
+        var pointer = cpu.stack32 ? (uint)(cpu.esp - size) : (ushort)(cpu.sp - size);
+        var address = cpu.ss_base + pointer;
+        Probe(env, address, type, readsFirst: false);
+        EnvWriteN(env, address, size, value);
+        if (cpu.stack32) cpu.esp = pointer; else cpu.sp = (ushort)pointer;
+    }
 
     public static uint Pop(EmuEnvironment env, CPU cpu, int type) => FPop(env, cpu, type);
 
