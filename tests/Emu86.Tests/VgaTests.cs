@@ -622,9 +622,40 @@ static class VgaTests
         Equal(true, quiet.ToString().Contains("no operating system menu, assuming automatic selection (instr 8410000)"), "timeout is logged");
     }
 
+    // 既定 DAC: EGA 互換の 64 色(リセット時と mode 3)と、mode 13h の 256 色(16 色 + グレー 16 + 色相環 216 + 黒 8)。
+    // 期待値は従来のループ実装の式から手で計算したもの。
+    static void Palette()
+    {
+        using var env = new EmuEnvironment(memory: new byte[0x100000]);
+        string Rgb(int index) => $"{env.Vga.Dac[index * 3]:X2},{env.Vga.Dac[index * 3 + 1]:X2},{env.Vga.Dac[index * 3 + 2]:X2}";
+        Equal("00,00,00", Rgb(0), "reset: black");
+        Equal("00,00,2A", Rgb(1), "reset: blue is bit0");
+        Equal("2A,00,00", Rgb(4), "reset: red is bit2");
+        Equal("15,15,15", Rgb(0x38), "reset: intensity bits add 0x15");
+        Equal("3F,3F,3F", Rgb(0x3F), "reset: white");
+        Equal("00,00,00", Rgb(64), "reset: colors above 64 are black");
+        VgaBiosStub.SetMode(env, 0x13);
+        Equal("00,00,2A", Rgb(1), "mode 13h: entry 1 is EGA blue");
+        Equal("15,15,15", Rgb(8), "mode 13h: entry 8 is EGA dark gray (palette index 0x38)");
+        Equal("2A,2A,2A", Rgb(7), "mode 13h: entry 7 is EGA light gray (palette index 0x07)");
+        Equal("3F,3F,3F", Rgb(15), "mode 13h: entry 15 is white");
+        Equal("00,00,00", Rgb(16), "mode 13h: first gray");
+        Equal("3F,3F,3F", Rgb(31), "mode 13h: last gray");
+        Equal("10,10,3F", Rgb(32), "mode 13h: hue ring starts at blue");
+        Equal("1B,10,3F", Rgb(33), "mode 13h: blue toward magenta (integer interpolation)");
+        Equal("3F,10,3F", Rgb(36), "mode 13h: magenta");
+        Equal("10,1C,3F", Rgb(55), "mode 13h: cyan toward blue");
+        Equal("3F,1F,1F", Rgb(56 + 8), "mode 13h: second saturation level, red");
+        Equal("07,07,1C", Rgb(32 + 72), "mode 13h: second brightness level starts at dark blue");
+        Equal("00,00,00", Rgb(248), "mode 13h: trailing entries are black");
+        VgaBiosStub.SetMode(env, 0x03);
+        Equal("2A,00,00", Rgb(4), "mode 3: back to the EGA table");
+        Equal("00,00,00", Rgb(100), "mode 3: no 256-color entries");
+    }
+
     public static void Run()
     {
-        MemoryWindow(); PlanarAndChain4(); Registers(); Rendering(); VirtualMode(); KeyboardInterrupt(); BiosStub(); PciRom(); IretPrivilegeCheck(); Mouse(); ResetRequest(); Serial(); BootMenuAutomation(); BootMenuTimeouts();
+        MemoryWindow(); PlanarAndChain4(); Registers(); Rendering(); VirtualMode(); KeyboardInterrupt(); BiosStub(); PciRom(); IretPrivilegeCheck(); Mouse(); ResetRequest(); Serial(); BootMenuAutomation(); BootMenuTimeouts(); Palette();
         Console.WriteLine($"VGA/V86/keyboard assertions passed: {assertions}");
     }
 }
