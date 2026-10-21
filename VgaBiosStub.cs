@@ -23,52 +23,35 @@ public static class VgaBiosStub
 
     public static readonly byte[] Rom = BuildRom();
 
-    static byte[] BuildRom()
-    {
-        var rom = new byte[RomSize];
-        rom[0] = 0x55; rom[1] = 0xAA; rom[2] = RomSize / 512;
-        rom[3] = 0xEB; rom[4] = (byte)(InitOffset - 5); // jmp short init
-        // PCI データ構造(オフセット 0x18 のポインタから)。SeaBIOS は ROM のベンダ/デバイス ID が
-        // 取り込み元の PCI デバイスと一致することを確認してから init を呼ぶ。
-        rom[0x18] = PcirOffset; rom[0x19] = 0x00;
-        byte[] pcir =
-        [
-            (byte)'P', (byte)'C', (byte)'I', (byte)'R',
-            0x34, 0x12,             // ベンダ 1234
-            0x11, 0x11,             // デバイス 1111
-            0x00, 0x00,             // VPD ポインタ
-            0x18, 0x00,             // 構造体長
-            0x00,                   // リビジョン
-            0x00, 0x00, 0x03,       // クラス: VGA 互換(prog-if, sub, base)
-            RomSize / 512, 0x00,    // イメージ長(512 バイト単位)
-            0x00, 0x00,             // コードリビジョン
-            0x00,                   // コード種別: x86
-            0x80,                   // 最後のイメージ
-            0x00, 0x00,
-        ];
-        pcir.CopyTo(rom, PcirOffset);
-        byte[] init =
-        [
-            0x1E,                               // push ds
-            0x31, 0xC0,                         // xor ax, ax
-            0x8E, 0xD8,                         // mov ds, ax
-            0xC7, 0x06, 0x40, 0x00, ServiceOffset, 0x00, // mov word [0x40], handler
-            0xC7, 0x06, 0x42, 0x00, 0x00, 0xC0, // mov word [0x42], 0xC000
-            0x1F,                               // pop ds
-            0xB8, 0x03, 0x00,                   // mov ax, 0x0003
-            0xCD, 0x10,                         // int 10h
-            0xCB,                               // retf
-        ];
-        init.CopyTo(rom, InitOffset);
-        byte[] handler = [0x0F, 0x0B, 0xCF];    // ud2 (サービス呼び出し); iret
-        handler.CopyTo(rom, ServiceOffset);
-        var text = System.Text.Encoding.ASCII.GetBytes("Emu86 VGA BIOS stub");
-        text.CopyTo(rom, 0x100);
-        var sum = 0;
-        for (var index = 0; index < RomSize - 1; index++) sum += rom[index];
-        rom[RomSize - 1] = (byte)(-sum);
-        return rom;
-    }
+    // ROM の構造: 署名と jmp short init、PCI データ構造(SeaBIOS は ROM のベンダ/デバイス ID が取り込み元の
+    // PCI デバイスと一致することを確認してから init を呼ぶ)、init(IVT 10h をハンドラへ向けて mode 3 を設定)、
+    // ハンドラ(ud2 でサービス呼び出し、iret)、識別文字列、チェックサム。
+    static byte[] BuildRom() => new RomBuilder(RomSize)
+        .Db(0x55, 0xAA, RomSize / 512)                  // 署名とサイズ(512 バイト単位)
+        .JmpShort("init")
+        .At(0x18).Dw("pcir")                            // PCI データ構造へのポインタ
+        .At(PcirOffset).Label("pcir")
+        .Ascii("PCIR")
+        .Dw(0x1234).Dw(0x1111)                          // ベンダ、デバイス
+        .Dw(0x0000).Dw(0x0018).Db(0x00)                 // VPD ポインタ、構造体長、リビジョン
+        .Db(0x00, 0x00, 0x03)                           // クラス: VGA 互換(prog-if, sub, base)
+        .Dw(RomSize / 512).Dw(0x0000)                   // イメージ長(512 バイト単位)、コードリビジョン
+        .Db(0x00, 0x80).Dw(0x0000)                      // コード種別 x86、最後のイメージ
+        .At(InitOffset).Label("init")
+        .Db(0x1E)                                       // push ds
+        .Db(0x31, 0xC0)                                 // xor ax, ax
+        .Db(0x8E, 0xD8)                                 // mov ds, ax
+        .Db(0xC7, 0x06, 0x40, 0x00).Dw("handler")       // mov word [0x40], handler
+        .Db(0xC7, 0x06, 0x42, 0x00).Dw(0xC000)          // mov word [0x42], 0xC000
+        .Db(0x1F)                                       // pop ds
+        .Db(0xB8, 0x03, 0x00)                           // mov ax, 0x0003
+        .Db(0xCD, 0x10)                                 // int 10h
+        .Db(0xCB)                                       // retf
+        .At(ServiceOffset).Label("handler")
+        .Db(0x0F, 0x0B)                                 // ud2(サービス呼び出し)
+        .Db(0xCF)                                       // iret
+        .At(0x100).Ascii("Emu86 VGA BIOS stub")
+        .Checksum();
 
     // ROM を 0xC0000 へ置き、IVT 10h をハンドラへ向ける(INT 19h のたびに呼んでも同じ結果)。
     public static void Install(EmuEnvironment env)
