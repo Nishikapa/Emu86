@@ -32,6 +32,24 @@ static public partial class Ext
 
     static public State<Unit> Unless(bool condition, State<Unit> state) => When(!condition, state);
 
+    // 2 つの State を順に実行する(値は捨てる)。クエリ構文の複数 from と違い、評価のたびに中間オブジェクトを作らない。
+    static public State<Unit> Then(this State<Unit> first, State<Unit> second) =>
+        first.SelectMany(_ => second, (_, _) => Unit.unit);
+
+    // 条件が成り立つ間 body を繰り返す(0 回以上)。body が失敗したらその時点の CPU で失敗を返す(ロールバックはしない)。
+    static public State<Unit> While(Func<CPU, bool> condition, State<Unit> body) => (env, cpu, ope) =>
+    {
+        var log = string.Empty;
+        while (condition(cpu))
+        {
+            var (ok, _, next, bodyLog) = body(env, cpu, ope);
+            if (!ok) return (false, default, next, bodyLog);
+            cpu = next;
+            log = bodyLog;
+        }
+        return (true, Unit.unit, cpu, log);
+    };
+
     static public State<B> Select<A, B>(this State<A> stateA, Func<A, B> selector)
     {
         if (default == stateA)

@@ -180,6 +180,20 @@ static class StateTests
         Equal(2, executed, "unless with a false condition runs the body");
         Equal(true, ReferenceEquals(When(false, body), Pass), "when reuses the shared no-op");
 
+        // While: 条件が偽なら 0 回、本体の失敗はその時点の CPU で伝わる。
+        var ticks = 0;
+        cpu.edx = 3;
+        var countdown = While(state => state.edx != 0, SetCpu(state => { ticks++; state.edx--; return state; }));
+        Equal(0, ticks, "while is deferred");
+        var looped = countdown(env, cpu, null);
+        Equal((true, 3, 0u), (looped.IsSuccess, ticks, cpu.edx), "while runs until the condition fails");
+        Equal(cpu, looped.cpu, "while returns the CPU instance");
+        Equal((true, 3), (countdown(env, cpu, null).IsSuccess, ticks), "while with a false condition runs zero times");
+        cpu.edx = 5;
+        State<Unit> ticking = (context, state, opcodes) => { state.edx--; return (state.edx != 3, Unit.unit, state, "tick"); };
+        var aborted = While(state => state.edx != 0, ticking)(env, cpu, null);
+        Equal((false, 3u, "tick"), (aborted.IsSuccess, cpu.edx, aborted.log), "while stops at the first failing iteration");
+
         cpu.ecx = 10;
         var modify = CPU._ecx.Modify(value => value * 3);
         Equal(10u, cpu.ecx, "modify is deferred");
