@@ -71,8 +71,9 @@ public sealed class InstructionExecutor(bool useFast = true)
             if (!result.IsSuccess) Restore(env, cpu, false);
             return (result.IsSuccess, result.value, cpu, result.log);
         }
-        catch (PageFaultException)
+        catch (CpuFaultException)
         {
+            // フォルト(#PF/#GP)は命令開始時の状態へ戻す。REP は完了済みの反復を保って再開する。
             Restore(env, cpu, true);
             throw;
         }

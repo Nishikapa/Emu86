@@ -143,7 +143,7 @@ static State<Unit> Mov_8C =>
 
 クエリ構文の `where` 句はガードです（`Where` が実装されており、述語が偽なら失敗になります）。`POP r/m` の `where 0 == m.reg` のように、ModRM の `reg` フィールドで有効性を判定する命令に使います。失敗を返す句は CPU を変更する句より前に置いてください。`Choice` や `Many0` は失敗した枝の変更を巻き戻さないためです。条件付きの実行は `When(cond, state)` / `Unless(cond, state)`（偽なら何もしない `Pass`）、アクセサ経由の読み書き更新は `_cf.Modify(cf => !cf)` のように `Modify` で書きます。
 
-`InstructionExecutor` は命令開始前の CPU を退避し、未対応命令・例外時にレジスタと FPU を復元してページング状態を同期します。命令ごとのプレフィックスは `DecodeContext` に分離し、成功・失敗のどちらでも終了時に消去します。REP の途中でページフォルトが起きた場合は完了済みの反復の ECX・ESI・EDI・EAX・EFLAGS を保持し、命令先頭から残りの反復を再開します。メモリや I/O の既発生の副作用は取り消しません。割り込み配送にも同じ CPU 復元境界を適用します。
+`InstructionExecutor` は命令開始前の CPU を退避し、未対応命令・例外時にレジスタと FPU を復元してページング状態を同期します。フォルト（#PF/#GP）は命令の途中で `CpuFaultException` として投げられ、復元後にランナーへ伝わります。ランナーは未対応命令（#UD）も含めて `Fault` 値にまとめ、IDT が整っていれば `Raise` で命令開始時の状態から配送し、整っていなければ停止します。命令ごとのプレフィックスは `DecodeContext` に分離し、成功・失敗のどちらでも終了時に消去します。REP の途中でページフォルトが起きた場合は完了済みの反復の ECX・ESI・EDI・EAX・EFLAGS を保持し、命令先頭から残りの反復を再開します。メモリや I/O の既発生の副作用は取り消しません。割り込み配送にも同じ CPU 復元境界を適用します。
 
 ### 命令ディスパッチ
 
@@ -180,6 +180,7 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | `Fpu.cs` | x87 FPU。ST スタック 8 本を double で保持し、80 ビット拡張実数と相互変換。ロード/ストア、四則演算、比較、超越関数、FNSAVE/FRSTOR。 |
 | `FastCore.cs` | 高速実行コア。プレフィックスと ModRM のデコードは `CodeParser.cs`、演算規則は `Alu.cs`、メモリアクセスは `Environment.cs` の共通処理を使用し、未対応命令は通常コアへ委譲。 |
 | `InstructionExecutor.cs` | 両コアの実行・CPU 復元境界、命令ごとのデコード状態、REP の再開位置。 |
+| `Fault.cs` | CPU 例外の値 `Fault`（ベクタ・エラーコード・#PF の線形アドレス）と、命令の途中で投げる `CpuFaultException`（`PageFaultException`/`GeneralProtectionException`）。ランナーは #UD/#PF/#GP を同じ `Raise` で配送する。 |
 | `CodeParser.cs` | 命令バイト列の読み口 `CodeSource`（CS:(E)IP 相対、16 ビット IP の折り返し、必要なバイトだけを遅延フェッチ）と Parser モナド `Parser<T>`（`Select`/`SelectMany`/`Where`/`Or`/`Fold`）。両コアが共有するプレフィックスの畳み込み（`Prefixes`）、ModRM/SIB/変位の構造（`ParseModRm`）、実効アドレスの計算（`EffectiveAddress`）。 |
 | `InstructionDecoding.cs` / `Registers.cs` | 通常コアの ModRM 読み取り State（`CodeParser.cs` の共有デコーダを呼び、消費した分だけ EIP を進める）と、両コア共通の配列を作らないレジスタ参照。 |
 | `Program.Runner.cs` / `RunOptions.cs` | CLI の起動処理、オプションの表（名前・引数・説明・値のパーサ・適用）、ウィンドウ付き実行と別スレッドでの実行ループ、ゲストリセット時の環境再生成、セクタダンプ。解析と `--help` の一覧は同じ表から作る。 |

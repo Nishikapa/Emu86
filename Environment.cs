@@ -3,17 +3,6 @@ using static Emu86.CPU;
 
 namespace Emu86;
 
-// ページフォルト。Runner が捕捉して #PF(ベクタ 14)を IDT 経由で配送する。
-// errorCode: bit0=保護違反(1)/不在(0)、bit1=書き込み、bit2=ユーザ。
-public class PageFaultException(uint linear, uint errorCode) : Exception
-{
-    public uint Linear => linear;
-    public uint ErrorCode => errorCode;
-    public override string Message =>
-        $"PAGE FAULT lin={linear:x8} err={errorCode:x} " +
-        $"({((errorCode & 1) != 0 ? "protection" : "not-present")}, {((errorCode & 2) != 0 ? "write" : "read")})";
-}
-
 static public partial class Ext
 {
     /// Paging //////////////////////////////////
@@ -442,26 +431,26 @@ static public partial class Ext
 
     // V86 モードの INT n: IOPL<3 なら #GP(0)。IOPL=3 でも IDT ゲートの DPL が 3 未満なら
     // #GP(vector*8+2) になる(NT はこれを KiTrap0D で受けて IVT 経由の反射をソフトウェアで行う)。
-    // #GP はフォルトなので、EIP を INT 命令の先頭(2 バイト前)へ戻してから配送する。
     static public State<Unit> InterruptFromV86(int vector) =>
         from gateHi in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryData32(env, cpu.idt_base + (uint)vector * 8 + 4))
         from cpu in GetCpu
         let iopl = (cpu.eflags >> 12) & 3
         let dpl = (gateHi >> 13) & 3
-        from _ in iopl < 3 ? GeneralProtection(0, 2)
-                : dpl < 3 ? GeneralProtection(((uint)vector << 3) | 2, 2)
+        from _ in iopl < 3 ? GeneralProtection(0)
+                : dpl < 3 ? GeneralProtection(((uint)vector << 3) | 2)
                 : Interrupt(vector)
         select Unit.unit;
 
-    static public State<Unit> GeneralProtection(uint errorCode, int instructionLength) =>
-        from _1 in IpInc(-instructionLength)
-        from _2 in InterruptProtected(13, hasError: true, errorCode)
-        select Unit.unit;
+    // #GP を起こす。フォルトなので命令は完了せず、InstructionExecutor が命令開始時の CPU へ戻し、
+    // ランナーがそこから Raise で配送する(#PF と同じ経路)。
+    static public State<Unit> GeneralProtection(uint errorCode) =>
+        (env, cpu, ope) => throw new GeneralProtectionException(errorCode);
 
-    // #PF(ベクタ 14): CR2 にフォルトアドレスを設定し、エラーコードを push して配送する。
-    static public State<Unit> PageFault(uint linear, uint errorCode) =>
-        from _1 in SetCpu(cpu => { cpu.cr2 = linear; return cpu; })
-        from _2 in InterruptProtected(14, hasError: true, errorCode)
+    // フォルトの配送(命令開始時の状態から)。#PF は CR2 にフォルトアドレスを入れ、
+    // エラーコードを持つ例外はそれを push する。
+    static public State<Unit> Raise(Fault fault) =>
+        from _1 in fault.Linear is uint linear ? _cr2.Set(linear) : Pass
+        from _2 in InterruptProtected(fault.Vector, hasError: fault.ErrorCode is not null, fault.ErrorCode ?? 0)
         select Unit.unit;
 
     // リアルモードの INT 19h(SeaBIOS の POST 完了後のブート)で VGA BIOS スタブを導入する
@@ -590,7 +579,7 @@ static public partial class Ext
     static State<Unit> Iret32 =>
         from fault in GetDataFromEnvCpu(IretTargetFault)
         from _ in fault is uint selector
-            ? GeneralProtection(selector, 1)
+            ? GeneralProtection(selector)
             : (from eip in Pop(2)
                from cs in Pop(2)
                from fl in Pop(2)

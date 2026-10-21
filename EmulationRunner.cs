@@ -74,9 +74,9 @@ internal static class EmulationRunner
                         var irq = executor.Execute(env, cpu, IrqDelivery.Pending(line));
                         if (irq.IsSuccess) cpu = irq.cpu;
                     }
-                    catch (PageFaultException pf)
+                    catch (CpuFaultException exception)
                     {
-                        output.WriteLine($"FAULT during {IrqDelivery.Name(line)} IRQ delivery: lin={pf.Linear:x8} err={pf.ErrorCode:x} at {cpu.cs:x4}:{cpu.eip:x8} esp={cpu.esp:x8} (instr {count})");
+                        output.WriteLine($"FAULT during {IrqDelivery.Name(line)} IRQ delivery: {exception.Fault.Describe()} at {cpu.cs:x4}:{cpu.eip:x8} esp={cpu.esp:x8} (instr {count})");
                         break;
                     }
                 }
@@ -85,64 +85,59 @@ internal static class EmulationRunner
             var beforeCs = cpu.cs;
             var beforeEip = cpu.eip;
             if (diagnostics.BeforeInstruction(count)) break;
-            var instructionCompleted = true;
+            // 命令が完了せずフォルトになった場合はここに入る(#UD は実行器の失敗、#PF/#GP は例外)。
+            Fault? fault = null;
             try
             {
                 // まず高速コアで 1 命令実行し、未対応の命令だけモナド版へフォールバックする。
                 var result = executor.Step(env, cpu);
                 if (executor.UsedFastPath) fastCount++;
-                if (!result.IsSuccess && VgaBiosStub.TryService(env, cpu))
-                {
-                    // VGA BIOS スタブ(C000:0060 の UD2)のサービス呼び出し。C# 側で処理済み。
-                }
-                else if (!result.IsSuccess)
-                {
-                    // 未定義/未対応命令。プロテクトモードで IDT が整っていれば #UD(ベクタ 6)として
-                    // 命令開始時の状態から配送する(Virtual PC のハイパーコール命令 0F C7 C8 のように、
-                    // OS 側が例外を前提に実行する不正命令がある)。診断のため先頭数十回はログに残す。
-                    if (!cpu.pe || cpu.idt_limit < 6 * 8 + 7)
-                        break;
-                    diagnostics.UndefinedInstruction(count);
-                    var ud = executor.Execute(env, cpu, Interrupt(6));
-                    if (!ud.IsSuccess) { output.WriteLine("#UD delivery failed"); break; }
-                    cpu = ud.cpu;
-                }
-                else
+                if (result.IsSuccess)
                     cpu = result.cpu;
+                else if (!VgaBiosStub.TryService(env, cpu)) // VGA BIOS スタブ(C000:0060 の UD2)なら C# 側で処理済み
+                {
+                    // 未定義/未対応命令は #UD(ベクタ 6)。Virtual PC のハイパーコール命令 0F C7 C8 のように、
+                    // OS 側が例外を前提に実行する不正命令がある。
+                    fault = Fault.UndefinedOpcode;
+                }
             }
-            catch (PageFaultException pf)
+            catch (CpuFaultException exception)
             {
-                // 命令前状態へ巻き戻してから #PF を IDT 経由で配送する。
-                // IDT が未整備(プロテクトモードでない/limit 不足)なら停止する。
-                if (diagnostics.PageFault(pf, count)) break;
-                if (!cpu.pe || cpu.idt_limit < 14 * 8 + 7)
-                {
-                    output.WriteLine($"EXCEPTION at {cpu.cs:x4}:{cpu.eip:x8}: {pf.Message}");
-                    break;
-                }
-                try
-                {
-                    var pfr = executor.Execute(env, cpu, PageFault(pf.Linear, pf.ErrorCode));
-                    if (!pfr.IsSuccess) { output.WriteLine($"#PF delivery failed at {cpu.cs:x4}:{cpu.eip:x8}"); break; }
-                    cpu = pfr.cpu;
-                }
-                catch (PageFaultException pf2)
-                {
-                    // 配送中の再フォルト = ダブルフォルト相当。診断を出して停止する。
-                    output.WriteLine($"DOUBLE FAULT: #PF delivery faulted lin={pf2.Linear:x8} err={pf2.ErrorCode:x}");
-                    output.WriteLine($"  original #PF: lin={pf.Linear:x8} err={pf.ErrorCode:x} at {cpu.cs:x4}:{cpu.eip:x8} esp={cpu.esp:x8} (instr {count})");
-                    break;
-                }
-                instructionCompleted = false;
+                fault = exception.Fault;
             }
             catch (Exception ex)
             {
                 output.WriteLine($"EXCEPTION at {cpu.cs:x4}:{cpu.eip:x8}: {ex.GetType().Name}: {ex.Message}");
                 break;
             }
+            if (fault is Fault raised)
+            {
+                // 命令開始時の状態(InstructionExecutor が巻き戻し済み)から IDT 経由で配送する。
+                // IDT が未整備(プロテクトモードでない/limit 不足)なら停止する。
+                if (diagnostics.Fault(raised, count)) break;
+                if (!raised.IdtReady(cpu))
+                {
+                    if (raised.Vector != 6) output.WriteLine($"EXCEPTION at {cpu.cs:x4}:{cpu.eip:x8}: {raised.Message}");
+                    break;
+                }
+                try
+                {
+                    var delivered = executor.Execute(env, cpu, Raise(raised));
+                    if (!delivered.IsSuccess) { output.WriteLine($"{raised.Name} delivery failed at {cpu.cs:x4}:{cpu.eip:x8}"); break; }
+                    cpu = delivered.cpu;
+                }
+                catch (CpuFaultException second)
+                {
+                    // 配送中の再フォルト = ダブルフォルト相当。診断を出して停止する。
+                    output.WriteLine($"DOUBLE FAULT: {raised.Name} delivery faulted {second.Fault.Describe()}");
+                    output.WriteLine($"  original {raised.Name}: {raised.Describe()} at {cpu.cs:x4}:{cpu.eip:x8} esp={cpu.esp:x8} (instr {count})");
+                    break;
+                }
+            }
             count++;
             env.Tsc = (ulong)count; // RDTSC の代用カウンタ
-            if (instructionCompleted && diagnostics.AfterInstruction(beforeCs, beforeEip, count)) break;
+            // #PF の配送は命令完了トレースに含めない(#UD/#GP の配送は従来どおり命令の完了として扱う)。
+            if (fault?.Vector != 14 && diagnostics.AfterInstruction(beforeCs, beforeEip, count)) break;
             if (swatch.ElapsedMilliseconds >= 5000)
             {
                 var rate = (count - lastReport) * 1000.0 / swatch.ElapsedMilliseconds;
