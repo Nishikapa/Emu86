@@ -10,6 +10,9 @@ internal readonly record struct AddressRange(uint Lo, uint Hi)
 
 internal sealed class DiagnosticOptions
 {
+    // 命令ごとに CPU を見る診断が有効か(翻訳ブロックは複数命令をまとめて実行するので、これらのときは使わない)。
+    public bool PerInstruction => TraceAll || RegTrace || BranchHistory || EspTrap || WatchValue != null || BreakEax != null
+        || BreakEip != 0 || BreakAt != 0 || EntryLog.Hi != 0 || BreakRange.Hi != 0 || WriteLog != null || Watch.Hi != 0;
     public bool TraceAll { get; set; }
     public bool RegTrace { get; set; }
     public bool NoTrace { get; set; }
@@ -83,8 +86,8 @@ internal sealed class RunOptions
             Integer, (o, v) => o.SnapshotInterval = v == 0 ? long.MaxValue : v),
         Flag("Run", "--slow", "Run every instruction on the LINQ core instead of the fast core", o => o.Slow = true),
         Flag("Run", "--noirq", "Do not deliver hardware interrupts", o => o.NoIrq = true),
-        Flag("Run", "--translate", "Run hot instructions through the IR translation cache (experimental; see docs/adr/0002)", o => o.Translate = true),
-        Of("Run", "--compile-after", "count", $"With --translate: compile an instruction to a delegate after count executions (default {TranslationCache.CompileAfter})",
+        Flag("Run", "--translate", "Run hot basic blocks through the IR translation cache (about 20% faster; disabled with per-instruction diagnostics; see docs/adr/0002)", o => o.Translate = true),
+        Of("Run", "--compile-after", "count", $"With --translate: compile a block to a delegate after count executions (default {TranslationCache.CompileAfter})",
             Integer, (o, v) => TranslationCache.CompileAfter = v > int.MaxValue ? int.MaxValue : (int)v),
         Flag("Run", "--window", "Show the VGA display in a 640x480 window (keyboard and mouse go to the guest)", o => o.Window = true),
         Of("Run", "--com1", "name", @"Serve COM1 on \\.\pipe\name (WinDbg: com:pipe,port=\\.\pipe\name,resets=0,reconnect)", Value, (o, v) => o.Com1Pipe = v),

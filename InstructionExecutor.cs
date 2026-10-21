@@ -47,8 +47,14 @@ public sealed class InstructionExecutor(bool useFast = true)
     readonly CPU checkpoint = new();
     readonly State<Unit> decoded = Program.ExecuteDecoded;
     public bool UsedFastPath { get; private set; }
-    // 翻訳キャッシュのコンパイル済みデリゲートで実行した(UsedFastPath も真)。
+    // 翻訳キャッシュ(IR のブロック)で実行した(UsedFastPath も真)。
     public bool UsedTranslation { get; private set; }
+    // この Step で実行してよい命令数(翻訳ブロック用。呼び出し側が次のイベントまでの命令数を入れる)。
+    public int Budget = int.MaxValue;
+    // この Step で完了した命令数(通常は 1。翻訳ブロックは複数。失敗・フォルト時は完了した分だけ)。
+    public int Executed { get; private set; }
+    // 最後に完了した命令の先頭 EIP(トレース用。1 命令なら開始時の EIP)。
+    public uint LastEip { get; private set; }
 
     public (bool IsSuccess, Unit value, CPU cpu, string log) Step(EmuEnvironment env, CPU cpu) =>
         Execute(env, cpu, decoded, useFast);
@@ -59,26 +65,49 @@ public sealed class InstructionExecutor(bool useFast = true)
     (bool IsSuccess, Unit value, CPU cpu, string log) Execute(EmuEnvironment env, CPU cpu, State<Unit> instruction, bool tryFast)
     {
         cpu.Decode = default;
-        cpu.CopyTo(checkpoint);
         UsedFastPath = false;
         UsedTranslation = false;
+        Executed = 0;
+        LastEip = cpu.eip;
+        // 翻訳済みブロックがあれば IR で実行する。退避はしない: IR の規律によりフォルト時の CPU は失敗した命令の先頭の状態で、
+        // 完了した命令数はキャッシュが報告する。
+        if (tryFast && env.Translations.Enabled)
+        {
+            try
+            {
+                if (env.Translations.TryRun(env, cpu, Budget, out var executed, out var lastEip))
+                {
+                    Executed = executed;
+                    LastEip = lastEip;
+                    UsedFastPath = true;
+                    UsedTranslation = true;
+                    cpu.Decode = default;
+                    return (true, Unit.unit, cpu, string.Empty);
+                }
+            }
+            catch (CpuFaultException)
+            {
+                Executed = env.Translations.FaultExecuted;
+                LastEip = env.Translations.FaultLastEip;
+                UsedTranslation = true;
+                cpu.Decode = default;
+                throw;
+            }
+        }
+        cpu.CopyTo(checkpoint);
         try
         {
-            // 翻訳済みの命令はコンパイル済みデリゲートで、次に高速コアで、未対応の命令だけモナド版で実行する。
-            if (tryFast && env.Translations.Enabled && env.Translations.TryRun(env, cpu))
-            {
-                UsedFastPath = true;
-                UsedTranslation = true;
-                return (true, Unit.unit, cpu, string.Empty);
-            }
+            // 高速コアで 1 命令実行し、未対応の命令だけモナド版へフォールバックする。
             if (tryFast && FastStep(env, cpu))
             {
                 UsedFastPath = true;
+                Executed = 1;
                 return (true, Unit.unit, cpu, string.Empty);
             }
             var result = instruction(env, cpu, null);
             if (result.IsSuccess && !ReferenceEquals(result.cpu, cpu)) result.cpu.CopyTo(cpu);
-            if (!result.IsSuccess) Restore(env, cpu, false);
+            if (result.IsSuccess) Executed = 1;
+            else Restore(env, cpu, false);
             return (result.IsSuccess, result.value, cpu, result.log);
         }
         catch (CpuFaultException)

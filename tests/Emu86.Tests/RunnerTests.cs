@@ -107,6 +107,10 @@ static class RunnerTests
     static string HashText(string value) =>
         Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(value.Replace("\r\n", "\n"))));
 
+    // translateGolden: 同じ golden ケースを --translate 付きで走らせ、同じ命令数・状態・診断・トレースになることを確かめる
+    // (翻訳ブロックの予算が割り込み周期・上限・保存周期と一致し、分岐トレースが最後の命令から再現できること)。
+    static bool translateGolden;
+
     static void Compare(string[] args, Action<CPU, EmuEnvironment> setup = null, long start = 0)
     {
         using var env = new EmuEnvironment(memory: new byte[0x10000]);
@@ -117,16 +121,16 @@ static class RunnerTests
         using var output = new StringWriter();
         using var trace = new StringWriter();
         var snapshots = new List<long>();
-        var options = RunOptions.Parse(args);
+        var options = RunOptions.Parse(translateGolden ? [.. args, "--translate"] : args);
         var count = EmulationRunner.Run(options, env, cpu, start, trace, output, TextWriter.Null,
             (savedCount, savedCpu, savedEnv) => snapshots.Add(savedCount));
         var expected = GoldenCases[goldenIndex++];
         Equal(string.Join(" ", expected.Args), string.Join(" ", args), "golden arguments");
         Equal(expected.Start, start, "golden starting count");
-        Equal(expected.Count, count, "runner count");
-        Equal(expected.State, StateHash(cpu, env), "runner full state");
-        Equal(expected.Output, HashText(output.ToString()), "diagnostic output");
-        Equal(expected.Trace, HashText(trace.ToString()), "trace output");
+        Equal(expected.Count, count, $"runner count for {string.Join(" ", args)}{(translateGolden ? " --translate" : "")}");
+        Equal(expected.State, StateHash(cpu, env), $"runner full state for {string.Join(" ", args)}{(translateGolden ? " --translate" : "")}");
+        Equal(expected.Output, HashText(output.ToString()), $"diagnostic output for {string.Join(" ", args)}{(translateGolden ? " --translate" : "")}");
+        Equal(expected.Trace, HashText(trace.ToString()), $"trace output for {string.Join(" ", args)}{(translateGolden ? " --translate" : "")}");
         Equal(count, snapshots.Last(), "final snapshot callback");
     }
 
@@ -336,6 +340,7 @@ static class RunnerTests
     public static void Run()
     {
         Options(); Runners(); Environments(); CommandLine(); PauseResume(); InterruptSelection();
+        goldenIndex = 0; translateGolden = true; Runners(); translateGolden = false;
         Console.WriteLine($"Runner/environment checks passed: {assertions} assertions");
     }
 

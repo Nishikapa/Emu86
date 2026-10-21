@@ -18,7 +18,8 @@ internal static class EmulationRunner
         EnvSyncPaging(env, cpu);
         var diagnostics = new RunDiagnostics(options.Diagnostics, env, cpu, output, trace, count);
         var executor = new InstructionExecutor(useFast: !options.Slow);
-        env.Translations.Enabled = options.Translate && !options.Slow;
+        // 命令ごとに CPU を見る診断(全命令トレース・ブレークポイント・監視点)があるときは、ブロックをまとめて実行できない。
+        env.Translations.Enabled = options.Translate && !options.Slow && !options.Diagnostics.PerInstruction;
         var swatch = System.Diagnostics.Stopwatch.StartNew();
         long lastReport = count;
         long fastCount = 0;
@@ -85,27 +86,38 @@ internal static class EmulationRunner
             }
 
             var beforeCs = cpu.cs;
-            var beforeEip = cpu.eip;
             if (diagnostics.BeforeInstruction(count)) break;
+            // 翻訳ブロックの予算: 次のイベント(タイマ周期・サービス周期・スナップショット・上限)までの命令数。
+            // これでブロック実行の境界が 1 命令ずつの実行と一致する。
+            if (env.Translations.Enabled)
+            {
+                var budget = Math.Min((long)TranslationCache.MaxBlock, options.Limit - count);
+                if (!options.NoIrq) budget = Math.Min(budget, env.NextIrq - count);
+                budget = Math.Min(budget, Math.Min(nextService - count, nextSnapshot - count));
+                executor.Budget = (int)Math.Max(1, budget);
+            }
             // 命令が完了せずフォルトになった場合はここに入る(#UD は実行器の失敗、#PF/#GP は例外)。
             Fault? fault = null;
+            var completed = true;
             try
             {
                 // まず高速コアで 1 命令実行し、未対応の命令だけモナド版へフォールバックする。
                 var result = executor.Step(env, cpu);
-                if (executor.UsedFastPath) fastCount++;
-                if (executor.UsedTranslation) translatedCount++;
+                if (executor.UsedFastPath) fastCount += executor.Executed;
+                if (executor.UsedTranslation) translatedCount += executor.Executed;
                 if (result.IsSuccess)
                     cpu = result.cpu;
-                else if (!VgaBiosStub.TryService(env, cpu)) // VGA BIOS スタブ(C000:0060 の UD2)なら C# 側で処理済み
+                else
                 {
-                    // 未定義/未対応命令は #UD(ベクタ 6)。Virtual PC のハイパーコール命令 0F C7 C8 のように、
-                    // OS 側が例外を前提に実行する不正命令がある。
-                    fault = Fault.UndefinedOpcode;
+                    completed = false;
+                    // VGA BIOS スタブ(C000:0060 の UD2)なら C# 側で処理済み。それ以外の未定義/未対応命令は #UD(ベクタ 6)。
+                    // Virtual PC のハイパーコール命令 0F C7 C8 のように、OS 側が例外を前提に実行する不正命令がある。
+                    if (!VgaBiosStub.TryService(env, cpu)) fault = Fault.UndefinedOpcode;
                 }
             }
             catch (CpuFaultException exception)
             {
+                completed = false;
                 fault = exception.Fault;
             }
             catch (Exception ex)
@@ -117,6 +129,8 @@ internal static class EmulationRunner
             {
                 // 命令開始時の状態(InstructionExecutor が巻き戻し済み)から IDT 経由で配送する。
                 // IDT が未整備(プロテクトモードでない/limit 不足)なら停止する。
+                // 翻訳ブロックの途中で起きた場合、完了した命令の分を数えてから診断する。
+                count += executor.Executed;
                 if (diagnostics.Fault(raised, count)) break;
                 if (!raised.IdtReady(cpu))
                 {
@@ -137,10 +151,12 @@ internal static class EmulationRunner
                     break;
                 }
             }
-            count++;
+            // 完了した命令数(翻訳ブロックは複数。フォルト時は上で加算済み)に、完了しなかった 1 命令(#UD・フォルト・VGA BIOS スタブ)を足す。
+            count += (fault == null ? executor.Executed : 0) + (completed ? 0 : 1);
             env.Tsc = (ulong)count; // RDTSC の代用カウンタ
             // #PF の配送は命令完了トレースに含めない(#UD/#GP の配送は従来どおり命令の完了として扱う)。
-            if (fault?.Vector != 14 && diagnostics.AfterInstruction(beforeCs, beforeEip, count)) break;
+            // ブロックの途中の命令は順次実行なので、最後に完了した命令だけを見れば分岐トレースは同じになる。
+            if (fault?.Vector != 14 && diagnostics.AfterInstruction(beforeCs, executor.LastEip, count)) break;
             if (swatch.ElapsedMilliseconds >= 5000)
             {
                 var rate = (count - lastReport) * 1000.0 / swatch.ElapsedMilliseconds;
