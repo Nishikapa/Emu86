@@ -280,6 +280,29 @@ static class RunnerTests
 
     // 割り込み線の選択: IF・PIC のマスク・in-service・IDT の準備を見て、
     // 優先順(タイマ、キーボード、COM1、COM2、マウス、ATA)に 1 本だけ選ぶ。
+    // Windows 診断のゲストメモリ読み取り(Reader の合成): フレームチェーンの戻り番地、入口の引数とデバッグ文字列、読めないときの既定値。
+    static void GuestReaders()
+    {
+        using var env = new EmuEnvironment(memory: new byte[0x10000]);
+        var memory = env.OneMegaMemory_;
+        void Dword(uint address, uint value) => BitConverter.GetBytes(value).CopyTo(memory, address);
+        Dword(0x1000, 0x2000); Dword(0x1004, 0xAAAA1111); // フレーム 1: 次 0x2000、戻り番地
+        Dword(0x2000, 0); Dword(0x2004, 0xBBBB2222);      // フレーム 2: 終端
+        var cpu = new CPU { ebp = 0x1000, esp = 0x3000, eip = 0x401000 };
+        Equal("aaaa1111 bbbb2222 ", WindowsDiagnostics.Caller(env, cpu), "return addresses along the frame chain");
+        Dword(0x3000, 0x5000); Dword(0x3004, 1); Dword(0x3008, 0x40010006); // ret、a1、a2 = DbgPrint
+        Dword(0x5014, 5); Dword(0x5018, 0x6000);                           // 長さ 5、文字列ポインタ
+        "Hi! "u8.CopyTo(memory.AsSpan(0x6000));
+        using var output = new StringWriter();
+        WindowsDiagnostics.LogEntry(env, cpu, 7, output);
+        Equal("ENTRY 7: 00401000 -> 00401000 cr3=00000000 ret=00005000 a1=00000001 a2=40010006 dbg=\"Hi!.\"", output.ToString().TrimEnd(), "entry with a debug string");
+        Dword(0x3008, 0x12345678);
+        output.GetStringBuilder().Clear();
+        WindowsDiagnostics.LogEntry(env, cpu, 8, output);
+        Equal("ENTRY 8: 00401000 -> 00401000 cr3=00000000 ret=00005000 a1=00000001 a2=12345678", output.ToString().TrimEnd(), "entry without decoding");
+        Equal("fallback", GuestMemory.Dword(0).Select<uint, string>(_ => throw new PageFaultException(0, 0)).Or("fallback")(env), "Or replaces a faulting read");
+    }
+
     static void InterruptSelection()
     {
         using var env = new EmuEnvironment(memory: new byte[0x10000]);
@@ -342,7 +365,7 @@ static class RunnerTests
 
     public static void Run()
     {
-        Options(); Runners(); Environments(); CommandLine(); PauseResume(); InterruptSelection();
+        Options(); Runners(); Environments(); CommandLine(); PauseResume(); InterruptSelection(); GuestReaders();
         goldenIndex = 0; plainGolden = true; Runners(); plainGolden = false;
         Console.WriteLine($"Runner/environment checks passed: {assertions} assertions");
     }
