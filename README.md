@@ -207,7 +207,7 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | `PicDevice.cs` / `PitDevice.cs` / `CmosDevice.cs` / `KeyboardController.cs` / `MouseDevice.cs` / `AcpiPmDevice.cs` | PIC・PIT・CMOS・8042・PS/2 マウス・ACPI 電源管理の状態と入出力処理。PIC のマスタ/スレーブは共通実装の独立したインスタンス。 |
 | `Pci.cs` | PCI コンフィグ空間（0xCF8/0xCFC）。i440FX ホストブリッジ、PIIX4 ISA/IDE/電源管理、VGA 互換デバイスと拡張 ROM BAR。 |
 | `SerialPort.cs` | 16550 互換 UART と、ホストの名前付きパイプへの橋渡し（送受信は専用タスク）。 |
-| `VgaDevice.cs` / `VgaBiosStub.cs` | VGA のレジスタ・VRAM ウィンドウ・描画と、拡張 ROM として見せる最小 VGA BIOS（INT 10h を C# 側で処理）。レジスタは「ポート → `Register`（読み出しと書き込みの Lens）」の表で、インデックス/データのポート対（Sequencer/Graphics/CRTC/Attribute）は `Indexed` が作る（範囲外の要素、CRTC の保護、Attribute のフリップフロップ）。 |
+| `VgaDevice.cs` / `VgaBiosStub.cs` | VGA のレジスタ・VRAM ウィンドウ・描画と、拡張 ROM として見せる最小 VGA BIOS（INT 10h を C# 側で処理）。レジスタは「ポート → `Register`（読み出しと書き込みの Lens）」の表で、インデックス/データのポート対（Sequencer/Graphics/CRTC/Attribute）は `Indexed` が作る（範囲外の要素、CRTC の保護、Attribute のフリップフロップ）。INT 10h は「AH → State」の表（AL/BL で分かれる機能は入れ子の表）で、レジスタの出し入れは `Accessor` の `Get`/`Set` で書く。 |
 | `RomBuilder.cs` | オプション ROM のバイト列ビルダ（Writer）。ラベルで `jmp short` の変位やポインタを解決し、末尾でチェックサムを埋める。 |
 | `Operand.cs` | オペランド Lens `Operand`（読み出す State と書き戻す関数）と `Reg`/`Rm`/`Const`、その上の `Move`/`Binary`/`Swap`。d ビットで向きが決まる命令はオペランドを入れ替えるだけで書く。 |
 | `VgaWindow.cs` / `RegisterDialog.cs` | Windows Forms の表示ウィンドウ（描画、キー入力とマウス捕捉、中断・再開ボタン）とレジスタ表示ダイアログ。 |

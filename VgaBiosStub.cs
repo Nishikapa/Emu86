@@ -1,4 +1,5 @@
 using static Emu86.CPU;
+using static Emu86.Ext;
 
 namespace Emu86;
 
@@ -78,66 +79,92 @@ public static class VgaBiosStub
         return true;
     }
 
-    static void Service(EmuEnvironment env, CPU cpu)
-    {
-        var vga = env.Vga;
-        var ram = env.OneMegaMemory_;
-        switch (cpu.ah)
+    // INT 10h のサービス: AH → State(CPU のレジスタは Accessor、画面は環境経由)。AL/BL で分かれる機能は入れ子の表。
+    // 表にない機能は何もしない。
+    static readonly State<byte[]> Ram = GetDataFromEnvCpu((env, _) => env.OneMegaMemory_);
+    static readonly State<VgaDevice> Vga = GetDataFromEnvCpu((env, _) => env.Vga);
+    static State<Unit> Screen(Action<EmuEnvironment, CPU> action) => SetCpu((env, cpu) => { action(env, cpu); return cpu; });
+    static State<Unit> Dispatch(Accessor<CPU, byte> key, Dictionary<byte, State<Unit>> table) => (env, cpu, ope) =>
+        table.TryGetValue(key.getter(cpu), out var service) ? service(env, cpu, ope) : (true, Unit.unit, cpu, string.Empty);
+
+    // テキストモードのカーソル位置のセル番号(BDA の列・行から)。
+    static readonly State<(VgaDevice vga, int unit)> CursorCell =
+        from vga in Vga
+        from ram in Ram
+        select (vga, ram[0x451] * Columns(ram) + ram[0x450]);
+
+    // AH=09/0A: カーソル位置から CX 個の文字(09 は属性も)を書く。
+    static State<Unit> WriteCells(bool withAttribute) =>
+        from cell in CursorCell
+        from character in _al.Get()
+        from attribute in _bl.Get()
+        from count in _cx.Get()
+        from _ in When(!cell.vga.GraphicsMode, Screen((_, _) =>
         {
-            case 0x00: SetMode(env, cpu.al); break;
-            case 0x01:
-                vga.Crtc[0x0A] = (byte)(cpu.ch & 0x3F);
-                vga.Crtc[0x0B] = (byte)(cpu.cl & 0x1F);
-                vga.Dirty = true;
-                break;
-            case 0x02: SetCursor(env, cpu.dh, cpu.dl); break;
-            case 0x03:
-                _dl.setter(cpu)(ram[0x450]); _dh.setter(cpu)(ram[0x451]);
-                _cx.setter(cpu)((ushort)((vga.Crtc[0x0A] << 8) | vga.Crtc[0x0B]));
-                break;
-            case 0x06 or 0x07: Scroll(env, cpu.ah == 0x06, cpu.al, cpu.bh, cpu.ch, cpu.cl, cpu.dh, cpu.dl); break;
-            case 0x08:
-                if (!vga.GraphicsMode)
-                {
-                    var unit = ram[0x451] * Columns(ram) + ram[0x450];
-                    _al.setter(cpu)(vga.Vram[unit]); _ah.setter(cpu)(vga.Vram[0x10000 + unit]);
-                }
-                break;
-            case 0x09 or 0x0A:
-                if (!vga.GraphicsMode)
-                {
-                    var unit = ram[0x451] * Columns(ram) + ram[0x450];
-                    for (var count = 0; count < cpu.cx && unit + count < 0x4000; count++)
-                    {
-                        vga.Vram[unit + count] = cpu.al;
-                        if (cpu.ah == 0x09) vga.Vram[0x10000 + unit + count] = cpu.bl;
-                    }
-                    vga.Dirty = true;
-                }
-                break;
-            case 0x0E: Teletype(env, cpu.al); break;
-            case 0x0F:
-                _al.setter(cpu)(ram[0x449]); _ah.setter(cpu)(ram[0x44A]); _bh.setter(cpu)(0);
-                break;
-            case 0x10:
-                if (cpu.al == 0x00 && cpu.bl < vga.Attribute.Length) { vga.Attribute[cpu.bl] = cpu.bh; vga.Dirty = true; }
-                else if (cpu.al == 0x10)
-                {
-                    var index = (cpu.bx & 0xFF) * 3;
-                    vga.Dac[index] = (byte)(cpu.dh & 0x3F); vga.Dac[index + 1] = (byte)(cpu.ch & 0x3F); vga.Dac[index + 2] = (byte)(cpu.cl & 0x3F);
-                    vga.Dirty = true;
-                }
-                break;
-            case 0x12:
-                if (cpu.bl == 0x10) { _bh.setter(cpu)(0); _bl.setter(cpu)(3); _ch.setter(cpu)(0); _cl.setter(cpu)(9); }
-                else if (cpu.bl is 0x30 or 0x31 or 0x32 or 0x33 or 0x34 or 0x36) _al.setter(cpu)(0x12);
-                break;
-            case 0x1A:
-                if (cpu.al == 0) { _al.setter(cpu)(0x1A); _bl.setter(cpu)(0x08); _bh.setter(cpu)(0x00); }
-                break;
-            case 0x4F: _ax.setter(cpu)(0x014F); break;
-        }
-    }
+            for (var offset = 0; offset < count && cell.unit + offset < 0x4000; offset++)
+            {
+                cell.vga.Vram[cell.unit + offset] = character;
+                if (withAttribute) cell.vga.Vram[0x10000 + cell.unit + offset] = attribute;
+            }
+            cell.vga.Dirty = true;
+        }))
+        select Unit.unit;
+
+    // AH=06/07: 窓(CH,CL)-(DH,DL)を AL 行スクロール(0 は消去)、空いた行の属性は BH。
+    static State<Unit> ScrollWindow(bool up) =>
+        from lines in _al.Get()
+        from attribute in _bh.Get()
+        from top in _ch.Get()
+        from left in _cl.Get()
+        from bottom in _dh.Get()
+        from right in _dl.Get()
+        from _ in Screen((env, _) => Scroll(env, up, lines, attribute, top, left, bottom, right))
+        select Unit.unit;
+
+    static readonly Dictionary<byte, State<Unit>> Services = new()
+    {
+        [0x00] = from mode in _al.Get() from _ in Screen((env, _) => SetMode(env, mode)) select Unit.unit,
+        [0x01] = from start in _ch.Get() from end in _cl.Get()
+                 from _ in Screen((env, _) => { env.Vga.Crtc[0x0A] = (byte)(start & 0x3F); env.Vga.Crtc[0x0B] = (byte)(end & 0x1F); env.Vga.Dirty = true; })
+                 select Unit.unit,
+        [0x02] = from row in _dh.Get() from column in _dl.Get() from _ in Screen((env, _) => SetCursor(env, row, column)) select Unit.unit,
+        [0x03] = from ram in Ram from vga in Vga
+                 from _1 in SetCpu((_dl, ram[0x450]), (_dh, ram[0x451]))
+                 from _2 in _cx.Set((ushort)((vga.Crtc[0x0A] << 8) | vga.Crtc[0x0B]))
+                 select Unit.unit,
+        [0x06] = ScrollWindow(up: true),
+        [0x07] = ScrollWindow(up: false),
+        [0x08] = from cell in CursorCell
+                 from _ in When(!cell.vga.GraphicsMode, SetCpu((_al, cell.vga.Vram[cell.unit]), (_ah, cell.vga.Vram[0x10000 + cell.unit])))
+                 select Unit.unit,
+        [0x09] = WriteCells(withAttribute: true),
+        [0x0A] = WriteCells(withAttribute: false),
+        [0x0E] = from character in _al.Get() from _ in Screen((env, _) => Teletype(env, character)) select Unit.unit,
+        [0x0F] = from ram in Ram from _ in SetCpu((_al, ram[0x449]), (_ah, ram[0x44A]), (_bh, (byte)0)) select Unit.unit,
+        [0x10] = Dispatch(_al, new()
+        {
+            [0x00] = from index in _bl.Get() from value in _bh.Get()
+                     from _ in Screen((env, _) => { if (index < env.Vga.Attribute.Length) { env.Vga.Attribute[index] = value; env.Vga.Dirty = true; } })
+                     select Unit.unit,
+            [0x10] = from index in _bx.Get() from red in _dh.Get() from green in _ch.Get() from blue in _cl.Get()
+                     from _ in Screen((env, _) =>
+                     {
+                         var dac = (index & 0xFF) * 3;
+                         env.Vga.Dac[dac] = (byte)(red & 0x3F); env.Vga.Dac[dac + 1] = (byte)(green & 0x3F); env.Vga.Dac[dac + 2] = (byte)(blue & 0x3F);
+                         env.Vga.Dirty = true;
+                     })
+                     select Unit.unit,
+        }),
+        [0x12] = Dispatch(_bl, new()
+        {
+            [0x10] = SetCpu((_bh, (byte)0), (_bl, (byte)3), (_ch, (byte)0), (_cl, (byte)9)), // EGA 情報: カラー、256KB、スイッチ
+            [0x30] = _al.Set((byte)0x12), [0x31] = _al.Set((byte)0x12), [0x32] = _al.Set((byte)0x12), [0x33] = _al.Set((byte)0x12), [0x34] = _al.Set((byte)0x12), [0x36] = _al.Set((byte)0x12),
+        }),
+        [0x1A] = Dispatch(_al, new() { [0x00] = SetCpu((_al, (byte)0x1A), (_bl, (byte)0x08), (_bh, (byte)0x00)) }), // 表示結合コード: VGA カラー
+        [0x4F] = _ax.Set((ushort)0x014F), // VESA: 未対応
+    };
+
+    internal static void Service(EmuEnvironment env, CPU cpu) => Dispatch(_ah, Services)(env, cpu, null);
 
     static int Columns(byte[] ram) => ram[0x44A] == 0 ? 80 : ram[0x44A];
     static int Rows(byte[] ram) => ram[0x484] + 1;
