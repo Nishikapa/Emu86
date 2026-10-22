@@ -21,6 +21,8 @@ internal static class EmulationRunner
         var executor = new InstructionExecutor(useFast: !options.Slow);
         // 命令ごとに CPU を見る診断(全命令トレース・ブレークポイント・監視点)があるときは、ブロックをまとめて実行できない。
         env.Translations.Enabled = options.Translate && !options.Slow && !options.Diagnostics.PerInstruction;
+        // 連結したブロックの途中の制御転送をトレース行にするため、トレースが有効なときは記録してもらう。
+        env.Translations.Transfers = env.Translations.Enabled && trace != null && options.Diagnostics.Trace ? [] : null;
         var swatch = System.Diagnostics.Stopwatch.StartNew();
         long lastReport = count;
         long fastCount = 0;
@@ -93,7 +95,7 @@ internal static class EmulationRunner
             // これでブロック実行の境界が 1 命令ずつの実行と一致する。
             if (env.Translations.Enabled)
             {
-                var budget = Math.Min((long)TranslationCache.MaxBlock, options.Limit - count);
+                var budget = options.Limit - count;
                 if (!options.NoIrq) budget = Math.Min(budget, env.NextIrq - count);
                 budget = Math.Min(budget, Math.Min(nextService - count, nextSnapshot - count));
                 executor.Budget = (int)Math.Max(1, budget);
@@ -127,6 +129,8 @@ internal static class EmulationRunner
                 output.WriteLine($"EXCEPTION at {cpu.cs:x4}:{cpu.eip:x8}: {ex.GetType().Name}: {ex.Message}");
                 break;
             }
+            // 連結したブロックの途中の制御転送(最後のブロックの分は下の AfterInstruction が見る)。
+            if (executor.UsedTranslation && env.Translations.Transfers is { Count: > 0 } transfers) diagnostics.TraceTransfers(cpu.cs, transfers);
             if (fault is Fault raised)
             {
                 // 命令開始時の状態(InstructionExecutor が巻き戻し済み)から IDT 経由で配送する。
@@ -178,7 +182,7 @@ internal static class EmulationRunner
         if (!options.Slow && count > 0)
             output.WriteLine($"fast-path coverage: {fastCount:N0}/{count:N0} ({100.0 * fastCount / count:F2}%)");
         if (env.Translations.Enabled && count > 0)
-            error.WriteLine($"[translation] {env.Translations.Translated:N0} sites lowered, {env.Translations.Compiled:N0} compiled; {translatedCount:N0}/{count:N0} instructions ({100.0 * translatedCount / count:F2}%: {env.Translations.Interpreted:N0} interpreted, {env.Translations.Executed:N0} compiled); {env.Translations.Runs:N0} block runs ({(env.Translations.Runs == 0 ? 0 : (double)translatedCount / env.Translations.Runs):F1} instructions each); {env.Translations.Invalidations:N0} page invalidations, {env.Translations.CompileMilliseconds:F0} ms compiling");
+            error.WriteLine($"[translation] {env.Translations.Translated:N0} sites lowered, {env.Translations.Compiled:N0} compiled; {translatedCount:N0}/{count:N0} instructions ({100.0 * translatedCount / count:F2}%: {env.Translations.Interpreted:N0} interpreted, {env.Translations.Executed:N0} compiled); {env.Translations.Runs:N0} block runs ({(env.Translations.Runs == 0 ? 0 : (double)translatedCount / env.Translations.Runs):F1} instructions each) in {env.Translations.Steps:N0} steps; {env.Translations.Invalidations:N0} page invalidations, {env.Translations.CompileMilliseconds:F0} ms compiling");
         diagnostics.ReportStop(count);
         control?.Stopped(cpu, count);
         return count;

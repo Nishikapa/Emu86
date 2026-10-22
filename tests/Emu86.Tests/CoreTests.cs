@@ -390,6 +390,7 @@ static class CoreTests
         Loop(0x3000).CopyTo(mirror.OneMegaMemory_, 0x100);
         var fast = new InstructionExecutor(true);
         env.Translations.Enabled = true;
+        env.Translations.Chain = false; // まず 1 ブロックずつ見る(連結は後で)
         var slow = new InstructionExecutor(false);
         var cpu = Start();
         var expected = Start();
@@ -447,6 +448,7 @@ static class CoreTests
         Equal(0u, cpu.ecx, "ecx returns to zero after 40 alternating iterations");
         // STI はブロックを終える: 保留中の割り込みが 1 命令ずつの実行と同じ境界(STI の直後)で配送されるため。
         // cli ; inc eax ; sti ; inc eax ; inc eax ; jmp 0x400 -> 先頭からのブロックは 3 命令で止まり、残りは次のブロック。
+        // 予算が十分でも STI で止まり、次の Step は残りのブロックから分岐先のブロックへ連結して、また STI で止まる。
         byte[] sti = [0xFA, 0x40, 0xFB, 0x40, 0x40, 0xEB, 0xF9];
         sti.CopyTo(env.OneMegaMemory_, 0x400);
         sti.CopyTo(mirror.OneMegaMemory_, 0x400);
@@ -456,8 +458,25 @@ static class CoreTests
         count = Advance(count, "sti block");
         Equal((true, 3, 0x403u), (fast.UsedTranslation, fast.Executed, cpu.eip), "the block ends right after STI");
         Equal(true, cpu.jf, "IF is set when the block ends");
+        env.Translations.Chain = true;
         count = Advance(count, "after sti");
-        Equal((true, 3, 0x400u), (fast.UsedTranslation, fast.Executed, cpu.eip), "the rest runs as the next block up to the jump");
+        Equal((true, 6, 0x403u), (fast.UsedTranslation, fast.Executed, cpu.eip), "the rest chains into the next block and stops at its STI");
+        // 連結: ループ(5 命令 × 100 回)は予算の範囲で 1 回の Step で回り切り、ループを抜けた先の HLT(IR 対象外)で止まる。
+        env.OneMegaMemory_[0x110] = 0xF4; mirror.OneMegaMemory_[0x110] = 0xF4;
+        // 自己書き換えのテストが同じページのループのブロックも捨てているので、連結せずに翻訳し直してから連結する。
+        env.Translations.Chain = false;
+        cpu.eip = 0x100; expected.eip = 0x100; cpu.ebx = 0; expected.ebx = 0;
+        for (var iteration = 0; iteration < 12; iteration++)
+            while (true) { count = Advance(count, "rewarm"); if (cpu.eip == 0x100) break; }
+        env.Translations.Chain = true;
+        cpu.ebx = 0; expected.ebx = 0;
+        fast.Budget = 10_000;
+        count = Advance(count, "chain");
+        Equal((true, 500, 0x110u, 0x10Eu), (fast.UsedTranslation, fast.Executed, cpu.eip, fast.LastEip), "the whole loop runs as one chained step");
+        fast.Budget = 123;
+        cpu.eip = 0x100; expected.eip = 0x100; cpu.ebx = 0; expected.ebx = 0;
+        count = Advance(count, "chain budget");
+        Equal((123, 0x108u), (fast.Executed, cpu.eip), "the chain stops at the budget inside a block");
         // ページング有効で、データページを翻訳後に外す: ブロック 2 命令目の MOV [data] が #PF を投げ、
         // 完了数は 1(ADD)、CPU は MOV の先頭の状態。
         using var paged = new EmuEnvironment(memory: new byte[0x10000]);
@@ -468,6 +487,7 @@ static class CoreTests
         EnvSyncPaging(paged, pagedCpu);
         var pagedExecutor = new InstructionExecutor(true);
         paged.Translations.Enabled = true;
+        paged.Translations.Chain = false;
         for (var step = 0; step < 60; step++) Equal(true, pagedExecutor.Step(paged, pagedCpu).IsSuccess, $"paged step {step}");
         Equal(true, pagedExecutor.UsedTranslation && pagedCpu.eip == 0x100, "paged loop runs as a block");
         BitConverter.GetBytes(0u).CopyTo(paged.OneMegaMemory_, 0xA004); // 線形 0x1000-0x1FFF を不在に
@@ -483,11 +503,12 @@ static class CoreTests
         // 実行器を通した 1 命令あたりの時間(5 命令のループ): 翻訳ブロック(コンパイル済み段階)と高速コアのみ。
         using var timing = new EmuEnvironment(memory: new byte[0x10000]);
         Loop(0x3000).CopyTo(timing.OneMegaMemory_, 0x100);
+        timing.OneMegaMemory_[0x110] = 0xF4; // ループを抜けた先は IR 対象外(連結がそこで止まる)
         double PerInstruction(bool translate)
         {
             timing.Translations.Enabled = translate;
             timing.Translations.InvalidateAll();
-            var executor = new InstructionExecutor(true);
+            var executor = new InstructionExecutor(true) { Budget = 1000 };
             var state = Start();
             long executed = 0;
             void Run(long target)

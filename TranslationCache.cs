@@ -6,16 +6,17 @@ namespace Emu86;
 // コンパイル済みブロック: 予算(実行してよい命令数)と開始時の世代を受け取り、完了した命令数を返す。
 public delegate int BlockRun(EmuEnvironment env, CPU cpu, int budget, long generation);
 
-// 基本ブロック(docs/adr/0002 段階 3): 先頭から分岐(Jcc/JMP/CALL/RET)か STI まで、または IR 対象外の命令の手前・ページ末尾・上限までの
+// 基本ブロック(docs/adr/0002 段階 3、連結は段階 6): 先頭から分岐(Jcc/JMP/CALL/RET)か STI まで、または IR 対象外の命令の手前・ページ末尾・上限までの
 // IR 命令列。実行は 1 命令ずつ(各命令の IR は独立に完結し、EIP は命令末尾で進む)で、
 //   予算: 次のイベント(割り込み周期・サービス周期・スナップショット・上限)までの命令数を超えない
 //   世代: ブロック内の命令が翻訳済みページへ書いたら(自己書き換え)、そこで止める
 //   フォルト: IR の規律(書き込み先の事前検査、PUSH の順序)により、投げられた時点の CPU は失敗した命令の先頭の状態
 // という性質を保つので、割り込みの配送点・トレース・スナップショットは 1 命令ずつの実行と同じ境界に揃う。
-public sealed class TranslatedBlock(Block[] instructions, uint[] offsets)
+public sealed class TranslatedBlock(Block[] instructions, uint[] offsets, bool endsWithSti)
 {
     public readonly Block[] Instructions = instructions;
     public readonly uint[] Offsets = offsets;   // 各命令のブロック先頭からのオフセット
+    public readonly bool EndsWithSti = endsWithSti; // 連結しない(保留中の割り込みを直後の Step 境界で配送する)
     public BlockRun Compiled;
 
     public int Interpret(EmuEnvironment env, CPU cpu, int budget, long generation)
@@ -85,11 +86,16 @@ public sealed class TranslationCache
 
     // 既定は無効(--translate で有効)。
     public bool Enabled;
+    // ブロックの連結(テストが 1 ブロックずつ見るために切れる。ランナーは常に連結する)。
+    public bool Chain = true;
     public long Generation;   // 無効化のたびに進む(実行中のブロックが自己書き換えを検出する)
     public readonly uint[] Temps = new uint[4]; // IR 解釈器の Let(一時変数)の置き場
     public long Translated;   // IR に下ろしたブロック数
     public long Compiled;     // コンパイルしたブロック数
     public long Runs;         // ブロックを実行した回数(平均ブロック長 = 命令数 / Runs)
+    public long Steps;        // TryRun が true を返した回数(連結したブロックの列 = ランナーの 1 Step)
+    // 連結の途中の制御転送(直前の命令の先頭 EIP、分岐先 EIP)。トレースが有効なときだけランナーが用意し、トレース行にする。
+    public List<(uint From, uint To)> Transfers;
     public long Interpreted;  // IR 解釈器で実行した命令数
     public long Executed;     // コンパイル済みデリゲートで実行した命令数
     public long Invalidations;
@@ -104,35 +110,84 @@ public sealed class TranslationCache
     // 翻訳済みブロックがあれば予算の範囲で実行して true(executed = 完了した命令数、lastEip = 最後の命令の先頭)。
     // 未翻訳・対象外なら false(呼び出し側が高速コアへ)。先頭の物理アドレスへの変換はフェッチと同じ経路なので、
     // 不在ページなら同じ #PF が出る。
+    // ブロックの連結(docs/adr/0002 段階 6): ブロックが分岐で終わり、予算が残り、分岐先も翻訳済みなら、ランナーへ戻らずに
+    // 続けて実行する。止まるのは、予算・世代の変化(自己書き換え)・STI(保留中の割り込みの配送点)・翻訳済みでない分岐先。
+    // ブロックの途中で新たに配送できる割り込みが生じる契機は STI と、IR の対象外の命令(POPF/IRET/OUT)だけなので、
+    // 連結しても配送点は 1 命令ずつの実行と同じ Step 境界になる。
     public bool TryRun(EmuEnvironment env, CPU cpu, int budget, out int executed, out uint lastEip)
     {
         executed = 0;
         lastEip = cpu.eip;
-        // 先頭のフェッチ(キーの変換)やデコードでの #PF は何も完了していない。
-        FaultExecuted = 0;
-        FaultLastEip = cpu.eip;
+        Transfers?.Clear();
+        while (true)
+        {
+            // 先頭のフェッチ(キーの変換)やデコードでの #PF は、連結済みの分だけ完了している。
+            FaultExecuted = executed;
+            FaultLastEip = lastEip;
+            var block = Find(env, cpu);
+            if (block == null) return executed > 0;
+            var startEip = cpu.eip;
+            var generation = Generation;
+            Runs++;
+            int completed;
+            try
+            {
+                if (block.Compiled != null)
+                {
+                    completed = block.Compiled(env, cpu, budget - executed, generation);
+                    Executed += completed;
+                }
+                else
+                {
+                    completed = block.Interpret(env, cpu, budget - executed, generation);
+                    Interpreted += completed;
+                }
+            }
+            catch (CpuFaultException)
+            {
+                // IR の規律により CPU は失敗した命令の先頭の状態。EIP からその命令の番号を求め、完了数として報告する。
+                var failed = Array.IndexOf(block.Offsets, cpu.eip - startEip);
+                if (failed < 0) failed = 0;
+                FaultExecuted = executed + failed;
+                FaultLastEip = failed > 0 ? startEip + block.Offsets[failed - 1] : lastEip;
+                throw;
+            }
+            executed += completed;
+            lastEip = startEip + block.Offsets[completed - 1];
+            if (!Chain || executed >= budget || Generation != generation || completed < block.Instructions.Length || block.EndsWithSti)
+            {
+                Steps++;
+                return true;
+            }
+            Transfers?.Add((lastEip, cpu.eip));
+        }
+    }
+
+    // 現在の CS:EIP のブロックを返す(実行回数の段階に応じて IR に下ろし、コンパイルする)。翻訳済みでなければ null。
+    TranslatedBlock Find(EmuEnvironment env, CPU cpu)
+    {
         var linear = GetCodeAddr(cpu).addr;
         var physical = env.PagingOn ? EnvTranslate(env, linear, false) : EnvAlias(linear);
-        if (physical >= (uint)codePages.Length << 12) return false;
+        if (physical >= (uint)codePages.Length << 12) return null;
         var index = (int)(physical & (Size - 1));
         ref var entry = ref entries[index];
         var code32 = cpu.code32 ? Entry.Code32Flag : 0;
         if (entry.Count == 0 || entry.Tag != physical || (entry.Count & Entry.Code32Flag) != code32)
         {
             entry = new Entry { Tag = physical, Count = 1 | code32 };
-            return false;
+            return null;
         }
-        if (entry.Count < 0) return false; // 翻訳不可
+        if (entry.Count < 0) return null; // 翻訳不可
         entry.Count++;
         var block = entry.Block;
         if (block == null)
         {
-            if ((entry.Count & Entry.CountMask) < TranslateAfter) return false;
+            if ((entry.Count & Entry.CountMask) < TranslateAfter) return null;
             block = Lower(env, cpu, physical);
             if (block == null)
             {
                 entry.Count |= Entry.Untranslatable;
-                return false;
+                return null;
             }
             entry.Block = block;
             Translated++;
@@ -148,33 +203,7 @@ public sealed class TranslationCache
             CompileMilliseconds += watch.Elapsed.TotalMilliseconds;
             Compiled++;
         }
-        var startEip = cpu.eip;
-        var generation = Generation;
-        Runs++;
-        try
-        {
-            if (block.Compiled != null)
-            {
-                executed = block.Compiled(env, cpu, budget, generation);
-                Executed += executed;
-            }
-            else
-            {
-                executed = block.Interpret(env, cpu, budget, generation);
-                Interpreted += executed;
-            }
-        }
-        catch (CpuFaultException)
-        {
-            // IR の規律により CPU は失敗した命令の先頭の状態。EIP からその命令の番号を求め、完了数として報告する。
-            var offset = cpu.eip - startEip;
-            var failed = Array.IndexOf(block.Offsets, offset);
-            FaultExecuted = failed < 0 ? 0 : failed;
-            FaultLastEip = failed > 0 ? startEip + block.Offsets[failed - 1] : startEip;
-            throw;
-        }
-        lastEip = startEip + block.Offsets[executed - 1];
-        return true;
+        return block;
     }
 
     // ブロックを先頭からデコードして IR に下ろす。対象外の命令で始まるなら null。
@@ -185,6 +214,7 @@ public sealed class TranslationCache
         var offsets = new List<uint>();
         var offset = 0u;
         var pageRemaining = 0x1000 - (physical & 0xFFF);
+        var endsWithSti = false;
         while (instructions.Count < MaxBlock && offset + 15 <= pageRemaining)
         {
             var code = new CodeSource(env, cpu.cs_base, cpu.eip + offset, cpu.code32);
@@ -195,9 +225,9 @@ public sealed class TranslationCache
             instructions.Add(lowered);
             offsets.Add(offset);
             offset += (uint)length;
-            if (Semantics.EndsBlock(instruction)) break;
+            if (Semantics.EndsBlock(instruction)) { endsWithSti = instruction.Opcode == 0xFB; break; }
         }
-        return instructions.Count == 0 ? null : new TranslatedBlock([.. instructions], [.. offsets]);
+        return instructions.Count == 0 ? null : new TranslatedBlock([.. instructions], [.. offsets], endsWithSti);
     }
 
     // 物理アドレスへの書き込み: そのページに翻訳済みブロックがあれば無効化する(書き込み経路から毎回呼ばれるので、無ければ即帰る)。
