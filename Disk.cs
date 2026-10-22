@@ -726,63 +726,79 @@ public class AtaDevice(DiskImage disk) : IDisposable
         }
     }
 
+    // コマンド表: コマンド番号 → 動作。表にないコマンド(DMA 系 0xC8/0x25/0xCA/0x35 等)は abort し、libata は PIO へ後退する。
+    static readonly Dictionary<byte, Action<AtaDevice>> Commands = BuildCommands();
+
+    static Dictionary<byte, Action<AtaDevice>> BuildCommands()
+    {
+        var table = new Dictionary<byte, Action<AtaDevice>>
+        {
+            [0xEC] = ata => ata.Respond(ata.BuildIdentify()), // IDENTIFY DEVICE
+            [0xA1] = ata => ata.Abort(),                      // IDENTIFY PACKET DEVICE(ATAPI ではないので abort)
+        };
+        foreach (var read in new byte[] { 0x20, 0x21, 0x24, 0xC4 }) table[read] = ata => ata.BeginRead();    // READ SECTORS (PIO) / EXT / MULTIPLE(単一扱い)
+        foreach (var write in new byte[] { 0x30, 0x31, 0x34, 0xC5 }) table[write] = ata => ata.BeginWrite(); // WRITE SECTORS (PIO) / EXT / MULTIPLE(単一扱い)
+        // SET FEATURES / FLUSH CACHE(EXT) / READ VERIFY / INIT DEV PARAMS / NOP / IDLE:
+        // libata のプローブ・設定で発行される非データコマンド。成功として完了 → INTRQ。
+        foreach (var nonData in new byte[] { 0xEF, 0xE7, 0xEA, 0x40, 0x41, 0x91, 0x00, 0xE1, 0xE0 }) table[nonData] = ata => ata.Complete();
+        return table;
+    }
+
     void Command(byte cmd)
     {
         error = 0;
-        switch (cmd)
+        if (Commands.TryGetValue(cmd, out var action)) action(this);
+        else
         {
-            case 0xEC: // IDENTIFY DEVICE
-                buf = BuildIdentify();
-                bufPos = 0;
-                status = DRDY | DSC | DRQ;
-                IrqPending = true; // データ準備完了 → INTRQ
-                break;
-
-            case 0xA1: // IDENTIFY PACKET DEVICE (ATAPI ではないので abort)
-                error = 0x04;
-                status = DRDY | DSC | ERR;
-                IrqPending = true;
-                break;
-
-            case 0x20 or 0x21 or 0x24 or 0xC4: // READ SECTORS (PIO) / EXT / MULTIPLE(単一扱い)
-                {
-                    var count = sectorCount == 0 ? 256 : sectorCount;
-                    var lba = CurrentLba();
-                    buf = new byte[count * DiskImage.SectorSize];
-                    for (int i = 0; i < count; i++)
-                        disk.ReadSector(lba + i, buf, i * DiskImage.SectorSize);
-                    bufPos = 0;
-                    status = DRDY | DSC | DRQ;
-                    IrqPending = true; // データ準備完了 → INTRQ
-                }
-                break;
-
-            case 0x30 or 0x31 or 0x34 or 0xC5: // WRITE SECTORS (PIO) / EXT / MULTIPLE(単一扱い)
-                {
-                    writeSectorsLeft = sectorCount == 0 ? 256 : sectorCount;
-                    writeLba = CurrentLba();
-                    buf = new byte[DiskImage.SectorSize];
-                    bufPos = 0;
-                    pendingWrite = true;
-                    // WRITE の最初のブロック要求は DRQ を立てるが INTRQ は上げない(ホストが先にデータを書く)。
-                    status = DRDY | DSC | DRQ;
-                }
-                break;
-
-            case 0xEF or 0xE7 or 0xEA or 0x40 or 0x41 or 0x91 or 0x00 or 0xE1 or 0xE0:
-                // SET FEATURES / FLUSH CACHE(EXT) / READ VERIFY / INIT DEV PARAMS / NOP / IDLE:
-                // libata のプローブ・設定で発行される非データコマンド。成功として完了 → INTRQ。
-                status = DRDY | DSC;
-                IrqPending = true;
-                break;
-
-            default: // 未対応コマンド(DMA 系 0xC8/0x25/0xCA/0x35 等含む)は abort → libata は PIO へ後退
-                L($"  -> unsupported command {cmd:x2}: abort");
-                error = 0x04;
-                status = DRDY | DSC | ERR;
-                IrqPending = true;
-                break;
+            L($"  -> unsupported command {cmd:x2}: abort");
+            Abort();
         }
+    }
+
+    int RequestedSectors => sectorCount == 0 ? 256 : sectorCount;
+
+    // データを用意して DRQ: データ準備完了 → INTRQ。
+    void Respond(byte[] data)
+    {
+        buf = data;
+        bufPos = 0;
+        status = DRDY | DSC | DRQ;
+        IrqPending = true;
+    }
+
+    // 非データコマンドの完了 → INTRQ。
+    void Complete()
+    {
+        status = DRDY | DSC;
+        IrqPending = true;
+    }
+
+    void Abort()
+    {
+        error = 0x04;
+        status = DRDY | DSC | ERR;
+        IrqPending = true;
+    }
+
+    void BeginRead()
+    {
+        var count = RequestedSectors;
+        var lba = CurrentLba();
+        var data = new byte[count * DiskImage.SectorSize];
+        for (int i = 0; i < count; i++)
+            disk.ReadSector(lba + i, data, i * DiskImage.SectorSize);
+        Respond(data);
+    }
+
+    // WRITE の最初のブロック要求は DRQ を立てるが INTRQ は上げない(ホストが先にデータを書く)。
+    void BeginWrite()
+    {
+        writeSectorsLeft = RequestedSectors;
+        writeLba = CurrentLba();
+        buf = new byte[DiskImage.SectorSize];
+        bufPos = 0;
+        pendingWrite = true;
+        status = DRDY | DSC | DRQ;
     }
 
     long CurrentLba() =>

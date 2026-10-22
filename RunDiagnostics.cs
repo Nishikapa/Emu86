@@ -15,6 +15,12 @@ internal sealed class RunDiagnostics
     int brIdx;
     uint beforeEsp;
     int entryLogLeft = 400;
+
+    // 停止規則: 命令の前(ブレークポイント)と後(監視点・トラップ・分岐履歴・トレース)。各規則は止めるなら報告して true を返す。
+    // オプションから組み立て、順に試す(順序が報告の優先順)。
+    readonly record struct Step(ushort BeforeCs, uint BeforeEip, long Count);
+    readonly List<Func<Step, bool>> breakpoints = [];
+    readonly List<Func<Step, bool>> traps = [];
     int udLogLeft = 40;
     bool wasInRange;
 
@@ -38,9 +44,88 @@ internal sealed class RunDiagnostics
         env.WatchHi = options.Watch.Hi;
         env.WatchTriggered = false;
         if (count > 0) this.trace?.WriteLine($"\n--- resumed at instruction {count} ---");
+
+        if (options.BreakEip != 0)
+            breakpoints.Add(_ => cpu.eip == options.BreakEip && (options.BreakEax == null || cpu.eax == options.BreakEax) && Break());
+        if (options.BreakRange.Hi != 0)
+            breakpoints.Add(_ => cpu.pe && options.BreakRange.Contains(cpu.eip) && Break());
+        if (options.BreakAt != 0)
+            breakpoints.Add(step => step.Count >= options.BreakAt && Break());
+
+        traps.Add(step =>
+        {
+            if (!env.WatchTriggered) return false;
+            env.WatchTriggered = false;
+            return Stop($"WATCH: write into [{env.WatchLo:x8},{env.WatchHi:x8}) by instruction at {step.BeforeCs:x4}:{step.BeforeEip:x8} (instr {step.Count})");
+        });
+        // ESP がカーネルのエントリコード領域を指す不正値になった瞬間を捕捉する。
+        if (options.EspTrap)
+            traps.Add(step =>
+            {
+                var trapped = WindowsDiagnostics.IsKernelEntryStack(cpu.esp) && !WindowsDiagnostics.IsKernelEntryStack(beforeEsp);
+                if (!trapped) beforeEsp = cpu.esp;
+                return trapped && Stop($"ESPTRAP: esp={cpu.esp:x8} set by {step.BeforeCs:x4}:{step.BeforeEip:x8} (instr {step.Count})");
+            });
+        if (options.WatchValue is uint watchValue)
+            traps.Add(step =>
+                (cpu.eax == watchValue || cpu.ebx == watchValue || cpu.ecx == watchValue || cpu.edx == watchValue
+                    || cpu.esi == watchValue || cpu.edi == watchValue || cpu.ebp == watchValue)
+                && Stop($"WATCHVAL {watchValue:x8} appeared after instruction at {step.BeforeCs:x4}:{step.BeforeEip:x8} (instr {step.Count}): eax={cpu.eax:x8} ebx={cpu.ebx:x8} ecx={cpu.ecx:x8} edx={cpu.edx:x8} esi={cpu.esi:x8} edi={cpu.edi:x8} ebp={cpu.ebp:x8} esp={cpu.esp:x8}"));
+        if (options.BranchHistory)
+            traps.Add(step =>
+            {
+                // 制御転送(順次進行を外れた)命令を記録する。
+                if (!Sequential(step))
+                {
+                    brFrom[brIdx] = (step.BeforeCs, step.BeforeEip);
+                    brTo[brIdx] = (cpu.cs, cpu.eip);
+                    brIdx = (brIdx + 1) % BrN;
+                }
+                // プロテクトモードで CS が NULL セレクタになった瞬間を捕捉する。
+                return cpu.pe && cpu.cs == 0 && step.BeforeCs != 0
+                    && Stop($"CSTRAP: cs=0 loaded by instruction at {step.BeforeCs:x4}:{step.BeforeEip:x8} -> eip={cpu.eip:x8} (instr {step.Count})");
+            });
+        if (this.trace != null)
+            traps.Add(step =>
+            {
+                // 制御転送(分岐/ジャンプ/CALL/RET/割り込み)が起きた命令だけ記録する。
+                if (options.TraceAll || !Sequential(step))
+                    this.trace.WriteLine(options.RegTrace
+                        ? $"{cpu.cs:x4}:{cpu.eip:x8} {cpu.eax:x8} {cpu.ebx:x8} {cpu.ecx:x8} {cpu.edx:x8} {cpu.esi:x8} {cpu.edi:x8} {cpu.ebp:x8} {cpu.esp:x8} {cpu.eflags:x8}"
+                        : $"{cpu.cs:x4}:{cpu.eip:x8}");
+                return false;
+            });
     }
 
-    // 連結したブロックの途中で起きた制御転送をトレースに書く(AfterInstruction の分岐判定と同じ規則。CS は変わらない)。
+    // 順次進行なら EIP は開始位置 +1〜+15。それを外れた/CS が変わった = 分岐。
+    bool Sequential(Step step) => cpu.cs == step.BeforeCs && cpu.eip > step.BeforeEip && cpu.eip <= step.BeforeEip + 15;
+
+    bool Stop(string message)
+    {
+        output.WriteLine(message);
+        return true;
+    }
+
+    // ブレークポイント: レジスタとスタックの先頭を報告して止める。
+    bool Break()
+    {
+        output.WriteLine($"BREAKEIP {cpu.eip:x8}: eax={cpu.eax:x8} ecx={cpu.ecx:x8} edx={cpu.edx:x8} ebx={cpu.ebx:x8} esi={cpu.esi:x8} edi={cpu.edi:x8} ebp={cpu.ebp:x8} esp={cpu.esp:x8}");
+        try
+        {
+            for (var offset = 0u; offset < 0x40; offset += 4)
+                output.WriteLine($"  [esp+{offset:x2}] = {WindowsDiagnostics.ReadDword(env, cpu.ss_base + cpu.esp + offset):x8}");
+        }
+        catch (CpuFaultException) { output.WriteLine("  (stack unreadable)"); }
+        return true;
+    }
+
+    public bool AfterInstruction(ushort beforeCs, uint beforeEip, long count)
+    {
+        var step = new Step(beforeCs, beforeEip, count);
+        return traps.Any(rule => rule(step));
+    }
+
+    // 連結したブロックの途中で起きた制御転送をトレースに書く(Sequential と同じ規則。CS は変わらない)。
     public void TraceTransfers(ushort cs, List<(uint From, uint To)> transfers)
     {
         if (trace == null) return;
@@ -61,71 +146,10 @@ internal sealed class RunDiagnostics
             }
             wasInRange = inRange;
         }
-        if ((options.BreakEip != 0 && cpu.eip == options.BreakEip && (options.BreakEax == null || cpu.eax == options.BreakEax))
-            || (cpu.pe && options.BreakRange.Contains(cpu.eip)) || (options.BreakAt != 0 && count >= options.BreakAt))
-        {
-            output.WriteLine($"BREAKEIP {cpu.eip:x8}: eax={cpu.eax:x8} ecx={cpu.ecx:x8} edx={cpu.edx:x8} ebx={cpu.ebx:x8} esi={cpu.esi:x8} edi={cpu.edi:x8} ebp={cpu.ebp:x8} esp={cpu.esp:x8}");
-            try
-            {
-                for (var offset = 0u; offset < 0x40; offset += 4)
-                    output.WriteLine($"  [esp+{offset:x2}] = {WindowsDiagnostics.ReadDword(env, cpu.ss_base + cpu.esp + offset):x8}");
-            }
-            catch (CpuFaultException) { output.WriteLine("  (stack unreadable)"); }
-            return true;
-        }
+        var step = new Step(cpu.cs, cpu.eip, count);
+        if (breakpoints.Any(rule => rule(step))) return true;
         if (env.Ata != null) env.Ata.LogReads = env.PagingOn;
         env.Pci.Eip = cpu.eip;
-        return false;
-    }
-
-    public bool AfterInstruction(ushort beforeCs, uint beforeEip, long count)
-    {
-        if (env.WatchTriggered)
-        {
-            output.WriteLine($"WATCH: write into [{env.WatchLo:x8},{env.WatchHi:x8}) by instruction at {beforeCs:x4}:{beforeEip:x8} (instr {count})");
-            env.WatchTriggered = false;
-            return true;
-        }
-        // ESP がカーネルのエントリコード領域を指す不正値になった瞬間を捕捉する。
-        if (options.EspTrap && WindowsDiagnostics.IsKernelEntryStack(cpu.esp) && !WindowsDiagnostics.IsKernelEntryStack(beforeEsp))
-        {
-            output.WriteLine($"ESPTRAP: esp={cpu.esp:x8} set by {beforeCs:x4}:{beforeEip:x8} (instr {count})");
-            return true;
-        }
-        beforeEsp = cpu.esp;
-        if (options.WatchValue is uint watchVal && (cpu.eax == watchVal || cpu.ebx == watchVal || cpu.ecx == watchVal || cpu.edx == watchVal
-            || cpu.esi == watchVal || cpu.edi == watchVal || cpu.ebp == watchVal))
-        {
-            output.WriteLine($"WATCHVAL {watchVal:x8} appeared after instruction at {beforeCs:x4}:{beforeEip:x8} (instr {count}): eax={cpu.eax:x8} ebx={cpu.ebx:x8} ecx={cpu.ecx:x8} edx={cpu.edx:x8} esi={cpu.esi:x8} edi={cpu.edi:x8} ebp={cpu.ebp:x8} esp={cpu.esp:x8}");
-            return true;
-        }
-        if (options.BranchHistory)
-        {
-            // 制御転送(順次進行を外れた)命令を記録する。
-            var seq2 = cpu.cs == beforeCs && cpu.eip > beforeEip && cpu.eip <= beforeEip + 15;
-            if (!seq2)
-            {
-                brFrom[brIdx] = (beforeCs, beforeEip);
-                brTo[brIdx] = (cpu.cs, cpu.eip);
-                brIdx = (brIdx + 1) % BrN;
-            }
-            // プロテクトモードで CS が NULL セレクタになった瞬間を捕捉する。
-            if (cpu.pe && cpu.cs == 0 && beforeCs != 0)
-            {
-                output.WriteLine($"CSTRAP: cs=0 loaded by instruction at {beforeCs:x4}:{beforeEip:x8} -> eip={cpu.eip:x8} (instr {count})");
-                return true;
-            }
-        }
-        if (trace != null)
-        {
-            // 制御転送(分岐/ジャンプ/CALL/RET/割り込み)が起きた命令だけ記録する。
-            // 順次進行なら EIP は開始位置 +1〜+15。それを外れた/CS が変わった = 分岐。
-            var seq = cpu.cs == beforeCs && cpu.eip > beforeEip && cpu.eip <= beforeEip + 15;
-            if (options.TraceAll || !seq)
-                trace.WriteLine(options.RegTrace
-                    ? $"{cpu.cs:x4}:{cpu.eip:x8} {cpu.eax:x8} {cpu.ebx:x8} {cpu.ecx:x8} {cpu.edx:x8} {cpu.esi:x8} {cpu.edi:x8} {cpu.ebp:x8} {cpu.esp:x8} {cpu.eflags:x8}"
-                    : $"{cpu.cs:x4}:{cpu.eip:x8}");
-        }
         return false;
     }
 
