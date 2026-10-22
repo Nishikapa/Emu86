@@ -144,7 +144,7 @@ static public partial class Ext
     static public State<bool> Jcc(int type) =>
         GetDataFromCpu(cpu => EvaluateCondition(cpu, type));
 
-    static private State<T> Get<T>(this Accessor<CPU, T> acc) =>
+    static internal State<T> Get<T>(this Accessor<CPU, T> acc) =>
         GetDataFromCpu(acc.getter);
 
     static public State<Unit> Set<T>(this Accessor<CPU, T> acc, T value) =>

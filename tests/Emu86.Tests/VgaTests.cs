@@ -655,9 +655,50 @@ static class VgaTests
         Equal("00,00,00", Rgb(100), "mode 3: no 256-color entries");
     }
 
+    // INT 10h のサービス表を直接呼ぶ: 文字と属性の書き込み(09h)、セルの読み出し(08h)、窓のスクロール(06h)、
+    // カーソル形状(01h)、属性レジスタと DAC の設定(10h)、EGA 情報(12h)、VESA(4Fh)、未定義の機能は何もしない。
+    static void BiosServices()
+    {
+        using var env = new EmuEnvironment(memory: new byte[0x100000]);
+        VgaBiosStub.Install(env);
+        var vga = env.Vga;
+        var cpu = new CPU { eax = 0x0941, ebx = 0x1F, ecx = 3 }; // AH=09 AL='A' BL=属性 CX=3
+        env.OneMegaMemory_[0x450] = 2; env.OneMegaMemory_[0x451] = 1;    // カーソル (行 1, 列 2)
+        VgaBiosStub.Service(env, cpu);
+        var cell = 1 * 80 + 2;
+        Equal("41,41,41", string.Join(",", Enumerable.Range(0, 3).Select(offset => vga.Vram[cell + offset].ToString("x2"))), "AH=09 writes the character");
+        Equal("1f,1f,1f", string.Join(",", Enumerable.Range(0, 3).Select(offset => vga.Vram[0x10000 + cell + offset].ToString("x2"))), "AH=09 writes the attribute");
+        cpu.eax = 0x0800;
+        VgaBiosStub.Service(env, cpu);
+        Equal((ushort)0x1F41, cpu.ax, "AH=08 reads the character and attribute under the cursor");
+        cpu.eax = 0x0601; cpu.ebx = 0x0700; cpu.ecx = 0x0100; cpu.edx = 0x024F; // 1 行上へ、属性 07、窓 (1,0)-(2,79)
+        VgaBiosStub.Service(env, cpu);
+        Equal("20,20,20", string.Join(",", Enumerable.Range(0, 3).Select(offset => vga.Vram[cell + offset].ToString("x2"))), "AH=06 scrolls the window up (cleared cells are spaces)");
+        Equal("20,07", $"{vga.Vram[2 * 80 + 2]:x2},{vga.Vram[0x10000 + 2 * 80 + 2]:x2}", "AH=06 clears the bottom row with the attribute");
+        cpu.eax = 0x0100; cpu.ecx = 0x0D0E;
+        VgaBiosStub.Service(env, cpu);
+        Equal((0x0D, 0x0E), ((int)vga.Crtc[0x0A], (int)vga.Crtc[0x0B]), "AH=01 sets the cursor shape");
+        cpu.eax = 0x1000; cpu.ebx = 0x3F05; // AL=00 BL=5 BH=0x3F
+        VgaBiosStub.Service(env, cpu);
+        Equal((byte)0x3F, vga.Attribute[5], "AH=10 AL=00 sets a palette register");
+        cpu.eax = 0x1010; cpu.ebx = 0x0007; cpu.ecx = 0x2A15; cpu.edx = 0x3F00; // 色 7 = R 3F, G 2A, B 15
+        VgaBiosStub.Service(env, cpu);
+        Equal("3f,2a,15", string.Join(",", vga.Dac.Skip(7 * 3).Take(3).Select(component => component.ToString("x2"))), "AH=10 AL=10 sets a DAC entry");
+        cpu.eax = 0x1200; cpu.ebx = 0x0010;
+        VgaBiosStub.Service(env, cpu);
+        Equal((ushort)0x0003, cpu.bx, "AH=12 BL=10 reports color and 256KB");
+        Equal((ushort)0x0009, cpu.cx, "AH=12 BL=10 reports the switches");
+        cpu.eax = 0x4F00;
+        VgaBiosStub.Service(env, cpu);
+        Equal((ushort)0x014F, cpu.ax, "AH=4F reports VESA unsupported");
+        cpu.eax = 0x1234; cpu.ebx = 0x5678;
+        VgaBiosStub.Service(env, cpu);
+        Equal((0x1234u, 0x5678u), (cpu.eax, cpu.ebx), "an undefined function leaves the registers alone");
+    }
+
     public static void Run()
     {
-        MemoryWindow(); PlanarAndChain4(); Registers(); Rendering(); VirtualMode(); KeyboardInterrupt(); BiosStub(); PciRom(); IretPrivilegeCheck(); Mouse(); ResetRequest(); Serial(); BootMenuAutomation(); BootMenuTimeouts(); Palette();
+        MemoryWindow(); PlanarAndChain4(); Registers(); Rendering(); VirtualMode(); KeyboardInterrupt(); BiosStub(); BiosServices(); PciRom(); IretPrivilegeCheck(); Mouse(); ResetRequest(); Serial(); BootMenuAutomation(); BootMenuTimeouts(); Palette();
         Console.WriteLine($"VGA/V86/keyboard assertions passed: {assertions}");
     }
 }
