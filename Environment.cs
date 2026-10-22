@@ -812,66 +812,30 @@ static public partial class Ext
         data => reg => cpu => array[reg].setter(cpu)(data);
 
     /// I/O port ///////////////////////////////////
-    // CMOS(0x70/0x71)・PIT(0x40/0x43)・ATA(0x1F0-0x1F7, 0x3F6)を
-    // 特別扱いする以外は IoPort 配列を素通しする。
-    // ACPI PM I/O ブロック(0xB000 起点、dword 単位で値を返す)。
-    //   +0x00 PM1a_STS / +0x02 PM1a_EN / +0x04 PM1a_CNT / +0x08 PM_TMR(24bit)
+    // ポートの振り分けは PortMap の表(ポート範囲 → デバイスの読み書き)。該当する項がなければ IoPort 配列を素通しする。
     static public byte EnvInPort(EmuEnvironment env, int port)
     {
-        switch (port & 0xFFFF)
-        {
-            case 0x71: // CMOS データ
-                return env.CmosRtc.Read();
-            case 0x21: // PIC マスタ: マスク読み出し
-                return env.PicMaster.Mask;
-            case 0xA1: // PIC スレーブ: マスク読み出し
-                return env.PicSlave.Mask;
-            case 0x20: // マスタ IRR/ISR 読み(in-service ビットを返す)
-                return env.PicMaster.Isr;
-            case 0xA0: // スレーブ IRR/ISR 読み
-                return env.PicSlave.Isr;
-            case 0x40 or 0x42 or 0x61:
-                return env.Pit.Read(port & 0xFFFF);
-            case (>= 0xB000 and <= 0xB03F) or (>= 0xAFE0 and <= 0xAFE3):
-                return env.Acpi.Read(port & 0xFFFF, env.Tsc);
-            case >= 0xB100 and <= 0xB10F: // SMBus: デバイス無し(ホストステータス=アイドル)
-                return 0;
-            case var bm when env.Pci.IdeBmBase != 0 && bm >= env.Pci.IdeBmBase && bm < env.Pci.IdeBmBase + 16:
-                // バスマスタ IDE(BMIDE)レジスタ: DMA は未実装。ステータスは常に「非活性・割り込みなし」。
-                // ディスクの IDENTIFY も DMA 非対応を報告するので、ドライバは PIO を使う。
-                return 0;
-            case 0x60 or 0x64:
-                return env.Keyboard.Read(port & 0xFFFF);
-            case 0x3B4 or 0x3B5 or 0x3BA or (>= 0x3C0 and <= 0x3CF) or 0x3D4 or 0x3D5 or 0x3DA:
-                return env.Vga.ReadPort(port & 0xFFFF, env.Tsc);
-            case >= 0x3F8 and <= 0x3FF:
-                return env.Com1.Read((port & 0xFFFF) - 0x3F8);
-            case >= 0x2F8 and <= 0x2FF:
-                return env.Com2.Read((port & 0xFFFF) - 0x2F8);
-            case 0x1F0 when env.Ata != null:
-                return (byte)env.Ata.ReadData(1);
-            case (>= 0x1F1 and <= 0x1F7) or 0x3F6 when env.Ata != null:
-                return env.Ata.ReadReg(port & 0xFFFF);
-            default:
-                return env.IoPort[port & 0xFFFF];
-        }
+        port &= 0xFFFF;
+        foreach (var mapping in PortMap.ByPort[port])
+            if (mapping.Read != null && mapping.Applies(env, port)) return mapping.Read(env, port);
+        return env.IoPort[port];
     }
 
-    // 幅付きポート入出力。ATA データポート(0x1F0)は 16/32 ビットアクセスで
-    // デバイスバッファから連続バイトを転送する(隣接ポートへは波及しない)。
+    static public void EnvOutPort(EmuEnvironment env, int port, byte val)
+    {
+        port &= 0xFFFF;
+        foreach (var mapping in PortMap.ByPort[port])
+            if (mapping.Write != null && mapping.Applies(env, port)) { mapping.Write(env, port, val); return; }
+        env.IoPort[port] = val;
+    }
+
+    // 幅付きポート入出力: 幅付きを自分で扱う項(ATA データ、PCI コンフィグ、ACPI の dword など)があればそれに任せ、
+    // なければ 1 バイトずつ(隣接ポートへ波及する)。
     static public uint EnvInPortN(EmuEnvironment env, int port, int size)
     {
-        if ((port & 0xFFFF) == 0x1F0 && env.Ata != null)
-            return env.Ata.ReadData(size);
         var p = port & 0xFFFF;
-        if (p >= 0xCF8 && p <= 0xCFB) return env.Pci.Address >> (8 * (p - 0xCF8));
-        if (p >= 0xCFC && p <= 0xCFF) return env.Pci.DataRead(p - 0xCFC, size);
-        if (p >= 0xB000 && p <= 0xB03F && (p & 3) == 0)
-            return size >= 4 ? env.Acpi.ReadWord(p, env.Tsc) : env.Acpi.ReadWord(p, env.Tsc) & ((1u << (8 * size)) - 1);
-        // セカンダリ IDE チャネル(ディスク無し)はフローティングバス 0xFF を返し、
-        // libata に「デバイス無し」と即断させる。
-        if ((p >= 0x170 && p <= 0x177) || p == 0x376)
-            return size >= 4 ? 0xFFFFFFFF : (1u << (8 * size)) - 1;
+        foreach (var mapping in PortMap.ByPort[p])
+            if (mapping.ReadWide != null && mapping.Applies(env, p)) return mapping.ReadWide(env, p, size);
         uint v = 0;
         for (int i = 0; i < size; i++)
             v |= (uint)EnvInPort(env, port + i) << (8 * i);
@@ -880,97 +844,11 @@ static public partial class Ext
 
     static public void EnvOutPortN(EmuEnvironment env, int port, int size, uint val)
     {
-        if ((port & 0xFFFF) == 0x1F0 && env.Ata != null)
-        {
-            env.Ata.WriteData(size, val);
-            return;
-        }
         var p = port & 0xFFFF;
-        if (p == 0xCF9 && size == 1)
-        {
-            // PIIX4 リセット制御レジスタ(バイトアクセス)。CONFIG_ADDRESS のバイト 1 とは区別する。
-            EnvOutPort(env, p, (byte)val);
-            return;
-        }
-        if (p >= 0xCF8 && p <= 0xCFB)
-        {
-            // CONFIG_ADDRESS ラッチをバイト位置に合わせて更新(通常は 0xCF8 への 32bit 書き込み)。
-            var shift = 8 * (p - 0xCF8);
-            uint mask = size >= 4 ? 0xFFFFFFFF : (((1u << (8 * size)) - 1) << shift);
-            env.Pci.Address = (env.Pci.Address & ~mask) | ((val << shift) & mask);
-            return;
-        }
-        if (p >= 0xCFC && p <= 0xCFF) { env.Pci.DataWrite(p - 0xCFC, size, val); return; }
+        foreach (var mapping in PortMap.ByPort[p])
+            if (mapping.WriteWide != null && mapping.Applies(env, p)) { mapping.WriteWide(env, p, size, val); return; }
         for (int i = 0; i < size; i++)
             EnvOutPort(env, port + i, (byte)(val >> (8 * i)));
-    }
-
-    static public void EnvOutPort(EmuEnvironment env, int port, byte val)
-    {
-        port &= 0xFFFF;
-        switch (port)
-        {
-            case 0x70:
-                env.CmosRtc.Select(val);
-                break;
-            case 0x71:
-                env.CmosRtc.Write(val);
-                break;
-            case 0x42 or 0x43 or 0x61:
-                env.Pit.Write(port, val);
-                break;
-            case 0x402:
-                System.Console.Error.Write((char)val);
-                break;
-            case 0x20:
-                env.PicMaster.WriteCommand(val);
-                break;
-            case 0x21:
-                env.PicMaster.WriteData(val, env.PicLog);
-                break;
-            case 0xA0:
-                env.PicSlave.WriteCommand(val);
-                break;
-            case 0xA1:
-                env.PicSlave.WriteData(val, env.PicLog);
-                break;
-            case 0xB2:
-                env.Acpi.Write(port, val);
-                env.IoPort[port] = val;
-                break;
-            case 0xCF9: // PIIX4 リセット制御: bit2 でシステムリセット(bit1 でフル/ハードリセットの区別、どちらも再起動)
-                if ((val & 0x04) != 0) env.ResetRequested = true;
-                env.IoPort[port] = val;
-                break;
-            case (>= 0xB000 and <= 0xB03F) or (>= 0xAFE0 and <= 0xAFE3):
-                env.Acpi.Write(port, val);
-                break;
-            case >= 0xB100 and <= 0xB10F:
-                break;
-            case var bm when env.Pci.IdeBmBase != 0 && bm >= env.Pci.IdeBmBase && bm < env.Pci.IdeBmBase + 16:
-                break;
-            case 0x60 or 0x64:
-                env.Keyboard.Write(port, val);
-                break;
-            case 0x3B4 or 0x3B5 or 0x3BA or (>= 0x3C0 and <= 0x3CF) or 0x3D4 or 0x3D5 or 0x3DA:
-                env.Vga.WritePort(port, val);
-                break;
-            case >= 0x3F8 and <= 0x3FF:
-                env.Com1.Write(port - 0x3F8, val);
-                break;
-            case >= 0x2F8 and <= 0x2FF:
-                env.Com2.Write(port - 0x2F8, val);
-                break;
-            case 0x1F0 when env.Ata != null:
-                env.Ata.WriteData(1, val);
-                break;
-            case (>= 0x1F1 and <= 0x1F7) or 0x3F6 when env.Ata != null:
-                env.Ata.WriteReg(port, val);
-                break;
-            default:
-                env.IoPort[port] = val;
-                break;
-        }
     }
 
     // 搭載RAM(RamSize)外へのアクセスは未マップ領域として扱う:
