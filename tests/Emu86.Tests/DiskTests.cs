@@ -1,5 +1,6 @@
 using Emu86;
 using System.Security.Cryptography;
+using static Emu86.Fields;
 
 static class DiskTests
 {
@@ -141,9 +142,26 @@ static class DiskTests
         Throws<InvalidOperationException>(() => { using var disk = new DiskImage(basePath, writable: true); }, "direct base writes rejected");
     }
 
+    // バイト列のパーサコンビネータ: 識別子(Magic)、構造体の先頭からの位置(At)、繰り返し(Count)、開始位置、範囲外。
+    static void FieldParsers()
+    {
+        byte[] buffer = [.. "tbl!"u8, 2, 0, 0, 0, 0x11, 0x22, 0x33, 0x44, 0xAA, 0xBB, 0xCC, 0xDD, 0x01, 0x02];
+        var table =
+            from _ in Magic("tbl!"u8.ToArray(), "test table")
+            from count in At(4, U32)
+            from items in At(8, Count((int)count, U32))
+            select items;
+        Equal("44332211,DDCCBBAA", string.Join(",", table.Parse(buffer).Select(value => value.ToString("X8"))), "little-endian items at a fixed position");
+        Equal(0x11223344u, U32BE.Parse(buffer, 8), "big-endian at a start position");
+        Equal(0x0201, (int)At(8, U16).Parse(buffer, 8), "At is relative to the start position");
+        Equal("AABBCCDD", Convert.ToHexString((from _ in Skip(12) from bytes in Bytes(4) select bytes).Parse(buffer)), "Skip then Bytes");
+        Throws<InvalidDataException>(() => Magic("xxxx"u8.ToArray(), "x").Parse(buffer), "magic mismatch");
+        Throws<InvalidDataException>(() => Count(3, U64).Parse(buffer), "truncated structure");
+    }
+
     public static void Run()
     {
-        SmallRawDisk(); Layouts(); RoundTrips(); InvalidRegions();
+        FieldParsers(); SmallRawDisk(); Layouts(); RoundTrips(); InvalidRegions();
         Console.WriteLine($"Disk checks passed: {assertions} assertions");
     }
 }
