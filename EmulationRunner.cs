@@ -178,7 +178,7 @@ internal static class EmulationRunner
         if (!options.Slow && count > 0)
             output.WriteLine($"fast-path coverage: {fastCount:N0}/{count:N0} ({100.0 * fastCount / count:F2}%)");
         if (env.Translations.Enabled && count > 0)
-            error.WriteLine($"[translation] {env.Translations.Translated:N0} sites lowered, {env.Translations.Compiled:N0} compiled; {translatedCount:N0}/{count:N0} instructions ({100.0 * translatedCount / count:F2}%: {env.Translations.Interpreted:N0} interpreted, {env.Translations.Executed:N0} compiled); {env.Translations.Invalidations:N0} page invalidations, {env.Translations.CompileMilliseconds:F0} ms compiling");
+            error.WriteLine($"[translation] {env.Translations.Translated:N0} sites lowered, {env.Translations.Compiled:N0} compiled; {translatedCount:N0}/{count:N0} instructions ({100.0 * translatedCount / count:F2}%: {env.Translations.Interpreted:N0} interpreted, {env.Translations.Executed:N0} compiled); {env.Translations.Runs:N0} block runs ({(env.Translations.Runs == 0 ? 0 : (double)translatedCount / env.Translations.Runs):F1} instructions each); {env.Translations.Invalidations:N0} page invalidations, {env.Translations.CompileMilliseconds:F0} ms compiling");
         diagnostics.ReportStop(count);
         control?.Stopped(cpu, count);
         return count;

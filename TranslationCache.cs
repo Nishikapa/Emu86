@@ -89,6 +89,7 @@ public sealed class TranslationCache
     public readonly uint[] Temps = new uint[4]; // IR 解釈器の Let(一時変数)の置き場
     public long Translated;   // IR に下ろしたブロック数
     public long Compiled;     // コンパイルしたブロック数
+    public long Runs;         // ブロックを実行した回数(平均ブロック長 = 命令数 / Runs)
     public long Interpreted;  // IR 解釈器で実行した命令数
     public long Executed;     // コンパイル済みデリゲートで実行した命令数
     public long Invalidations;
@@ -149,6 +150,7 @@ public sealed class TranslationCache
         }
         var startEip = cpu.eip;
         var generation = Generation;
+        Runs++;
         try
         {
             if (block.Compiled != null)

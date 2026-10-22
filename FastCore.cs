@@ -254,7 +254,7 @@ static public partial class Ext
                 }
                 break;
             }
-            case 0xA4 or 0xA5 or 0xA6 or 0xA7 or 0xAA or 0xAB or 0xAC or 0xAD or 0xAE or 0xAF: // 文字列命令(単発)
+            case 0x6C or 0x6D or 0x6E or 0x6F or 0xA4 or 0xA5 or 0xA6 or 0xA7 or 0xAA or 0xAB or 0xAC or 0xAD or 0xAE or 0xAF: // 文字列命令(単発)
                 FStrOne(env, cpu, op, (op & 1) != 0 ? (typeW == 2 ? 4 : 2) : 1, a32);
                 break;
             case 0xA8 or 0xA9: // TEST acc, imm
@@ -362,8 +362,8 @@ static public partial class Ext
             {
                 var op2 = F8();
                 if (op2 == 0x90) break; // F3 90 = PAUSE(NOP 扱い)
-                if (op2 is not (0xA4 or 0xA5 or 0xA6 or 0xA7 or 0xAA or 0xAB or 0xAC or 0xAD or 0xAE or 0xAF))
-                    return false; // INS/OUTS や非文字列命令はモナド版に委ねる
+                if (op2 is not (0x6C or 0x6D or 0x6E or 0x6F or 0xA4 or 0xA5 or 0xA6 or 0xA7 or 0xAA or 0xAB or 0xAC or 0xAD or 0xAE or 0xAF))
+                    return false; // 非文字列命令はモナド版に委ねる
                 var size = (op2 & 1) != 0 ? (typeW == 2 ? 4 : 2) : 1;
                 var repZf = op == 0xF3;
                 var checkZf = op2 is 0xA6 or 0xA7 or 0xAE or 0xAF;
@@ -576,6 +576,19 @@ static public partial class Ext
             {
                 var v = EnvReadN(env, c.ds_base + (a32 ? c.esi : c.si), size);
                 if (size == 1) c.al = (byte)v; else if (size == 2) c.ax = (ushort)v; else c.eax = v;
+                FStrAdvance(c, size, a32, si: true, di: false);
+                break;
+            }
+            case 0x6C or 0x6D: // INS: ポート DX から 1 要素読んで [ES:DI] へ(XP の ATA ドライバは rep insw でセクタを読む)
+            {
+                var dst = c.es_base + (a32 ? c.edi : c.di);
+                EnvWriteN(env, dst, size, EnvInPortN(env, c.dx, size));
+                FStrAdvance(c, size, a32, si: false, di: true);
+                break;
+            }
+            case 0x6E or 0x6F: // OUTS: [DS:SI] から 1 要素読んでポート DX へ
+            {
+                EnvOutPortN(env, c.dx, size, EnvReadN(env, c.ds_base + (a32 ? c.esi : c.si), size));
                 FStrAdvance(c, size, a32, si: true, di: false);
                 break;
             }
