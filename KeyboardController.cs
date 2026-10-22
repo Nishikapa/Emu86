@@ -59,41 +59,56 @@ internal sealed class KeyboardController
         }
     }
 
+    // コントローラコマンド(ポート 0x64)の表。引数を取るもの(0x60、0xD1-0xD4)は PendingCommand に記録し、次の 0x60 書き込みを
+    // Arguments の表で処理する。0xF0-0xFF は出力ポートのパルス(bit0=0 でリセット)。表にないコマンド(AD/AE の禁止/許可など)は無視。
+    static readonly Dictionary<byte, Action<KeyboardController>> ControllerCommands = new()
+    {
+        [0x20] = kc => kc.Output.Enqueue(kc.CommandByte), // コマンドバイト読み出し
+        [0x60] = kc => kc.PendingCommand = 0x60,          // 次の 0x60 書き込みがコマンドバイト
+        [0xA7] = kc => kc.CommandByte |= 0x20,            // AUX 禁止
+        [0xA8] = kc => kc.CommandByte &= 0xDF,            // AUX 許可
+        [0xA9] = kc => kc.Output.Enqueue(0x00),           // マウスポート試験 OK
+        [0xAA] = kc => kc.Output.Enqueue(0x55),           // 自己診断 OK
+        [0xAB] = kc => kc.Output.Enqueue(0x00),           // インタフェース試験 OK
+        [0xD0] = kc => kc.Output.Enqueue(0x03),           // 出力ポート読み(A20 有効・リセット非活性)
+        [0xD1] = kc => kc.PendingCommand = 0xD1,          // 出力ポート書き込み(引数)
+        [0xD2] = kc => kc.PendingCommand = 0xD2,          // 出力バッファへ書き込み(引数)
+        [0xD3] = kc => kc.PendingCommand = 0xD3,          // AUX 出力バッファへ書き込み(引数)
+        [0xD4] = kc => kc.PendingCommand = 0xD4,          // マウスへ送る(引数)
+    };
+
+    static readonly Dictionary<int, Action<KeyboardController, byte>> Arguments = new()
+    {
+        [0x60] = (kc, value) => kc.CommandByte = value,
+        [0xD1] = (kc, value) => { if ((value & 1) == 0) kc.ResetRequested = true; }, // 出力ポート: bit0=0 でリセット
+        [0xD2] = (kc, value) => kc.Output.Enqueue(value),
+        [0xD3] = (kc, value) => kc.Mouse.Output.Enqueue(value),
+        [0xD4] = (kc, value) => kc.Mouse.Command(value),
+    };
+
+    // キーボードへのコマンド(ポート 0x60、保留コマンドが無いとき)の応答: ACK に続く追加応答。表にないコマンドは ACK だけ。
+    static readonly Dictionary<byte, byte[]> KeyboardReplies = new()
+    {
+        [0xFF] = [0xAA],       // リセット → BAT OK
+        [0xF2] = [0xAB, 0x83], // ID
+    };
+
     public void Write(int port, byte val)
     {
         switch (port)
         {
-            case 0x64: // 8042 コントローラコマンド
+            case 0x64:
                 PendingCommand = 0;
-                switch (val)
-                {
-                    case 0x20: Output.Enqueue(CommandByte); break;       // コマンドバイト読み出し
-                    case 0x60: PendingCommand = 0x60; break;                  // 次の 0x60 書き込みがコマンドバイト
-                    case 0xA7: CommandByte |= 0x20; break;                    // AUX 禁止
-                    case 0xA8: CommandByte &= 0xDF; break;                    // AUX 許可
-                    case 0xAA: Output.Enqueue(0x55); break;                  // 自己診断 OK
-                    case 0xAB: Output.Enqueue(0x00); break;                  // インタフェース試験 OK
-                    case 0xA9: Output.Enqueue(0x00); break;                  // マウスポート試験 OK
-                    case 0xD0: Output.Enqueue(0x03); break;                  // 出力ポート読み(A20 有効・リセット非活性)
-                    case 0xD1 or 0xD2 or 0xD3 or 0xD4: PendingCommand = val; break; // 次の 0x60 書き込みが引数
-                    case >= 0xF0: if ((val & 1) == 0) ResetRequested = true; break; // 出力ポートのパルス: bit0=リセット
-                    default: break;                                              // AD/AE(禁止/許可)、A7/A8 等は無視
-                }
+                if (val >= 0xF0) { if ((val & 1) == 0) ResetRequested = true; }
+                else if (ControllerCommands.TryGetValue(val, out var command)) command(this);
                 break;
-            case 0x60: // 8042 データ: 保留コマンドの引数、またはキーボードへのコマンド
-                switch (PendingCommand)
+            case 0x60:
+                if (Arguments.TryGetValue(PendingCommand, out var argument)) argument(this, val);
+                else
                 {
-                    case 0x60: CommandByte = val; break;
-                    case 0xD1: if ((val & 1) == 0) ResetRequested = true; break; // 出力ポート書き込み: bit0=0 でリセット
-                    case 0xD2: Output.Enqueue(val); break; // 出力バッファへ書き込み
-                    case 0xD3: Mouse.Output.Enqueue(val); break; // AUX 出力バッファへ書き込み
-                    case 0xD4: Mouse.Command(val); break;       // マウスへ送る
-                    default:
-                        // キーボードコマンド: ACK を返し、必要な追加応答を積む。
-                        Output.Enqueue(0xFA);
-                        if (val == 0xFF) Output.Enqueue(0xAA);                          // リセット → BAT OK
-                        else if (val == 0xF2) { Output.Enqueue(0xAB); Output.Enqueue(0x83); } // ID
-                        break;
+                    Output.Enqueue(0xFA);
+                    if (KeyboardReplies.TryGetValue(val, out var replies))
+                        foreach (var reply in replies) Output.Enqueue(reply);
                 }
                 PendingCommand = 0;
                 break;

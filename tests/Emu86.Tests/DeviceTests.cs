@@ -118,9 +118,41 @@ static class DeviceTests
         }
     }
 
+    // 8042 のコマンド表: 自己診断、コマンドバイトの読み書き、出力ポート読み、キーボードコマンドの応答、D4 経由のマウス、
+    // 出力ポートとパルスによるリセット要求、表にないコマンドの無視。
+    static void Controller8042()
+    {
+        using var env = new EmuEnvironment(memory: new byte[0x10000]);
+        EnvOutPort(env, 0x64, 0xAA);
+        Equal((byte)0x55, EnvInPort(env, 0x60), "self test");
+        EnvOutPort(env, 0x64, 0x20);
+        Equal((byte)0x45, EnvInPort(env, 0x60), "command byte read");
+        EnvOutPort(env, 0x64, 0x60); EnvOutPort(env, 0x60, 0x47);
+        Equal((byte)0x47, env.Keyboard.CommandByte, "command byte written through the argument");
+        EnvOutPort(env, 0x64, 0xD0);
+        Equal((byte)0x03, EnvInPort(env, 0x60), "output port read");
+        EnvOutPort(env, 0x60, 0xF2);
+        Equal("FA,AB,83", string.Join(",", Enumerable.Range(0, 3).Select(_ => EnvInPort(env, 0x60).ToString("X2"))), "keyboard ID reply");
+        EnvOutPort(env, 0x60, 0xFF);
+        Equal("FA,AA", string.Join(",", Enumerable.Range(0, 2).Select(_ => EnvInPort(env, 0x60).ToString("X2"))), "keyboard reset reply");
+        EnvOutPort(env, 0x60, 0xED);
+        Equal("FA", EnvInPort(env, 0x60).ToString("X2"), "other keyboard commands are acknowledged only");
+        EnvOutPort(env, 0x64, 0xD4); EnvOutPort(env, 0x60, 0xF4);
+        Equal((byte)0x21, (byte)(EnvInPort(env, 0x64) & 0x21), "mouse data waiting (OBF and AUX)");
+        Equal((byte)0xFA, EnvInPort(env, 0x60), "mouse acknowledges through the AUX path");
+        Equal(true, env.Keyboard.Mouse.Enabled, "mouse enabled by F4");
+        EnvOutPort(env, 0x64, 0xAD);
+        Equal((byte)0x14, (byte)(EnvInPort(env, 0x64) & 0x35), "an unknown controller command produces no output");
+        EnvOutPort(env, 0x64, 0xD1); EnvOutPort(env, 0x60, 0xFF);
+        Equal(false, env.Keyboard.ResetRequested, "output port write with bit0 set does not reset");
+        EnvOutPort(env, 0x64, 0xFE);
+        Equal(true, env.Keyboard.ResetRequested, "pulse with bit0 clear requests a reset");
+    }
+
     public static void Run()
     {
         PortSequences();
+        Controller8042();
         Compatibility();
         Console.WriteLine($"Device assertions passed: {checks}");
     }

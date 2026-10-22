@@ -159,9 +159,45 @@ static class DiskTests
         Throws<InvalidDataException>(() => Count(3, U64).Parse(buffer), "truncated structure");
     }
 
+    // ATA のコマンド表: WRITE SECTORS で 1 セクタ書き、READ SECTORS で読み戻す。IDENTIFY の応答、非データコマンドの完了、
+    // 未対応コマンドと IDENTIFY PACKET の abort、ステータス読み出しによる INTRQ の取り下げ。
+    static void AtaCommands()
+    {
+        const string basePath = "ata.vhd";
+        const string overlayPath = "ata.avhdx";
+        using (var file = File.Create(basePath)) file.SetLength(16 * 1024 * 1024);
+        DiskImage.EnsureOverlay(overlayPath, basePath);
+        using var ata = new AtaDevice(new DiskImage(overlayPath, writable: true));
+        void Issue(byte command, int count = 1, int lba = 5)
+        {
+            ata.WriteReg(0x1F2, (byte)count); ata.WriteReg(0x1F3, (byte)lba); ata.WriteReg(0x1F4, 0); ata.WriteReg(0x1F5, 0); ata.WriteReg(0x1F6, 0xE0);
+            ata.WriteReg(0x1F7, command);
+        }
+        Issue(0x30);
+        Equal((byte)0x58, ata.ReadReg(0x3F6), "WRITE SECTORS requests data (DRDY|DSC|DRQ) without INTRQ");
+        Equal(false, ata.IrqPending, "no interrupt before the host writes the block");
+        for (var word = 0; word < 256; word++) ata.WriteData(2, (uint)(0x1234 + word));
+        Equal((true, (byte)0x50), (ata.IrqPending, ata.ReadReg(0x3F6)), "block written: INTRQ and transfer complete");
+        Issue(0x20);
+        Equal((true, (byte)0x58), (ata.IrqPending, ata.ReadReg(0x3F6)), "READ SECTORS prepares data with INTRQ");
+        Equal(true, Enumerable.Range(0, 256).All(word => ata.ReadData(2) == (uint)(0x1234 + word)), "the sector reads back");
+        Equal((byte)0x50, ata.ReadReg(0x1F7), "transfer complete; the status read drops INTRQ");
+        Equal(false, ata.IrqPending, "INTRQ dropped by the status register read");
+        Issue(0xEC);
+        Equal(0x0040u, ata.ReadData(2), "IDENTIFY word 0: ATA device");
+        for (var word = 1; word < 60; word++) ata.ReadData(2);
+        Equal(16 * 1024 * 1024 / 512u, ata.ReadData(4), "IDENTIFY words 60-61: LBA sectors");
+        Issue(0xEF);
+        Equal((true, (byte)0x50), (ata.IrqPending, ata.ReadReg(0x3F6)), "SET FEATURES completes");
+        Issue(0xC8);
+        Equal(((byte)0x51, (byte)0x04), (ata.ReadReg(0x3F6), ata.ReadReg(0x1F1)), "an unsupported (DMA) command aborts");
+        Issue(0xA1);
+        Equal(((byte)0x51, (byte)0x04), (ata.ReadReg(0x3F6), ata.ReadReg(0x1F1)), "IDENTIFY PACKET DEVICE aborts");
+    }
+
     public static void Run()
     {
-        FieldParsers(); SmallRawDisk(); Layouts(); RoundTrips(); InvalidRegions();
+        FieldParsers(); SmallRawDisk(); Layouts(); RoundTrips(); InvalidRegions(); AtaCommands();
         Console.WriteLine($"Disk checks passed: {assertions} assertions");
     }
 }

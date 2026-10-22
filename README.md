@@ -196,7 +196,7 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | `IrqDelivery.cs` | ハードウェア割り込みの選択（優先順・IF・PIC のマスクと in-service・IDT の準備）と、配送・in-service 設定・要求取り下げの `State`。 |
 | `EmulationControl.cs` | UI スレッドからの中断・再開要求と、中断中・停止後の CPU 状態の公開。 |
 | `BootAutomation.cs` | `--boot-debug` の NTLDR 起動メニュー自動操作。手順はイテレータ（コルーチン）の `Script` に上から順に書き、`yield` した待ち条件（画面の文字列、命令数）が満たされるまで `Step` は進まない。画面の読み取りは行ごとの LINQ クエリ。 |
-| `RunDiagnostics.cs` / `WindowsDiagnostics.cs` | トレース・監視点・停止診断と、Windows 固有の構造体・スタック解析。後者はゲストメモリの Reader `Guest<T>`（`Dword`/`Byte`/`Ascii`/連結リストの `Walk`/例外を既定値にする `Or`）をクエリ構文で合成して、フレームチェーンや入口の引数・IRP・デバッグ文字列を読む。 |
+| `RunDiagnostics.cs` / `WindowsDiagnostics.cs` | トレース・監視点・停止診断と、Windows 固有の構造体・スタック解析。停止条件はオプションから組み立てた規則のリスト（命令の前のブレークポイント、後の監視点・トラップ・分岐履歴・トレース）を順に試す。後者はゲストメモリの Reader `Guest<T>`（`Dword`/`Byte`/`Ascii`/連結リストの `Walk`/例外を既定値にする `Or`）をクエリ構文で合成して、フレームチェーンや入口の引数・IRP・デバッグ文字列を読む。 |
 | `EnvironmentFactory.cs` / `DiskConfiguration.cs` | 埋め込み BIOS の読み込み、ディスク探索・明示的なパス設定、通常起動用の環境生成。 |
 | `SnapshotStore.cs` | 保存形式の版管理、チェックサム検証、ディスク差分を含むチェックポイントの確定と復元。 |
 | `Codec.cs` | スナップショットの双方向コーデック `Codec<T>`。フィールドを保存形式の並び順に 1 度だけ登録し（`since:` で追加された版を指定）、保存と復元を同じ記述から導出する。 |
@@ -204,16 +204,16 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | `Environment.cs` | `EmuEnvironment`（既定 256 MB メモリ、64 KB I/O ポート、ATA 接続）と、メモリ/レジスタ/スタックアクセス、ページング変換（非 PAE 2 段と PAE 3 段を段の表 `PageLevel[]` で共通に歩く）と TLB、GDT ディスクリプタデコード、IDT 経由の割り込み配送、文字列・ビット操作。I/O ポートの入出力は `PortMap.cs` の表を引く。 |
 | `PortMap.cs` | I/O ポートの表。1 項 = ポート範囲とデバイスの読み書き（1 バイト、幅付きを自分で扱う項、デバイスの有無や PCI の BAR で決まる範囲の条件）。起動時にポート番号ごとの配列に展開し、入出力は該当する項を表の順に試すだけ。該当がなければ 64 KB の `IoPort` 配列を素通し。 |
 | `Environment.Devices.cs` | 環境ごとのデバイス所有と、既存の状態名への転送プロパティ。保存形式のバイト順・バージョンは変更しない。 |
-| `PicDevice.cs` / `PitDevice.cs` / `CmosDevice.cs` / `KeyboardController.cs` / `MouseDevice.cs` / `AcpiPmDevice.cs` | PIC・PIT・CMOS・8042・PS/2 マウス・ACPI 電源管理の状態と入出力処理。PIC のマスタ/スレーブは共通実装の独立したインスタンス。 |
+| `PicDevice.cs` / `PitDevice.cs` / `CmosDevice.cs` / `KeyboardController.cs` / `MouseDevice.cs` / `AcpiPmDevice.cs` | PIC・PIT・CMOS・8042・PS/2 マウス・ACPI 電源管理の状態と入出力処理。PIC のマスタ/スレーブは共通実装の独立したインスタンス。8042 とマウスのコマンドは表（コマンド → 応答と動作、引数を取るものは次のバイトの処理）で、引数待ちの状態はスナップショットに残る `PendingCommand` のまま。 |
 | `Pci.cs` | PCI コンフィグ空間（0xCF8/0xCFC）。i440FX ホストブリッジ、PIIX4 ISA/IDE/電源管理、VGA 互換デバイスと拡張 ROM BAR。 |
-| `SerialPort.cs` | 16550 互換 UART と、ホストの名前付きパイプへの橋渡し（送受信は専用タスク）。 |
+| `SerialPort.cs` | 16550 互換 UART と、ホストの名前付きパイプへの橋渡し（送受信は専用タスク）。レジスタはオフセット 0〜7 の `Register`（読み出しと書き込みの Lens）の表。 |
 | `VgaDevice.cs` / `VgaBiosStub.cs` | VGA のレジスタ・VRAM ウィンドウ・描画と、拡張 ROM として見せる最小 VGA BIOS（INT 10h を C# 側で処理）。レジスタは「ポート → `Register`（読み出しと書き込みの Lens）」の表で、インデックス/データのポート対（Sequencer/Graphics/CRTC/Attribute）は `Indexed` が作る（範囲外の要素、CRTC の保護、Attribute のフリップフロップ）。INT 10h は「AH → State」の表（AL/BL で分かれる機能は入れ子の表）で、レジスタの出し入れは `Accessor` の `Get`/`Set` で書く。 |
 | `RomBuilder.cs` | オプション ROM のバイト列ビルダ（Writer）。ラベルで `jmp short` の変位やポインタを解決し、末尾でチェックサムを埋める。 |
 | `Operand.cs` | オペランド Lens `Operand`（読み出す State と書き戻す関数）と `Reg`/`Rm`/`Const`、その上の `Move`/`Binary`/`Swap`。d ビットで向きが決まる命令はオペランドを入れ替えるだけで書く。 |
 | `VgaWindow.cs` / `RegisterDialog.cs` | Windows Forms の表示ウィンドウ（描画、キー入力とマウス捕捉、中断・再開ボタン）とレジスタ表示ダイアログ。 |
 | `Ext.cs` | 型変換ユーティリティ（`ToTypeData`/`MapType`/`Choice_` 等）。 |
 | `Program.cs` / `Program.*.cs` | 命令の実装とオペコードテーブル。起動処理は `Program.Runner.cs`。 |
-| `Disk.cs` | `DiskImage`（VHD/VHDX/AVHDX/生イメージの CoW ディスクバックエンド。セクタの所在は「自分 → 親 → ゼロ」の `Locate` チェーンで解決）と `AtaDevice`（ATA PIO デバイス、IRQ14）。ヘッダの読み取りは `DiskFormat.cs` のレイアウトを当てはめるだけ。 |
+| `Disk.cs` | `DiskImage`（VHD/VHDX/AVHDX/生イメージの CoW ディスクバックエンド。セクタの所在は「自分 → 親 → ゼロ」の `Locate` チェーンで解決）と `AtaDevice`（ATA PIO デバイス、IRQ14。コマンドは「番号 → 動作」の表で、表にないものは abort）。ヘッダの読み取りは `DiskFormat.cs` のレイアウトを当てはめるだけ。 |
 | `DiskFormat.cs` | バイト列のパーサコンビネータ `Field<T>`（`U32`/`U64BE`/`Uuid`/`Utf16`、構造体の先頭からの位置 `At`、繰り返し `Count`、識別子 `Magic`）と、それで書いた VHD/VHDX の読み取り側の形式（フッタ、動的ヘッダとロケータ、リージョン表、メタデータ表と各項目、ペアレントロケータ）。 |
 | `VhdxBatLayout.cs` | VHDX のペイロード・ビットマップの位置、BAT の必要エントリ数・領域サイズ。 |
 | `tests/Emu86.Tests/` | 本体を参照する回帰テストと、実行状態・トレースの比較用データ。 |

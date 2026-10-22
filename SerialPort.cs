@@ -17,55 +17,51 @@ public sealed class Uart16550
     public bool Dlab => (Lcr & 0x80) != 0;
     public bool IrqAsserted => ((Ier & 1) != 0 && Rx.Count > 0) || ((Ier & 2) != 0 && ThrePending);
 
-    public byte Read(int offset)
-    {
-        switch (offset)
-        {
-            case 0:
-                if (Dlab) return Dll;
-                return Rx.Count > 0 ? Rx.Dequeue() : (byte)0;
-            case 1: return Dlab ? Dlm : Ier;
-            case 2: // IIR: 優先度順(受信データ > THRE)。THRE 割り込みは読むと取り下げる。
-                var fifo = (Fcr & 1) != 0 ? 0xC0 : 0x00;
-                if ((Ier & 1) != 0 && Rx.Count > 0) return (byte)(fifo | 0x04);
-                if ((Ier & 2) != 0 && ThrePending) { ThrePending = false; return (byte)(fifo | 0x02); }
+    // レジスタ(Lens)の表: オフセット 0-7 の読み出しと書き込み(null なら書けない)。DLAB で意味が変わるものはその場で分ける。
+    readonly record struct Register(Func<Uart16550, byte> Read, Action<Uart16550, byte> Write = null);
+
+    static readonly Register[] Registers =
+    [
+        // 0: RBR/THR(DLAB=1 なら DLL)。送信は即時にホストへ(ループバックなら受信 FIFO へ)、THRE 割り込みを保留する。
+        new(uart => uart.Dlab ? uart.Dll : uart.Rx.Count > 0 ? uart.Rx.Dequeue() : (byte)0,
+            (uart, value) =>
+            {
+                if (uart.Dlab) { uart.Dll = value; return; }
+                if ((uart.Mcr & 0x10) != 0) uart.Rx.Enqueue(value); else uart.Host?.Send(value);
+                if ((uart.Ier & 2) != 0) uart.ThrePending = true;
+            }),
+        // 1: IER(DLAB=1 なら DLM)
+        new(uart => uart.Dlab ? uart.Dlm : uart.Ier,
+            (uart, value) =>
+            {
+                if (uart.Dlab) uart.Dlm = value;
+                else { uart.Ier = (byte)(value & 0x0F); if ((uart.Ier & 2) != 0) uart.ThrePending = true; }
+            }),
+        // 2: IIR(読み出し: 優先度順に受信データ > THRE。THRE 割り込みは読むと取り下げる)/ FCR(書き込み: bit1 で受信 FIFO を消す)
+        new(uart =>
+            {
+                var fifo = (uart.Fcr & 1) != 0 ? 0xC0 : 0x00;
+                if ((uart.Ier & 1) != 0 && uart.Rx.Count > 0) return (byte)(fifo | 0x04);
+                if ((uart.Ier & 2) != 0 && uart.ThrePending) { uart.ThrePending = false; return (byte)(fifo | 0x02); }
                 return (byte)(fifo | 0x01);
-            case 3: return Lcr;
-            case 4: return Mcr;
-            case 5: return (byte)(0x60 | (Rx.Count > 0 ? 0x01 : 0x00)); // THRE | TEMT | DR
-            case 6:
-                // MSR: ループバック(MCR bit4)では RTS→CTS、DTR→DSR、OUT1→RI、OUT2→DCD を映す(KDCOM の
-                // ポート存在検査はこれを見る)。通常時は CTS/DSR/DCD を立てておく。
-                if ((Mcr & 0x10) != 0)
-                    return (byte)(((Mcr & 0x02) != 0 ? 0x10 : 0) | ((Mcr & 0x01) != 0 ? 0x20 : 0) | ((Mcr & 0x04) != 0 ? 0x40 : 0) | ((Mcr & 0x08) != 0 ? 0x80 : 0));
-                return 0xB0;
-            case 7: return Scr;
-            default: return 0xFF;
-        }
-    }
+            },
+            (uart, value) => { uart.Fcr = value; if ((value & 0x02) != 0) uart.Rx.Clear(); }),
+        new(uart => uart.Lcr, (uart, value) => uart.Lcr = value),                   // 3: LCR
+        new(uart => uart.Mcr, (uart, value) => uart.Mcr = (byte)(value & 0x1F)),    // 4: MCR
+        new(uart => (byte)(0x60 | (uart.Rx.Count > 0 ? 0x01 : 0x00))),             // 5: LSR: THRE | TEMT | DR
+        // 6: MSR: ループバック(MCR bit4)では RTS→CTS、DTR→DSR、OUT1→RI、OUT2→DCD を映す(KDCOM のポート存在検査はこれを見る)。
+        //    通常時は CTS/DSR/DCD を立てておく。
+        new(uart => (uart.Mcr & 0x10) != 0
+            ? (byte)(((uart.Mcr & 0x02) != 0 ? 0x10 : 0) | ((uart.Mcr & 0x01) != 0 ? 0x20 : 0) | ((uart.Mcr & 0x04) != 0 ? 0x40 : 0) | ((uart.Mcr & 0x08) != 0 ? 0x80 : 0))
+            : (byte)0xB0),
+        new(uart => uart.Scr, (uart, value) => uart.Scr = value),                   // 7: SCR
+    ];
+
+    public byte Read(int offset) => offset is >= 0 and < 8 ? Registers[offset].Read(this) : (byte)0xFF;
 
     public void Write(int offset, byte value)
     {
-        switch (offset)
-        {
-            case 0:
-                if (Dlab) { Dll = value; break; }
-                if ((Mcr & 0x10) != 0) Rx.Enqueue(value); // ループバック
-                else Host?.Send(value);
-                if ((Ier & 2) != 0) ThrePending = true;
-                break;
-            case 1:
-                if (Dlab) Dlm = value;
-                else { Ier = (byte)(value & 0x0F); if ((Ier & 2) != 0) ThrePending = true; }
-                break;
-            case 2:
-                Fcr = value;
-                if ((value & 0x02) != 0) Rx.Clear();
-                break;
-            case 3: Lcr = value; break;
-            case 4: Mcr = (byte)(value & 0x1F); break;
-            case 7: Scr = value; break;
-        }
+        if (offset is >= 0 and < 8) Registers[offset].Write?.Invoke(this, value);
     }
 
     // 実行スレッドから: ホストから届いたバイトを受信 FIFO へ移し、送信バッファを流す。

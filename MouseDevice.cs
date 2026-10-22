@@ -46,6 +46,55 @@ public sealed class MouseDevice
         if (Id == 3) Output.Enqueue((byte)Math.Clamp(dz, -8, 7));
     }
 
+    // コマンド表: 応答(ACK から始まるバイト列)と動作。F3/E8 は次のバイトを引数に取り(PendingCommand)、Arguments で処理する。
+    // 表にないコマンドは再送要求(FE)。
+    readonly record struct MouseCommand(byte[] Replies, Action<MouseDevice> Action = null, bool TakesArgument = false);
+
+    static readonly Dictionary<byte, MouseCommand> Commands = new()
+    {
+        [0xFF] = new([0xFA, 0xAA, 0x00], mouse => // リセット: ACK, BAT 完了, ID
+        {
+            mouse.Enabled = false; mouse.Remote = false; mouse.SampleRate = 100; mouse.Resolution = 2; mouse.Scaling2 = false; mouse.Id = 0;
+            Array.Clear(mouse.rateHistory);
+        }),
+        [0xF6] = new([0xFA], mouse => { mouse.Enabled = false; mouse.SampleRate = 100; mouse.Resolution = 2; mouse.Scaling2 = false; }), // 既定値
+        [0xF5] = new([0xFA], mouse => mouse.Enabled = false),
+        [0xF4] = new([0xFA], mouse => mouse.Enabled = true),
+        [0xF3] = new([0xFA], TakesArgument: true),              // サンプルレート
+        [0xE8] = new([0xFA], TakesArgument: true),              // 解像度
+        [0xF2] = new([0xFA], mouse => mouse.Output.Enqueue(mouse.Id)),
+        [0xF0] = new([0xFA], mouse => mouse.Remote = true),
+        [0xEA] = new([0xFA], mouse => mouse.Remote = false),
+        [0xEB] = new([0xFA], mouse => mouse.ReportOnce()),      // データ読み出し(リモートモード)
+        [0xE9] = new([0xFA], mouse =>                           // ステータス要求
+        {
+            mouse.Output.Enqueue((byte)((mouse.Remote ? 0x40 : 0) | (mouse.Enabled ? 0x20 : 0) | (mouse.Scaling2 ? 0x10 : 0) | mouse.LastButtons));
+            mouse.Output.Enqueue(mouse.Resolution);
+            mouse.Output.Enqueue(mouse.SampleRate);
+        }),
+        [0xE7] = new([0xFA], mouse => mouse.Scaling2 = true),
+        [0xE6] = new([0xFA], mouse => mouse.Scaling2 = false),
+        [0xEE] = new([0xFA]), // エコーモード(簡略)
+        [0xEC] = new([0xFA]),
+    };
+
+    static readonly Dictionary<int, Action<MouseDevice, byte>> Arguments = new()
+    {
+        [0xF3] = (mouse, value) =>
+        {
+            mouse.SampleRate = value;
+            mouse.rateHistory[0] = mouse.rateHistory[1]; mouse.rateHistory[1] = mouse.rateHistory[2]; mouse.rateHistory[2] = value;
+            if (mouse.rateHistory[0] == 200 && mouse.rateHistory[1] == 100 && mouse.rateHistory[2] == 80) mouse.Id = 3; // IntelliMouse の魔法シーケンス
+        },
+        [0xE8] = (mouse, value) => mouse.Resolution = (byte)(value & 3),
+    };
+
+    void ReportOnce()
+    {
+        if (motion.TryDequeue(out var m)) EnqueuePacket(m.dx, m.dy, m.dz, m.buttons);
+        else EnqueuePacket(0, 0, 0, LastButtons);
+    }
+
     // 8042 の D4 経由でマウスへ送られた 1 バイト。応答(ACK 等)を出力バッファへ積む。
     public void Command(byte value)
     {
@@ -54,50 +103,17 @@ public sealed class MouseDevice
             var command = PendingCommand;
             PendingCommand = 0;
             Output.Enqueue(0xFA);
-            if (command == 0xF3)
-            {
-                SampleRate = value;
-                rateHistory[0] = rateHistory[1]; rateHistory[1] = rateHistory[2]; rateHistory[2] = value;
-                if (rateHistory[0] == 200 && rateHistory[1] == 100 && rateHistory[2] == 80) Id = 3;
-            }
-            else if (command == 0xE8)
-                Resolution = (byte)(value & 3);
+            if (Arguments.TryGetValue(command, out var argument)) argument(this, value);
             return;
         }
-        switch (value)
+        if (!Commands.TryGetValue(value, out var entry))
         {
-            case 0xFF: // リセット: ACK, BAT 完了, ID
-                Output.Enqueue(0xFA); Output.Enqueue(0xAA); Output.Enqueue(0x00);
-                Enabled = false; Remote = false; SampleRate = 100; Resolution = 2; Scaling2 = false; Id = 0;
-                Array.Clear(rateHistory);
-                break;
-            case 0xF6: // 既定値
-                Output.Enqueue(0xFA);
-                Enabled = false; SampleRate = 100; Resolution = 2; Scaling2 = false;
-                break;
-            case 0xF5: Output.Enqueue(0xFA); Enabled = false; break;
-            case 0xF4: Output.Enqueue(0xFA); Enabled = true; break;
-            case 0xF3 or 0xE8: Output.Enqueue(0xFA); PendingCommand = value; break;
-            case 0xF2: Output.Enqueue(0xFA); Output.Enqueue(Id); break;
-            case 0xF0: Output.Enqueue(0xFA); Remote = true; break;
-            case 0xEA: Output.Enqueue(0xFA); Remote = false; break;
-            case 0xEB: // データ読み出し(リモートモード)
-                Output.Enqueue(0xFA);
-                if (motion.TryDequeue(out var m)) EnqueuePacket(m.dx, m.dy, m.dz, m.buttons);
-                else EnqueuePacket(0, 0, 0, LastButtons);
-                break;
-            case 0xE9: // ステータス要求
-                Output.Enqueue(0xFA);
-                Output.Enqueue((byte)((Remote ? 0x40 : 0) | (Enabled ? 0x20 : 0) | (Scaling2 ? 0x10 : 0) | LastButtons));
-                Output.Enqueue(Resolution);
-                Output.Enqueue(SampleRate);
-                break;
-            case 0xE7: Output.Enqueue(0xFA); Scaling2 = true; break;
-            case 0xE6: Output.Enqueue(0xFA); Scaling2 = false; break;
-            case 0xEE: Output.Enqueue(0xFA); break; // エコーモード(簡略)
-            case 0xEC: Output.Enqueue(0xFA); break;
-            default: Output.Enqueue(0xFE); break;   // 未知のコマンドは再送要求
+            Output.Enqueue(0xFE);
+            return;
         }
+        foreach (var reply in entry.Replies) Output.Enqueue(reply);
+        entry.Action?.Invoke(this);
+        if (entry.TakesArgument) PendingCommand = value;
     }
 
     // スナップショット(v9 から)。
