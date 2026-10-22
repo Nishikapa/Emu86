@@ -40,6 +40,14 @@ internal sealed class RunDiagnostics
         if (count > 0) this.trace?.WriteLine($"\n--- resumed at instruction {count} ---");
     }
 
+    // 連結したブロックの途中で起きた制御転送をトレースに書く(AfterInstruction の分岐判定と同じ規則。CS は変わらない)。
+    public void TraceTransfers(ushort cs, List<(uint From, uint To)> transfers)
+    {
+        if (trace == null) return;
+        foreach (var (from, to) in transfers)
+            if (!(to > from && to <= from + 15)) trace.WriteLine($"{cs:x4}:{to:x8}");
+    }
+
     public bool BeforeInstruction(long count)
     {
         env.CurEip = cpu.eip;
