@@ -376,7 +376,8 @@ static public partial class Ext
                 }
                 break;
             }
-            case 0xF4: // HLT(モナド版も NOP)
+            case 0xF4: // HLT: ランナーが待機(次の割り込みまで仮想時間を進める)に使う印を立てる
+                cpu.Halted = true;
                 break;
             case 0xF5: cpu.cf = !cpu.cf; break; // CMC
             case 0xF6 or 0xF7: // Group3
