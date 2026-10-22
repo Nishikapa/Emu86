@@ -507,6 +507,15 @@ static class CoreTests
     {
         foreach (var code in new byte[][] { [0xF3, 0xA5], [0x66, 0xF3, 0xAB], [0xF3, 0xAA], [0xA6], [0xA7], [0xAE], [0xAF], [0xAD], [0x50], [0x66, 0x50], [0x58], [0x66, 0x58] })
             Check(code, CreateCpu(0x87654321), env => Array.Fill(env.OneMegaMemory_, (byte)0x5a, 0x3000, 16));
+        // INS/OUTS(単発と REP、8/16/32 ビット、DF): ポート 0x300.. は素通しの IoPort 配列なので両コアで同じ値を読む。
+        foreach (var code in new byte[][] { [0x6C], [0x6D], [0x66, 0x6D], [0x6E], [0x6F], [0x66, 0x6F], [0xF3, 0x6D], [0x66, 0xF3, 0x6D], [0xF3, 0x6C], [0xF3, 0x6F], [0x66, 0xF3, 0x6E] })
+        foreach (var direction in new uint[] { 0, 0x400 })
+        {
+            var io = CreateCpu(0x87654321, flags: 0x202 | direction);
+            io.edx = 0x300; io.edi = 0x3008; io.esi = 0x3008;
+            Check(code, io, env => { Array.Fill(env.OneMegaMemory_, (byte)0x5a, 0x3000, 16); for (var i = 0; i < 4; i++) env.IoPort[0x300 + i] = (byte)(0x11 * (i + 1)); },
+                (cpu, _) => Equal(code.Contains((byte)0xF3) ? 0u : 3u, cpu.ecx, $"REP INS/OUTS count {Convert.ToHexString(code)}"));
+        }
         for (var type = 1; type < 3; type++)
             Check(Store(type), CreateCpu(0x12345678, 0x1000), env => { MapPages(env); BitConverter.GetBytes(3u).CopyTo(env.OneMegaMemory_, 0xA004); env.WatchLo = 0; env.WatchHi = 1; }, (_, env) => Equal(true, env.WatchTriggered, "watch at physical zero"), diagnostics: true);
         Reset(SlowEnv, [0xD9, 0xE8, 0xDD, 0x1B]);

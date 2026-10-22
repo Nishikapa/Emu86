@@ -527,15 +527,82 @@ public static class Semantics
 
     static Expression Const<T>(T value) => Expression.Constant(value);
 
+    // コンパイル済みコードは CPU のプロパティを直接読み書きする(解釈器は番号で引くヘルパを使う)。
+    static readonly string[] Registers32 = [nameof(CPU.eax), nameof(CPU.ecx), nameof(CPU.edx), nameof(CPU.ebx), nameof(CPU.esp), nameof(CPU.ebp), nameof(CPU.esi), nameof(CPU.edi)];
+    static readonly string[] Registers16 = [nameof(CPU.ax), nameof(CPU.cx), nameof(CPU.dx), nameof(CPU.bx), nameof(CPU.sp), nameof(CPU.bp), nameof(CPU.si), nameof(CPU.di)];
+    static readonly string[] Registers8 = [nameof(CPU.al), nameof(CPU.cl), nameof(CPU.dl), nameof(CPU.bl), nameof(CPU.ah), nameof(CPU.ch), nameof(CPU.dh), nameof(CPU.bh)];
+    static MemberExpression Register(Scope s, int reg, int type) =>
+        Expression.Property(s.Cpu, (type == 0 ? Registers8 : type == 1 ? Registers16 : Registers32)[reg]);
+    static Expression ReadRegisterOf(Scope s, int reg, int type) =>
+        type == 2 ? Register(s, reg, type) : Expression.Convert(Register(s, reg, type), typeof(uint));
+    static Expression WriteRegisterOf(Scope s, int reg, int type, Expression value) =>
+        Expression.Assign(Register(s, reg, type), type == 2 ? value : Expression.Convert(value, type == 0 ? typeof(byte) : typeof(ushort)));
+    static Expression Eflags(Scope s) => Expression.Property(s.Cpu, nameof(CPU.eflags));
+    static Expression Bit(Expression flags, uint mask) => Expression.NotEqual(Expression.And(flags, Const(mask)), Const(0u));
+
+    // EvaluateCondition と同じ条件を EFLAGS のビット演算で(0x40 ZF、0x80 SF、0x800 OF、0x1 CF、0x4 PF)。
+    static Expression CompileCondition(Scope s, int condition)
+    {
+        var flags = Expression.Variable(typeof(uint), "flags");
+        var signNotOverflow = Expression.NotEqual(Expression.And(Expression.ExclusiveOr(Expression.RightShift(flags, Const(7)), Expression.RightShift(flags, Const(11))), Const(1u)), Const(0u));
+        Expression test = (condition >> 1) switch
+        {
+            0 => Bit(flags, 0x800),
+            1 => Bit(flags, 0x1),
+            2 => Bit(flags, 0x40),
+            3 => Bit(flags, 0x41),
+            4 => Bit(flags, 0x80),
+            5 => Bit(flags, 0x4),
+            6 => signNotOverflow,
+            _ => Expression.OrElse(Bit(flags, 0x40), signNotOverflow),
+        };
+        if ((condition & 1) != 0) test = Expression.Not(test);
+        return Expression.Block(typeof(bool), [flags], Expression.Assign(flags, Eflags(s)), test);
+    }
+
+    // 32 ビットアドレッシングの実効アドレスを式で組み立てる(EffectiveAddress と同じ規則)。16 ビットは LinearOf に任せる。
+    static Expression CompileAddress(AddressExpr e, Scope s)
+    {
+        var m = e.ModRm;
+        if (!e.Address32)
+            return Call(nameof(LinearOf), s.Cpu,
+                Const((int)m.Mod), Const((int)m.Rm), Const(m.HasSib), Const((int)m.Scale), Const((int)m.Index), Const((int)m.Base),
+                Const(m.Disp), Const(e.Address32), Const((int)e.Prefixes), Const(e.WithSegment));
+        Expression offset;
+        bool stackSegment;
+        if (m.HasSib)
+        {
+            Expression scaled = m.Index == 4 ? Const(0u) : Expression.Multiply(Register(s, m.Index, 2), Const(1u << m.Scale));
+            if (m.Mod == 0 && m.Base == 5) { offset = Expression.Add(scaled, Const(m.Disp)); stackSegment = false; }
+            else { offset = Expression.Add(Expression.Add(scaled, Register(s, m.Base, 2)), Const(m.Disp)); stackSegment = m.Base is 4 or 5; }
+        }
+        else if (m.Mod == 0 && m.Rm == 5) { offset = Const(m.Disp); stackSegment = false; }
+        else { offset = Expression.Add(Register(s, m.Rm, 2), Const(m.Disp)); stackSegment = m.Rm == 5; }
+        if (!e.WithSegment) return offset;
+        var segment = SegmentOf(e.Prefixes) ?? (stackSegment ? nameof(CPU.ss_base) : nameof(CPU.ds_base));
+        return Expression.Add(offset, Expression.Field(s.Cpu, segment));
+    }
+
+    static string SegmentOf(Prefix prefixes) =>
+        (prefixes & Prefix.Es) != 0 ? nameof(CPU.es_base) :
+        (prefixes & Prefix.Cs) != 0 ? nameof(CPU.cs_base) :
+        (prefixes & Prefix.Ss) != 0 ? nameof(CPU.ss_base) :
+        (prefixes & Prefix.Ds) != 0 ? nameof(CPU.ds_base) :
+        (prefixes & Prefix.Fs) != 0 ? nameof(CPU.fs_base) :
+        (prefixes & Prefix.Gs) != 0 ? nameof(CPU.gs_base) : null;
+
+    static Expression CompileLoad(Scope s, Expression address, int type) =>
+        type == 2 ? Call(nameof(Load32), s.Env, address) : Expression.Convert(Call(type == 0 ? nameof(Load8) : nameof(Load16), s.Env, address), typeof(uint));
+
     static Expression CompileStatement(Stmt statement, Scope s) => statement switch
     {
-        SetRegStmt set => Call(nameof(WriteRegister), s.Cpu, Const(set.Reg), Const(set.Type), CompileExpression(set.Value, s)),
+        SetRegStmt set => WriteRegisterOf(s, set.Reg, set.Type, CompileExpression(set.Value, s)),
         StoreStmt store => CompileStore(store, s),
         PushStmt push => Call(nameof(Push), s.Env, s.Cpu, Const(push.Type), CompileExpression(push.Value, s)),
         EvalStmt eval => CompileExpression(eval.Value, s),
         AdvanceStmt advance => Expression.AddAssign(Expression.Property(s.Cpu, nameof(CPU.eip)), Const((uint)advance.Length)),
         SetEipStmt set => Expression.Assign(Expression.Property(s.Cpu, nameof(CPU.eip)), CompileExpression(set.Value, s)),
-        IfStmt branch => Expression.IfThenElse(Call(nameof(Condition), s.Cpu, Const(branch.Condition)),
+        IfStmt branch => Expression.IfThenElse(CompileCondition(s, branch.Condition),
             CompileStatement(branch.Then, s), CompileStatement(branch.Else, s)),
         LetStmt let => Expression.Assign(s.Temp(let.Slot), CompileExpression(let.Value, s)),
         AdjustStackStmt adjust => Call(nameof(AdjustStack), s.Cpu, Const(adjust.Delta)),
@@ -553,29 +620,25 @@ public static class Semantics
         return Expression.Block([address],
             Expression.Assign(address, CompileExpression(store.Address, s)),
             Call(nameof(Probe), s.Env, address, Const(store.Type), Const(store.ReadsFirst)),
-            Call(nameof(Store), s.Env, address, Const(store.Type), CompileExpression(store.Value, s)));
+            Call(store.Type == 0 ? nameof(Store8) : store.Type == 1 ? nameof(Store16) : nameof(Store32), s.Env, address, CompileExpression(store.Value, s)));
     }
 
     static Expression CompileExpression(Expr expr, Scope s) => expr switch
     {
-        RegExpr r => Call(nameof(ReadRegister), s.Cpu, Const(r.Reg), Const(r.Type)),
+        RegExpr r => ReadRegisterOf(s, r.Reg, r.Type),
         ImmExpr i => Const(i.Value & Mask(i.Type)),
         AluExpr a => Call(nameof(AluWithFlags), s.Cpu, Const(a.Type), CompileExpression(a.Left, s), CompileExpression(a.Right, s), Const(a.Kind)),
         IncDecExpr d => Call(nameof(IncrementWithFlags), s.Cpu, Const(d.Type), CompileExpression(d.Value, s), Const(d.Delta)),
-        // ModRm を構造体定数にするとクロージャ経由のアンボックスが毎回起きるので、フィールドを整数定数で渡す。
-        AddressExpr e => Call(nameof(LinearOf), s.Cpu,
-            Const((int)e.ModRm.Mod), Const((int)e.ModRm.Rm), Const(e.ModRm.HasSib),
-            Const((int)e.ModRm.Scale), Const((int)e.ModRm.Index), Const((int)e.ModRm.Base),
-            Const(e.ModRm.Disp), Const(e.Address32), Const((int)e.Prefixes), Const(e.WithSegment)),
-        MoffsExpr m => Call(nameof(MoffsAddress), s.Cpu, Const(m.Offset), Const(m.Prefixes)),
-        LoadExpr l => Call(nameof(Load), s.Env, CompileExpression(l.Address, s), Const(l.Type)),
+        AddressExpr e => CompileAddress(e, s),
+        MoffsExpr m => Expression.Add(Expression.Field(s.Cpu, SegmentOf(m.Prefixes) ?? nameof(CPU.ds_base)), Const(m.Offset)),
+        LoadExpr l => CompileLoad(s, CompileExpression(l.Address, s), l.Type),
         PopExpr p => Call(nameof(Pop), s.Env, s.Cpu, Const(p.Type)),
         ExtendExpr x => Call(nameof(Extend), CompileExpression(x.Value, s), Const(x.FromType), Const(x.Signed), Const(x.ToType)),
         BranchTargetExpr b => Expression.Add(Expression.Property(s.Cpu, nameof(CPU.eip)), Const((uint)b.Length + b.Displacement)),
         ShiftExpr sh => Call(nameof(ShiftWithFlags), s.Cpu, Const(sh.Type), CompileExpression(sh.Value, s), CompileExpression(sh.Count, s), Const(sh.Kind)),
         UnaryExpr u => Call(nameof(Unary), s.Cpu, Const(u.Type), CompileExpression(u.Value, s), Const(u.Kind)),
         MultiplyExpr m => Call(nameof(MultiplySigned), s.Cpu, Const(m.Type), CompileExpression(m.Left, s), CompileExpression(m.Right, s)),
-        ConditionExpr c => Call(nameof(ConditionValue), s.Cpu, Const(c.Condition)),
+        ConditionExpr c => Expression.Condition(CompileCondition(s, c.Condition), Const(1u), Const(0u)),
         NearTargetExpr n => Call(nameof(NearTarget), s.Cpu, CompileExpression(n.Value, s), Const(n.Length), Const(n.Operand32)),
         ReturnAddressExpr r => Expression.Add(Expression.Property(s.Cpu, nameof(CPU.eip)), Const((uint)r.Length)),
         SignFillExpr f => Call(nameof(SignFill), CompileExpression(f.Value, s), Const(f.Type)),
@@ -624,6 +687,14 @@ public static class Semantics
 
     public static void Store(EmuEnvironment env, uint address, int type, uint value) => EnvWriteN(env, address, type == 0 ? 1 : type == 1 ? 2 : 4, value);
 
+    // コンパイル済みコード向けの幅別の入口(幅の分岐を省く)。
+    public static byte Load8(EmuEnvironment env, uint address) => EnvGetMemoryData8(env, address);
+    public static ushort Load16(EmuEnvironment env, uint address) => EnvGetMemoryData16(env, address);
+    public static uint Load32(EmuEnvironment env, uint address) => EnvGetMemoryData32(env, address);
+    public static void Store8(EmuEnvironment env, uint address, uint value) => EnvWriteN(env, address, 1, value);
+    public static void Store16(EmuEnvironment env, uint address, uint value) => EnvWriteN(env, address, 2, value);
+    public static void Store32(EmuEnvironment env, uint address, uint value) => EnvWriteN(env, address, 4, value);
+
     // 書き込み先のページを(ページ境界をまたぐなら両方)変換し、不在・保護違反ならここで #PF にする。
     // readsFirst(読み書き命令)なら、実機と同じく読み取りの変換を先に行う: 不在ページでは読み取りフォルト(err=0)、
     // 存在するが書き込み禁止なら書き込みフォルト(err=3)になる。変換結果は TLB に残るので、その後の Store はフォルトしない。
@@ -671,9 +742,10 @@ public static class Semantics
         var (result, cf, of) = ComputeShift(value, n, kind, Bits(type), cpu.cf);
         if (n != 0)
         {
-            cpu.cf = cf;
-            cpu.of = of;
-            if (kind >= 4) { cpu.zf = result == 0; cpu.sf = (result & Msb(type)) != 0; cpu.pf = Par(result); }
+            var flags = cpu.eflags;
+            if (kind >= 4)
+                flags = (flags & ~0x8C5u) | (result == 0 ? 0x40u : 0) | ((result & Msb(type)) != 0 ? 0x80u : 0) | (Par(result) ? 0x4u : 0);
+            cpu.eflags = (flags & ~0x801u) | (cf ? 0x1u : 0) | (of ? 0x800u : 0);
         }
         return result;
     }
