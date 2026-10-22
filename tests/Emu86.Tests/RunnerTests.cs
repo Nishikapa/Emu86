@@ -24,14 +24,15 @@ static class RunnerTests
         Equal("snapshot.snap", defaults.SnapshotPath, "default snapshot");
         Equal(true, defaults.Diagnostics.Trace, "default trace");
         Equal(false, defaults.Resume, "default cold boot");
-        string[] arguments = ["--resume", "--slow", "--noirq", "--window", "--boot-debug", "--com1", "pipe-a", "--com2", "pipe-b", "--limit", "123", "--snapshot", "other.snap",
+        string[] arguments = ["--resume", "--slow", "--noirq", "--no-translate", "--window", "--boot-debug", "--com1", "pipe-a", "--com2", "pipe-b", "--limit", "123", "--snapshot", "other.snap",
             "--disk", "other.vhd", "--overlay", "other.avhdx", "--dumplba", "42", "2",
             "--trace-all", "--regtrace", "--notrace", "--brhist", "--esptrap", "--pftrap",
             "--atalog", "--pcilog", "--piclog", "--vgalog", "--intlog", "--upflog", "321",
             "--breakeip", "0x80000000", "--breakeax", "FFFFFFFF", "--breakat", "44", "--watchval", "0",
             "--entrylog", "10", "20", "--breakrange", "30", "40", "--wlog", "50", "60", "--watch", "70", "80"];
         var parsed = RunOptions.Parse(arguments);
-        Equal(true, parsed.Resume && parsed.Slow && parsed.NoIrq && parsed.Window, "run flags");
+        Equal(true, parsed.Resume && parsed.Slow && parsed.NoIrq && parsed.Window && !parsed.Translate, "run flags");
+        Equal(true, defaults.Translate, "translation is on by default");
         Equal(false, defaults.Window, "default headless");
         Equal(true, parsed.BootDebug && parsed.Com1Pipe == "pipe-a" && parsed.Com2Pipe == "pipe-b", "serial and boot-debug options");
         Equal(true, defaults.Com1Pipe == null && defaults.Com2Pipe == null && !defaults.BootDebug, "serial defaults");
@@ -107,9 +108,10 @@ static class RunnerTests
     static string HashText(string value) =>
         Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(value.Replace("\r\n", "\n"))));
 
-    // translateGolden: 同じ golden ケースを --translate 付きで走らせ、同じ命令数・状態・診断・トレースになることを確かめる
-    // (翻訳ブロックの予算が割り込み周期・上限・保存周期と一致し、分岐トレースが最後の命令から再現できること)。
-    static bool translateGolden;
+    // plainGolden: 同じ golden ケースを --no-translate(1 命令ずつ)でも走らせ、既定の翻訳ブロックと同じ命令数・状態・診断・
+    // トレースになることを確かめる(翻訳ブロックの予算が割り込み周期・上限・保存周期と一致し、分岐トレースが連結の途中も含めて
+    // 再現できること)。golden の期待値は 1 命令ずつの実行で採取したもの。
+    static bool plainGolden;
 
     static void Compare(string[] args, Action<CPU, EmuEnvironment> setup = null, long start = 0)
     {
@@ -121,16 +123,17 @@ static class RunnerTests
         using var output = new StringWriter();
         using var trace = new StringWriter();
         var snapshots = new List<long>();
-        var options = RunOptions.Parse(translateGolden ? [.. args, "--translate"] : args);
+        var options = RunOptions.Parse(plainGolden ? [.. args, "--no-translate"] : args);
         var count = EmulationRunner.Run(options, env, cpu, start, trace, output, TextWriter.Null,
             (savedCount, savedCpu, savedEnv) => snapshots.Add(savedCount));
         var expected = GoldenCases[goldenIndex++];
         Equal(string.Join(" ", expected.Args), string.Join(" ", args), "golden arguments");
         Equal(expected.Start, start, "golden starting count");
-        Equal(expected.Count, count, $"runner count for {string.Join(" ", args)}{(translateGolden ? " --translate" : "")}");
-        Equal(expected.State, StateHash(cpu, env), $"runner full state for {string.Join(" ", args)}{(translateGolden ? " --translate" : "")}");
-        Equal(expected.Output, HashText(output.ToString()), $"diagnostic output for {string.Join(" ", args)}{(translateGolden ? " --translate" : "")}");
-        Equal(expected.Trace, HashText(trace.ToString()), $"trace output for {string.Join(" ", args)}{(translateGolden ? " --translate" : "")}");
+        var label = $"{string.Join(" ", args)}{(plainGolden ? " --no-translate" : "")}";
+        Equal(expected.Count, count, $"runner count for {label}");
+        Equal(expected.State, StateHash(cpu, env), $"runner full state for {label}");
+        Equal(expected.Output, HashText(output.ToString()), $"diagnostic output for {label}");
+        Equal(expected.Trace, HashText(trace.ToString()), $"trace output for {label}");
         Equal(count, snapshots.Last(), "final snapshot callback");
     }
 
@@ -340,7 +343,7 @@ static class RunnerTests
     public static void Run()
     {
         Options(); Runners(); Environments(); CommandLine(); PauseResume(); InterruptSelection();
-        goldenIndex = 0; translateGolden = true; Runners(); translateGolden = false;
+        goldenIndex = 0; plainGolden = true; Runners(); plainGolden = false;
         Console.WriteLine($"Runner/environment checks passed: {assertions} assertions");
     }
 
