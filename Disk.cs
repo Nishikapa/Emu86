@@ -1,4 +1,6 @@
 using System.Buffers.Binary;
+using System.Text;
+using static Emu86.Fields;
 
 namespace Emu86;
 
@@ -13,7 +15,7 @@ namespace Emu86;
 //   VHDX : 可変長および差分(AVHDX)。BAT の PARTIALLY_PRESENT ブロックは
 //          セクタビットマップ(LSBファースト)で親へ委譲。親はペアレントロケータで解決。
 //   生イメージ: そのままセクタ列として扱う。
-public class DiskImage : IDisposable
+public partial class DiskImage : IDisposable
 {
     public const int SectorSize = 512;
 
@@ -73,93 +75,47 @@ public class DiskImage : IDisposable
 
         try
         {
-            var hdr = new byte[SectorSize];
-            file.ReadExactly(hdr);
-            if (hdr.AsSpan(0, 8).SequenceEqual("conectix"u8))
+            // 形式の記述(各レイアウト)は DiskFormat.cs。ここではファイルの位置を読んで当てはめるだけ。
+            var header = ReadAt(0, SectorSize);
+            if (header.AsSpan(0, 8).SequenceEqual("conectix"u8))
             {
                 // VHD: 先頭にフッタのコピー(可変長/差分)。値はビッグエンディアン。
                 vhd = true;
-                vhdType = (int)BinaryPrimitives.ReadUInt32BigEndian(hdr.AsSpan(0x3C));
-                TotalSectors = (long)BinaryPrimitives.ReadUInt64BigEndian(hdr.AsSpan(0x30)) / SectorSize;
+                var footer = VhdFooterLayout.Parse(header);
+                vhdType = footer.Type;
+                TotalSectors = footer.Size / SectorSize;
 
-                var dyn = new byte[1024];
-                file.ReadExactly(dyn); // 動的ヘッダ(offset 512)
-                var tableOffset = (long)BinaryPrimitives.ReadUInt64BigEndian(dyn.AsSpan(0x10));
-                var maxEntries = (int)BinaryPrimitives.ReadUInt32BigEndian(dyn.AsSpan(0x1C));
-                var blockSize = (int)BinaryPrimitives.ReadUInt32BigEndian(dyn.AsSpan(0x20));
-                sectorsPerBlock = blockSize / SectorSize;
+                var dynamic = VhdDynamicHeaderLayout.Parse(ReadAt(SectorSize, 1024)); // 動的ヘッダ(offset 512)
+                sectorsPerBlock = dynamic.BlockSize / SectorSize;
                 vhdBitmapSectors = (sectorsPerBlock / 8 + SectorSize - 1) / SectorSize;
-
-                vhdBat = new uint[maxEntries];
-                var raw = new byte[maxEntries * 4];
-                file.Seek(tableOffset, SeekOrigin.Begin);
-                file.ReadExactly(raw);
-                for (int i = 0; i < maxEntries; i++)
-                    vhdBat[i] = BinaryPrimitives.ReadUInt32BigEndian(raw.AsSpan(i * 4));
+                vhdBat = [.. Count(dynamic.MaxEntries, U32BE).Parse(ReadAt(dynamic.TableOffset, dynamic.MaxEntries * 4))];
 
                 if (vhdType == VhdTypeDifferencing)
-                    parent = OpenVhdParent(path, dyn);
+                    parent = OpenVhdParent(path, dynamic);
             }
-            else if (hdr.AsSpan(0, 8).SequenceEqual("vhdxfile"u8))
+            else if (header.AsSpan(0, 8).SequenceEqual("vhdxfile"u8))
             {
                 vhdx = true;
+                dataWriteGuid = VhdxDataWriteGuidLayout.Parse(ReadAt(0x10000, 4096)); // ヘッダ 1(親子リンクの検証用)
 
-                // ヘッダ1(0x10000)から DataWriteGuid を得る(親子リンクの検証用)
-                var vh = new byte[4096];
-                file.Seek(0x10000, SeekOrigin.Begin);
-                file.ReadExactly(vh);
-                dataWriteGuid = new Guid(vh.AsSpan(0x20, 16));
+                // リージョン表(0x30000)から BAT とメタデータの位置を得る。
+                var regions = VhdxRegionTableLayout.Parse(ReadAt(0x30000, 0x10000));
+                var batRegion = regions.FirstOrDefault(region => region.Guid == BatRegionGuid);
+                var metaRegion = regions.FirstOrDefault(region => region.Guid == MetaRegionGuid);
+                vhdxBatOffset = batRegion.Offset;
 
-                // リージョンテーブル(0x30000)
-                var rt = new byte[0x10000];
-                file.Seek(0x30000, SeekOrigin.Begin);
-                file.ReadExactly(rt);
-                if (!rt.AsSpan(0, 4).SequenceEqual("regi"u8))
-                    throw new InvalidDataException("VHDX: region table not found");
-                long metaOffset = 0;
-                int metaLength = 0;
-                long batRegionLength = 0;
-                var count = BinaryPrimitives.ReadUInt32LittleEndian(rt.AsSpan(8));
-                for (int i = 0; i < count; i++)
-                {
-                    var e = rt.AsSpan(16 + i * 32, 32);
-                    var g = new Guid(e[..16]);
-                    if (g == BatRegionGuid)
-                    {
-                        vhdxBatOffset = BinaryPrimitives.ReadInt64LittleEndian(e[16..]);
-                        batRegionLength = BinaryPrimitives.ReadUInt32LittleEndian(e[24..]);
-                    }
-                    if (g == MetaRegionGuid) (metaOffset, metaLength) = (BinaryPrimitives.ReadInt64LittleEndian(e[16..]), (int)BinaryPrimitives.ReadUInt32LittleEndian(e[24..]));
-                }
-
-                // メタデータ領域
-                var meta = new byte[metaLength];
-                file.Seek(metaOffset, SeekOrigin.Begin);
-                file.ReadExactly(meta);
-                if (!meta.AsSpan(0, 8).SequenceEqual("metadata"u8))
-                    throw new InvalidDataException("VHDX: metadata region not found");
+                // メタデータ領域: ブロックサイズと親の有無、仮想サイズ、論理セクタ、ペアレントロケータ。
+                var meta = ReadAt(metaRegion.Offset, (int)metaRegion.Length);
                 int blockSize = 0, logicalSector = 512;
                 long diskSize = 0;
                 var hasParent = false;
-                var parentLinkage = Guid.Empty;
-                var parentPaths = new List<string>();
-                var mcount = BinaryPrimitives.ReadUInt16LittleEndian(meta.AsSpan(10));
-                for (int i = 0; i < mcount; i++)
+                var locator = new VhdxParentLocator(Guid.Empty, []);
+                foreach (var entry in VhdxMetadataTableLayout.Parse(meta))
                 {
-                    var e = meta.AsSpan(32 + i * 32, 32);
-                    var g = new Guid(e[..16]);
-                    var off = (int)BinaryPrimitives.ReadUInt32LittleEndian(e[16..]);
-                    if (g == FileParamsGuid)
-                    {
-                        blockSize = (int)BinaryPrimitives.ReadUInt32LittleEndian(meta.AsSpan(off));
-                        hasParent = (meta[off + 4] & 2) != 0;
-                    }
-                    else if (g == DiskSizeGuid)
-                        diskSize = BinaryPrimitives.ReadInt64LittleEndian(meta.AsSpan(off));
-                    else if (g == LogicalSectorGuid)
-                        logicalSector = (int)BinaryPrimitives.ReadUInt32LittleEndian(meta.AsSpan(off));
-                    else if (g == ParentLocatorGuid)
-                        ParseParentLocator(meta.AsSpan(off), out parentLinkage, parentPaths);
+                    if (entry.Guid == FileParamsGuid) (blockSize, hasParent) = VhdxFileParametersLayout.Parse(meta, entry.Offset);
+                    else if (entry.Guid == DiskSizeGuid) diskSize = I64.Parse(meta, entry.Offset);
+                    else if (entry.Guid == LogicalSectorGuid) logicalSector = (int)U32.Parse(meta, entry.Offset);
+                    else if (entry.Guid == ParentLocatorGuid) locator = VhdxParentLocatorLayout.Parse(meta, entry.Offset);
                 }
                 if (logicalSector != SectorSize)
                     throw new InvalidDataException($"VHDX: unsupported logical sector size {logicalSector}");
@@ -171,19 +127,14 @@ public class DiskImage : IDisposable
                 // BAT(ペイロード chunkRatio 個ごとにビットマップエントリが挟まる)
                 var batEntries = vhdxLayout.EntryCount;
                 var requiredLength = (long)batEntries * sizeof(ulong);
-                if (batRegionLength < requiredLength || vhdxBatOffset < 0 || vhdxBatOffset > file.Length - requiredLength)
+                if (batRegion.Length < requiredLength || vhdxBatOffset < 0 || vhdxBatOffset > file.Length - requiredLength)
                     throw new InvalidDataException("VHDX: BAT region is too small or truncated");
-                vhdxBat = new ulong[batEntries];
-                var braw = new byte[batEntries * 8];
-                file.Seek(vhdxBatOffset, SeekOrigin.Begin);
-                file.ReadExactly(braw);
-                for (int i = 0; i < batEntries; i++)
-                    vhdxBat[i] = BinaryPrimitives.ReadUInt64LittleEndian(braw.AsSpan(i * 8));
+                vhdxBat = [.. Count(batEntries, U64).Parse(ReadAt(vhdxBatOffset, batEntries * 8))];
 
                 nextAlloc = (file.Length + 0xFFFFF) & ~0xFFFFFL;
 
                 if (hasParent)
-                    parent = OpenVhdxParent(path, parentLinkage, parentPaths);
+                    parent = OpenVhdxParent(path, locator.Linkage, locator.Paths);
             }
             else
             {
@@ -216,26 +167,28 @@ public class DiskImage : IDisposable
     // ============ 親解決 ============
 
     // 差分VHDの親を開く。候補: 子と同じフォルダの親ファイル名 → ロケータの絶対パス。
-    static DiskImage OpenVhdParent(string childPath, byte[] dyn)
+    byte[] ReadAt(long offset, int length)
+    {
+        var buffer = new byte[length];
+        file.Seek(offset, SeekOrigin.Begin);
+        file.ReadExactly(buffer);
+        return buffer;
+    }
+
+    // VHD の親: 動的ヘッダの親の名前(子と同じディレクトリで探す)と、Windows 形式(W2ku)のロケータが指すパス。
+    static DiskImage OpenVhdParent(string childPath, VhdDynamicHeader header)
     {
         var candidates = new List<string>();
+        if (header.ParentName.Length > 0)
+            candidates.Add(Path.Combine(Path.GetDirectoryName(Path.GetFullPath(childPath)) ?? ".", Path.GetFileName(header.ParentName)));
 
-        var parentName = System.Text.Encoding.BigEndianUnicode.GetString(dyn, 0x40, 0x200).TrimEnd('\0');
-        if (parentName.Length > 0)
-            candidates.Add(Path.Combine(Path.GetDirectoryName(Path.GetFullPath(childPath)) ?? ".", Path.GetFileName(parentName)));
-
-        for (int i = 0; i < 8; i++)
+        foreach (var locator in header.Locators.Where(locator => locator.IsWindowsUnicode))
         {
-            var e = dyn.AsSpan(0x240 + i * 24, 24);
-            if (!e[..4].SequenceEqual("W2ku"u8))
-                continue;
-            var len = (int)BinaryPrimitives.ReadUInt32BigEndian(e[8..12]);
-            var off = (long)BinaryPrimitives.ReadUInt64BigEndian(e[16..24]);
             using var f = new FileStream(childPath, FileMode.Open, FileAccess.Read, FileShare.Read);
-            var buf = new byte[len];
-            f.Seek(off, SeekOrigin.Begin);
+            var buf = new byte[locator.Length];
+            f.Seek(locator.Offset, SeekOrigin.Begin);
             f.ReadExactly(buf);
-            candidates.Add(System.Text.Encoding.Unicode.GetString(buf).TrimEnd('\0'));
+            candidates.Add(Encoding.Unicode.GetString(buf).TrimEnd('\0'));
         }
 
         foreach (var path in candidates.Where(File.Exists))
@@ -248,28 +201,7 @@ public class DiskImage : IDisposable
         return null;
     }
 
-    // VHDX ペアレントロケータの解析: parent_linkage(GUID) とパス候補を取り出す。
-    static void ParseParentLocator(ReadOnlySpan<byte> loc, out Guid linkage, List<string> paths)
-    {
-        linkage = Guid.Empty;
-        var kvCount = BinaryPrimitives.ReadUInt16LittleEndian(loc[18..]);
-        for (int i = 0; i < kvCount; i++)
-        {
-            var e = loc[(20 + i * 12)..];
-            var keyOff = (int)BinaryPrimitives.ReadUInt32LittleEndian(e);
-            var valOff = (int)BinaryPrimitives.ReadUInt32LittleEndian(e[4..]);
-            var keyLen = BinaryPrimitives.ReadUInt16LittleEndian(e[8..]);
-            var valLen = BinaryPrimitives.ReadUInt16LittleEndian(e[10..]);
-            var key = System.Text.Encoding.Unicode.GetString(loc.Slice(keyOff, keyLen));
-            var val = System.Text.Encoding.Unicode.GetString(loc.Slice(valOff, valLen));
-            if (key == "parent_linkage")
-                linkage = Guid.Parse(val.Trim('{', '}'));
-            else if (key is "relative_path" or "absolute_win32_path" or "volume_path")
-                paths.Add(val);
-        }
-    }
-
-    static DiskImage OpenVhdxParent(string childPath, Guid linkage, List<string> paths)
+    static DiskImage OpenVhdxParent(string childPath, Guid linkage, IReadOnlyList<string> paths)
     {
         var childDir = Path.GetDirectoryName(Path.GetFullPath(childPath)) ?? ".";
         var candidates = paths
