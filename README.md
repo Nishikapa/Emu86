@@ -181,7 +181,7 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | `State.cs` | `State<V>` モナドの定義と LINQ コンビネータ（`Select`/`SelectMany`/`Where`/`When`/`Unless`/`While`/`Choice`/`Sequence`/`Many0` 等）。 |
 | `CPU.cs` | `CPU` 状態、レジスタアクセサ、共通 ALU/フラグ更新処理を呼び出すモナド操作、シフト計算。 |
 | `Alu.cs` | 通常コアと高速コアで共有する算術・論理演算、フラグ更新、条件分岐の判定。 |
-| `Fpu.cs` | x87 FPU。ST スタック 8 本を double で保持し、80 ビット拡張実数と相互変換。ロード/ストア、四則演算、比較、超越関数、FNSAVE/FRSTOR。 |
+| `Fpu.cs` | x87 FPU。ST スタック 8 本を double で保持し、80 ビット拡張実数と相互変換。命令は整数命令と同じく表（メモリ形式は (op, reg)、レジスタ形式は (op, reg, rm) か (op, reg)）で引き、各命令はオペランド Lens `Real`（ST(i) と f32/f64/int16/int32/int64/f80 のメモリ形式）に対する `Load`/`Store`/`Compute`/`Compare` の State で書く。四則演算は「x = ST0、y = もう一方」の式 1 つで D8/DA/DC/DE の全形式を表す。 |
 | `FastCore.cs` | 高速実行コア。プレフィックスと ModRM のデコードは `CodeParser.cs`、演算規則は `Alu.cs`、メモリアクセスは `Environment.cs` の共通処理を使用し、未対応命令は通常コアへ委譲。文字列命令は INS/OUTS を含めて REP ごと処理する。 |
 | `InstructionExecutor.cs` | 両コアの実行・CPU 復元境界、命令ごとのデコード状態、REP の再開位置。 |
 | `Fault.cs` | CPU 例外の値 `Fault`（ベクタ・エラーコード・#PF の線形アドレス）と、命令の途中で投げる `CpuFaultException`（`PageFaultException`/`GeneralProtectionException`）。ランナーは #UD/#PF/#GP を同じ `Raise` で配送する。 |

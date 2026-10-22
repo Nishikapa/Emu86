@@ -524,6 +524,59 @@ static class CoreTests
         Console.WriteLine($"executor ns/instruction over a 5-instruction loop: fast core {PerInstruction(false):F1}, translated block {PerInstruction(true):F1}");
     }
 
+    // FPU: 全エンコーディング(メモリ形式は [ebx]、レジスタ形式は ST(1) など)を 3 通りの初期状態(フラグ・丸めモード)で
+    // 通常コアに流し、成否と CPU・メモリの結果のハッシュを固定値と照合する(表とレンズへの書き換え前に採取)。
+    static void FpuRegression()
+    {
+        List<byte[]> codes = [];
+        foreach (var op in new byte[] { 0xD8, 0xDA, 0xDC, 0xDE })
+            for (var reg = 0; reg < 8; reg++) { codes.Add([op, (byte)(reg << 3 | 3)]); codes.Add([op, (byte)(0xC0 | reg << 3 | 1)]); }
+        foreach (var reg in new[] { 0, 2, 3, 4, 5, 6, 7 }) codes.Add([0xD9, (byte)(reg << 3 | 3)]);
+        foreach (var reg in new[] { 0, 2, 3, 5, 7 }) codes.Add([0xDB, (byte)(reg << 3 | 3)]);
+        foreach (var reg in new[] { 0, 2, 3, 4, 6, 7 }) codes.Add([0xDD, (byte)(reg << 3 | 3)]);
+        foreach (var reg in new[] { 0, 2, 3, 5, 7 }) codes.Add([0xDF, (byte)(reg << 3 | 3)]);
+        foreach (var (reg, rm) in new[] { (0, 1), (1, 1), (2, 0), (2, 1), (3, 1), (4, 0), (4, 1), (4, 4), (4, 5), (4, 6) })
+            codes.Add([0xD9, (byte)(0xC0 | reg << 3 | rm)]);
+        for (var rm = 0; rm < 8; rm++) foreach (var reg in new[] { 5, 6, 7 }) codes.Add([0xD9, (byte)(0xC0 | reg << 3 | rm)]);
+        foreach (var (reg, rm) in new[] { (0, 1), (1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (5, 0), (6, 1) })
+            codes.Add([0xDA, (byte)(0xC0 | reg << 3 | rm)]);
+        foreach (var (reg, rm) in new[] { (0, 1), (1, 1), (2, 1), (3, 1), (4, 2), (4, 3), (4, 0), (5, 1), (6, 1), (7, 1) })
+            codes.Add([0xDB, (byte)(0xC0 | reg << 3 | rm)]);
+        foreach (var (reg, rm) in new[] { (0, 1), (1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1), (7, 1) })
+            codes.Add([0xDD, (byte)(0xC0 | reg << 3 | rm)]);
+        foreach (var (reg, rm) in new[] { (3, 1), (3, 2) }) codes.Add([0xDE, (byte)(0xC0 | reg << 3 | rm)]);
+        foreach (var (reg, rm) in new[] { (4, 0), (4, 1), (5, 1), (6, 1), (0, 1), (7, 1) })
+            codes.Add([0xDF, (byte)(0xC0 | reg << 3 | rm)]);
+        using var results = new MemoryStream();
+        using var writer = new BinaryWriter(results);
+        var (mant, se) = (0x7000000000000000UL, (ushort)0x4000); // 80 ビット: 3.5
+        foreach (var variant in new (uint flags, ushort cw)[] { (0x202, 0x037F), (0x247, 0x037F), (0x202, 0x0F7F) })
+        foreach (var code in codes)
+        {
+            Reset(SlowEnv, code);
+            var memory = SlowEnv.OneMegaMemory_;
+            BitConverter.GetBytes(1.5f).CopyTo(memory, 0x3000);
+            BitConverter.GetBytes(2.25).CopyTo(memory, 0x3008);
+            BitConverter.GetBytes((short)-7).CopyTo(memory, 0x3010);
+            BitConverter.GetBytes(100000).CopyTo(memory, 0x3014);
+            BitConverter.GetBytes(-5L).CopyTo(memory, 0x3018);
+            BitConverter.GetBytes(mant).CopyTo(memory, 0x3020);
+            BitConverter.GetBytes(se).CopyTo(memory, 0x3028);
+            for (var offset = 0; offset < 108; offset++) memory[0x3100 + offset] = (byte)(offset * 7 + 1);
+            var cpu = CreateCpu(0x12345678, 0x3000, variant.flags);
+            cpu.fpu_cw = variant.cw; cpu.fpu_top = 5; cpu.fpu_valid = 0xE0;
+            cpu.fpu_st[5] = 2.0; cpu.fpu_st[6] = -0.5; cpu.fpu_st[7] = 8.0;
+            var ok = SlowStep(SlowEnv, cpu, null).IsSuccess;
+            writer.Write(ok);
+            if (ok) { writer.Write(CpuBytes(cpu)); writer.Write(SHA256.HashData(memory.AsSpan(0x3000, 0x200))); }
+            cases++;
+        }
+        writer.Flush();
+        var hash = Convert.ToHexString(SHA256.HashData(results.ToArray()));
+        Console.WriteLine($"FPU cases: {codes.Count * 3}; SHA256={hash}");
+        Equal("6FD342247873F2894F0F6C9FDF28118FE6FE00168F15C782D3FF7F40909DD888", hash, "FPU results match the pre-table implementation");
+    }
+
     static void Integration()
     {
         foreach (var code in new byte[][] { [0xF3, 0xA5], [0x66, 0xF3, 0xAB], [0xF3, 0xAA], [0xA6], [0xA7], [0xAE], [0xAF], [0xAD], [0x50], [0x66, 0x50], [0x58], [0x66, 0x58] })
@@ -595,6 +648,7 @@ static class CoreTests
         PageWalk();
         SemanticsIr();
         TranslationCacheExecution();
+        FpuRegression();
         Integration();
         OperandTransfers();
         Console.WriteLine($"Core cases passed: {cases}");

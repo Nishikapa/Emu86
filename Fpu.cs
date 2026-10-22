@@ -7,6 +7,8 @@ namespace Emu86;
 // 8 本のレジスタスタックを倍精度 double で保持する。実機の内部 80 ビット拡張精度とは
 // 丸めが異なりうるが、カーネル/ユーザランドの通常用途には十分。
 // FNSAVE/FRSTOR・m80 のロード/ストアは 80 ビット拡張実数と相互変換する。
+// 命令は整数命令と同じく表で引く: メモリ形式は (op, reg)、レジスタ形式は (op, reg, rm) か (op, reg) で、
+// 各命令はオペランドの Lens(Real: ST(i) とメモリ形式)に対する Load/Store/Compute/Compare の State で書く。
 // 未実装のエンコーディングは失敗を返し、STOP 診断に載る(Execute が EIP を巻き戻す)。
 static public partial class Ext
 {
@@ -208,250 +210,270 @@ static public partial class Ext
         }
     }
 
-    // --- 算術グループ(D8/DA/DC/DE の reg フィールド共通) ----------------------
-    //   0=ADD 1=MUL 2=COM 3=COMP 4=SUB 5=SUBR 6=DIV 7=DIVR (ST0 と src)
-    static void FpuArith(CPU c, int reg, double src)
+    // --- 命令の記述: オペランド(Lens)と操作 ------------------------------------
+    // Real は double として読む State と書き戻す関数の組(整数命令の Operand と同じ考え方)。ST(i) とメモリ形式
+    // (f32/f64/int16/int32/int64/f80)を同じ形で扱うので、命令は「どこから読み、どこへ書き、何を計算するか」だけで書ける。
+    static State<Unit> Fpu(Action<CPU> action) => SetCpu(c => { action(c); return c; });
+    static State<Unit> FpuEnv(Action<EmuEnvironment, CPU> action) => SetCpu((e, c) => { action(e, c); return c; });
+
+    static Real StReal(int i) => new(GetDataFromCpu(c => St(c, i)), v => Fpu(c => StSet(c, i, v)));
+    static readonly Real St0 = StReal(0), St1 = StReal(1);
+    static Real Constant(double value) => new(value.ToState(), _ => throw new InvalidOperationException("constant operand is read-only"));
+    static readonly Real Zero = Constant(0.0);
+    static Real F32At(uint a) => new(GetDataFromEnvCpu((e, _) => FpuReadF32(e, a)), v => FpuEnv((e, _) => FpuWriteF32(e, a, v)));
+    static Real F64At(uint a) => new(GetDataFromEnvCpu((e, _) => FpuReadF64(e, a)), v => FpuEnv((e, _) => FpuWriteF64(e, a, v)));
+    static Real I16At(uint a) => new(GetDataFromEnvCpu((e, _) => (double)(short)EnvGetMemoryData16(e, a)), v => FpuEnv((e, c) => EnvWriteWord(e, a, FpuToInt16(c, v))));
+    static Real I32At(uint a) => new(GetDataFromEnvCpu((e, _) => (double)(int)EnvGetMemoryData32(e, a)), v => FpuEnv((e, c) => EnvWriteDword(e, a, FpuToInt32(c, v))));
+    static Real I64At(uint a) => new(GetDataFromEnvCpu((e, _) => (double)(long)FpuR64(e, a)), v => FpuEnv((e, c) => FpuW64(e, a, FpuToInt64(c, v))));
+    static Real F80At(uint a) => new(GetDataFromEnvCpu((e, _) => F80ToDouble(FpuR64(e, a), EnvGetMemoryData16(e, a + 8))),
+        v => FpuEnv((e, _) => { var (mant, se) = DoubleToF80(v); FpuW64(e, a, mant); EnvWriteWord(e, a + 8, se); }));
+
+    // 何もしない State。State.cs の Pass は別ファイルの静的フィールドなので、表の初期化順に依存しないよう自前で持つ。
+    static readonly State<Unit> FpuNop = unit.ToState();
+    static readonly State<Unit> PopSt = Fpu(FpuPop);
+    static State<Unit> Pops(int count) => count == 0 ? FpuNop : count == 1 ? PopSt : PopSt.Then(PopSt);
+    static State<Unit> Push(double value) => Fpu(c => FpuPush(c, value));
+    static readonly State<Unit> ClearC2 = Fpu(c => c.fpu_sw &= unchecked((ushort)~FpuC2));
+
+    // push src
+    static State<Unit> Load(Real src) =>
+        from v in src.Read
+        from _ in Fpu(c => FpuPush(c, v))
+        select unit;
+
+    // dst <- ST0、pop なら続けて pop
+    static State<Unit> Store(Real dst, bool pop = false) =>
+        from v in St0.Read
+        from _1 in dst.Write(v)
+        from _2 in Pops(pop ? 1 : 0)
+        select unit;
+
+    // dst <- f(ST0, other)、続けて pops 回 pop
+    static State<Unit> Compute(Real dst, Real other, Func<double, double, double> f, int pops = 0) =>
+        from x in St0.Read
+        from y in other.Read
+        from _1 in dst.Write(f(x, y))
+        from _2 in Pops(pops)
+        select unit;
+
+    // ST0 <- f(ST0)
+    static State<Unit> Unary(Func<double, double> f) =>
+        from x in St0.Read
+        from _ in St0.Write(f(x))
+        select unit;
+
+    // 条件コード(C0/C2/C3)へ ST0 と other の比較結果を入れ、pops 回 pop
+    static State<Unit> Compare(Real other, int pops = 0) =>
+        from x in St0.Read
+        from y in other.Read
+        from _1 in Fpu(c => FpuCompare(c, x, y))
+        from _2 in Pops(pops)
+        select unit;
+
+    // EFLAGS(ZF/PF/CF)へ比較結果を入れる(FCOMI 系)
+    static State<Unit> CompareEflags(Real other, int pops = 0) =>
+        from x in St0.Read
+        from y in other.Read
+        from _1 in Fpu(c => FpuCompareEflags(c, x, y))
+        from _2 in Pops(pops)
+        select unit;
+
+    // ST0 <-> ST(i)
+    static State<Unit> Exchange(int i) =>
+        from a in St0.Read
+        from b in StReal(i).Read
+        from _1 in St0.Write(b)
+        from _2 in StReal(i).Write(a)
+        select unit;
+
+    // 条件が成り立てば ST0 <- ST(i)(FCMOVcc)
+    static State<Unit> ConditionalMove(Func<CPU, bool> condition, int i) =>
+        from take in GetDataFromCpu(condition)
+        from v in StReal(i).Read
+        from _ in When(take, St0.Write(v))
+        select unit;
+
+    // 算術グループ(D8/DA/DC/DE の reg フィールド): 0=ADD 1=MUL 2=COM 3=COMP 4=SUB 5=SUBR 6=DIV 7=DIVR。
+    // f(x, y) の x は ST0、y はもう一方のオペランド。DC/DE のレジスタ形式は書き込み先が ST(i) になるだけで、
+    // SUB/DIV の向き(ST(i) <- ST0 - ST(i) が FSUBR)も同じ式で表せる。
+    static readonly Func<double, double, double>[] ArithOp =
+        [(x, y) => x + y, (x, y) => x * y, null, null, (x, y) => x - y, (x, y) => y - x, (x, y) => x / y, (x, y) => y / x];
+
+    static State<Unit> Arith(int kind, Real other, Real dst, bool pop) => kind switch
     {
-        var st0 = St(c, 0);
-        switch (reg)
-        {
-            case 0: StSet(c, 0, st0 + src); break;
-            case 1: StSet(c, 0, st0 * src); break;
-            case 2: FpuCompare(c, st0, src); break;
-            case 3: FpuCompare(c, st0, src); FpuPop(c); break;
-            case 4: StSet(c, 0, st0 - src); break;
-            case 5: StSet(c, 0, src - st0); break;
-            case 6: StSet(c, 0, st0 / src); break;
-            case 7: StSet(c, 0, src / st0); break;
-        }
+        2 => Compare(other, pop ? 1 : 0),
+        3 => Compare(other, pop ? 2 : 1),
+        _ => Compute(dst, other, ArithOp[kind], pop ? 1 : 0),
+    };
+
+    // 条件コードを使う少数の命令(FXAM/FPREM/FXTRACT/FSINCOS)は CPU を直接触る。
+    static void FpuExamine(CPU c)
+    {
+        var v = St(c, 0);
+        c.fpu_sw &= unchecked((ushort)~(FpuC0 | FpuC1 | FpuC2 | FpuC3));
+        if (double.IsNegative(v)) c.fpu_sw |= FpuC1;
+        if ((c.fpu_valid & (1 << StIdx(c, 0))) == 0) c.fpu_sw |= FpuC3 | FpuC0;
+        else if (double.IsNaN(v)) c.fpu_sw |= FpuC0;
+        else if (double.IsInfinity(v)) c.fpu_sw |= FpuC2 | FpuC0;
+        else if (v == 0) c.fpu_sw |= FpuC3;
+        else c.fpu_sw |= FpuC2; // normal(非正規化は区別しない)
     }
 
-    // --- 本体 ----------------------------------------------------------------
-    static public State<Unit> Fpu_D8_DF => (env, cpu0, ope) =>
+    // FPREM: 切り捨て剰余。商の下位ビットを C0/C3/C1 に返す。
+    static void FpuRemainder(CPU c)
     {
-        var op = ope[0];
-        var (okM, m, cpu, _) = ModRegRm()(env, cpu0, ope);
-        if (!okM)
-            return (false, default, cpu0, string.Empty);
-        var (mod, reg, rm) = m;
+        var q = (long)(St(c, 0) / St(c, 1));
+        StSet(c, 0, St(c, 0) % St(c, 1));
+        c.fpu_sw &= unchecked((ushort)~(FpuC0 | FpuC1 | FpuC2 | FpuC3));
+        if ((q & 4) != 0) c.fpu_sw |= FpuC0;
+        if ((q & 2) != 0) c.fpu_sw |= FpuC3;
+        if ((q & 1) != 0) c.fpu_sw |= FpuC1;
+    }
 
-        (bool, Unit, CPU, string) Ok() => (true, unit, cpu, string.Empty);
-        (bool, Unit, CPU, string) Fail() => (false, default, cpu, string.Empty);
+    // FXTRACT: ST0 を指数と仮数に分解する。
+    static void FpuExtract(CPU c)
+    {
+        var v = St(c, 0);
+        var e = Math.Floor(Math.Log2(Math.Abs(v)));
+        StSet(c, 0, e);
+        FpuPush(c, v / Math.Pow(2.0, e));
+    }
 
-        if (mod != 3)
+    static void FpuSinCos(CPU c)
+    {
+        var v = St(c, 0);
+        StSet(c, 0, Math.Sin(v));
+        FpuPush(c, Math.Cos(v));
+        c.fpu_sw &= unchecked((ushort)~FpuC2);
+    }
+
+    // --- 表 ------------------------------------------------------------------
+    // メモリ形式: (op, reg) → 実効アドレスから命令を作る。
+    static readonly Dictionary<(int op, int reg), Func<uint, State<Unit>>> FpuMemoryForms = BuildFpuMemoryForms();
+
+    static Dictionary<(int op, int reg), Func<uint, State<Unit>>> BuildFpuMemoryForms()
+    {
+        var table = new Dictionary<(int op, int reg), Func<uint, State<Unit>>>
         {
-            var (okA, maddr, cpu2, _) = GetMemOrRegAddr(mod, rm)(env, cpu, ope);
-            if (!okA)
-                return (false, default, cpu, string.Empty);
-            cpu = cpu2;
-            var a = maddr.addr;
-            switch (op, reg)
+            [(0xD9, 0)] = a => Load(F32At(a)), [(0xD9, 2)] = a => Store(F32At(a)), [(0xD9, 3)] = a => Store(F32At(a), pop: true),
+            [(0xD9, 4)] = a => FpuEnv((e, c) => FpuLdEnv(e, c, a)),                        // FLDENV
+            [(0xD9, 5)] = a => FpuEnv((e, c) => c.fpu_cw = EnvGetMemoryData16(e, a)),       // FLDCW
+            [(0xD9, 6)] = a => FpuEnv((e, c) => { FpuStEnv(e, c, a); c.fpu_cw |= 0x3F; }),  // FNSTENV(例外を全マスク)
+            [(0xD9, 7)] = a => FpuEnv((e, c) => EnvWriteWord(e, a, c.fpu_cw)),             // FNSTCW
+            [(0xDB, 0)] = a => Load(I32At(a)), [(0xDB, 2)] = a => Store(I32At(a)), [(0xDB, 3)] = a => Store(I32At(a), pop: true),
+            [(0xDB, 5)] = a => Load(F80At(a)), [(0xDB, 7)] = a => Store(F80At(a), pop: true),
+            [(0xDD, 0)] = a => Load(F64At(a)), [(0xDD, 2)] = a => Store(F64At(a)), [(0xDD, 3)] = a => Store(F64At(a), pop: true),
+            [(0xDD, 4)] = a => FpuEnv((e, c) => FpuRstor(e, c, a)),                         // FRSTOR
+            [(0xDD, 6)] = a => FpuEnv((e, c) => FpuSave(e, c, a)),                          // FNSAVE
+            [(0xDD, 7)] = a => FpuEnv((e, c) => EnvWriteWord(e, a, FpuSw(c))),              // FNSTSW m16
+            [(0xDF, 0)] = a => Load(I16At(a)), [(0xDF, 2)] = a => Store(I16At(a)), [(0xDF, 3)] = a => Store(I16At(a), pop: true),
+            [(0xDF, 5)] = a => Load(I64At(a)), [(0xDF, 7)] = a => Store(I64At(a), pop: true),
+        };
+        // 算術グループ: D8 = f32、DA = int32、DC = f64、DE = int16 のメモリオペランドと ST0
+        foreach (var (op, source) in new (int, Func<uint, Real>)[] { (0xD8, F32At), (0xDA, I32At), (0xDC, F64At), (0xDE, I16At) })
+            for (var kind = 0; kind < 8; kind++)
             {
-                // 算術(メモリオペランド)
-                case (0xD8, _): FpuArith(cpu, reg, FpuReadF32(env, a)); return Ok();
-                case (0xDC, _): FpuArith(cpu, reg, FpuReadF64(env, a)); return Ok();
-                case (0xDA, _): FpuArith(cpu, reg, (int)EnvGetMemoryData32(env, a)); return Ok();
-                case (0xDE, _): FpuArith(cpu, reg, (short)EnvGetMemoryData16(env, a)); return Ok();
-                // ロード/ストア
-                case (0xD9, 0): FpuPush(cpu, FpuReadF32(env, a)); return Ok();
-                case (0xD9, 2): FpuWriteF32(env, a, St(cpu, 0)); return Ok();
-                case (0xD9, 3): FpuWriteF32(env, a, St(cpu, 0)); FpuPop(cpu); return Ok();
-                case (0xD9, 4): FpuLdEnv(env, cpu, a); return Ok();
-                case (0xD9, 5): cpu.fpu_cw = EnvGetMemoryData16(env, a); return Ok();   // FLDCW
-                case (0xD9, 6): FpuStEnv(env, cpu, a); cpu.fpu_cw |= 0x3F; return Ok(); // FNSTENV(例外を全マスク)
-                case (0xD9, 7): EnvWriteWord(env, a, cpu.fpu_cw); return Ok();              // FNSTCW
-                case (0xDB, 0): FpuPush(cpu, (int)EnvGetMemoryData32(env, a)); return Ok();  // FILD m32
-                case (0xDB, 2): EnvWriteDword(env, a, FpuToInt32(cpu, St(cpu, 0))); return Ok();  // FIST m32
-                case (0xDB, 3): EnvWriteDword(env, a, FpuToInt32(cpu, St(cpu, 0))); FpuPop(cpu); return Ok();
-                case (0xDB, 5): // FLD m80
-                    FpuPush(cpu, F80ToDouble(FpuR64(env, a), EnvGetMemoryData16(env, a + 8)));
-                    return Ok();
-                case (0xDB, 7): // FSTP m80
-                {
-                    var (mant, se) = DoubleToF80(St(cpu, 0));
-                    FpuW64(env, a, mant);
-                    EnvWriteWord(env, a + 8, se);
-                    FpuPop(cpu);
-                    return Ok();
-                }
-                case (0xDD, 0): FpuPush(cpu, FpuReadF64(env, a)); return Ok();
-                case (0xDD, 2): FpuWriteF64(env, a, St(cpu, 0)); return Ok();
-                case (0xDD, 3): FpuWriteF64(env, a, St(cpu, 0)); FpuPop(cpu); return Ok();
-                case (0xDD, 4): FpuRstor(env, cpu, a); return Ok();                     // FRSTOR
-                case (0xDD, 6): FpuSave(env, cpu, a); return Ok();                      // FNSAVE
-                case (0xDD, 7): EnvWriteWord(env, a, FpuSw(cpu)); return Ok();              // FNSTSW m16
-                case (0xDF, 0): FpuPush(cpu, (short)EnvGetMemoryData16(env, a)); return Ok(); // FILD m16
-                case (0xDF, 2): EnvWriteWord(env, a, FpuToInt16(cpu, St(cpu, 0))); return Ok();
-                case (0xDF, 3): EnvWriteWord(env, a, FpuToInt16(cpu, St(cpu, 0))); FpuPop(cpu); return Ok();
-                case (0xDF, 5): FpuPush(cpu, (long)FpuR64(env, a)); return Ok();        // FILD m64
-                case (0xDF, 7): FpuW64(env, a, FpuToInt64(cpu, St(cpu, 0))); FpuPop(cpu); return Ok(); // FISTP m64
-                default:
-                    return Fail();
+                var (k, src) = (kind, source);
+                table[(op, kind)] = a => Arith(k, src(a), St0, pop: false);
             }
-        }
+        return table;
+    }
 
-        // mod == 3: レジスタ形式
-        switch (op)
-        {
-            case 0xD8: // ST0 op ST(rm)
-                FpuArith(cpu, reg, St(cpu, rm));
-                return Ok();
-
-            case 0xD9:
-                switch (reg, rm)
-                {
-                    case (0, _): FpuPush(cpu, St(cpu, rm)); return Ok();       // FLD ST(i)
-                    case (1, _): // FXCH
-                    {
-                        var t = St(cpu, 0);
-                        StSet(cpu, 0, St(cpu, rm));
-                        StSet(cpu, rm, t);
-                        return Ok();
-                    }
-                    case (2, 0): return Ok();                                   // FNOP
-                    case (3, _): StSet(cpu, rm, St(cpu, 0)); FpuPop(cpu); return Ok(); // FSTP ST(i)(別名)
-                    case (4, 0): StSet(cpu, 0, -St(cpu, 0)); return Ok();       // FCHS
-                    case (4, 1): StSet(cpu, 0, Math.Abs(St(cpu, 0))); return Ok(); // FABS
-                    case (4, 4): FpuCompare(cpu, St(cpu, 0), 0.0); return Ok(); // FTST
-                    case (4, 5): // FXAM
-                    {
-                        var v = St(cpu, 0);
-                        cpu.fpu_sw &= unchecked((ushort)~(FpuC0 | FpuC1 | FpuC2 | FpuC3));
-                        if (double.IsNegative(v)) cpu.fpu_sw |= FpuC1;
-                        if ((cpu.fpu_valid & (1 << StIdx(cpu, 0))) == 0) cpu.fpu_sw |= FpuC3 | FpuC0;
-                        else if (double.IsNaN(v)) cpu.fpu_sw |= FpuC0;
-                        else if (double.IsInfinity(v)) cpu.fpu_sw |= FpuC2 | FpuC0;
-                        else if (v == 0) cpu.fpu_sw |= FpuC3;
-                        else cpu.fpu_sw |= FpuC2; // normal(非正規化は区別しない)
-                        return Ok();
-                    }
-                    case (5, 0): FpuPush(cpu, 1.0); return Ok();                          // FLD1
-                    case (5, 1): FpuPush(cpu, 3.321928094887362); return Ok();            // FLDL2T
-                    case (5, 2): FpuPush(cpu, 1.4426950408889634); return Ok();           // FLDL2E
-                    case (5, 3): FpuPush(cpu, Math.PI); return Ok();                      // FLDPI
-                    case (5, 4): FpuPush(cpu, 0.3010299956639812); return Ok();           // FLDLG2
-                    case (5, 5): FpuPush(cpu, 0.6931471805599453); return Ok();           // FLDLN2
-                    case (5, 6): FpuPush(cpu, 0.0); return Ok();                          // FLDZ
-                    case (6, 0): StSet(cpu, 0, Math.Pow(2.0, St(cpu, 0)) - 1.0); return Ok(); // F2XM1
-                    case (6, 1): StSet(cpu, 1, St(cpu, 1) * Math.Log2(St(cpu, 0))); FpuPop(cpu); return Ok(); // FYL2X
-                    case (6, 2): StSet(cpu, 0, Math.Tan(St(cpu, 0))); FpuPush(cpu, 1.0); cpu.fpu_sw &= unchecked((ushort)~FpuC2); return Ok(); // FPTAN
-                    case (6, 3): StSet(cpu, 1, Math.Atan2(St(cpu, 1), St(cpu, 0))); FpuPop(cpu); return Ok(); // FPATAN
-                    case (6, 4): // FXTRACT: ST0 を指数と仮数に分解
-                    {
-                        var v = St(cpu, 0);
-                        var e = Math.Floor(Math.Log2(Math.Abs(v)));
-                        StSet(cpu, 0, e);
-                        FpuPush(cpu, v / Math.Pow(2.0, e));
-                        return Ok();
-                    }
-                    case (6, 5): // FPREM1(IEEE 剰余)
-                        StSet(cpu, 0, Math.IEEERemainder(St(cpu, 0), St(cpu, 1)));
-                        cpu.fpu_sw &= unchecked((ushort)~FpuC2);
-                        return Ok();
-                    case (6, 6): cpu.fpu_top = (cpu.fpu_top - 1) & 7; return Ok(); // FDECSTP
-                    case (6, 7): cpu.fpu_top = (cpu.fpu_top + 1) & 7; return Ok(); // FINCSTP
-                    case (7, 0): // FPREM(切り捨て剰余。商の下位ビットを C0/C3/C1 に返す)
-                    {
-                        var q = (long)(St(cpu, 0) / St(cpu, 1));
-                        StSet(cpu, 0, St(cpu, 0) % St(cpu, 1));
-                        cpu.fpu_sw &= unchecked((ushort)~(FpuC0 | FpuC1 | FpuC2 | FpuC3));
-                        if ((q & 4) != 0) cpu.fpu_sw |= FpuC0;
-                        if ((q & 2) != 0) cpu.fpu_sw |= FpuC3;
-                        if ((q & 1) != 0) cpu.fpu_sw |= FpuC1;
-                        return Ok();
-                    }
-                    case (7, 1): StSet(cpu, 1, St(cpu, 1) * Math.Log2(St(cpu, 0) + 1.0)); FpuPop(cpu); return Ok(); // FYL2XP1
-                    case (7, 2): StSet(cpu, 0, Math.Sqrt(St(cpu, 0))); return Ok();       // FSQRT
-                    case (7, 3): // FSINCOS
-                    {
-                        var v = St(cpu, 0);
-                        StSet(cpu, 0, Math.Sin(v));
-                        FpuPush(cpu, Math.Cos(v));
-                        cpu.fpu_sw &= unchecked((ushort)~FpuC2);
-                        return Ok();
-                    }
-                    case (7, 4): StSet(cpu, 0, FpuRound(cpu, St(cpu, 0))); return Ok();   // FRNDINT
-                    case (7, 5): StSet(cpu, 0, St(cpu, 0) * Math.Pow(2.0, Math.Truncate(St(cpu, 1)))); return Ok(); // FSCALE
-                    case (7, 6): StSet(cpu, 0, Math.Sin(St(cpu, 0))); cpu.fpu_sw &= unchecked((ushort)~FpuC2); return Ok(); // FSIN
-                    case (7, 7): StSet(cpu, 0, Math.Cos(St(cpu, 0))); cpu.fpu_sw &= unchecked((ushort)~FpuC2); return Ok(); // FCOS
-                    default: return Fail();
-                }
-
-            case 0xDA: // FCMOVcc / FUCOMPP
-                switch (reg, rm)
-                {
-                    case (0, _): if (cpu.cf) StSet(cpu, 0, St(cpu, rm)); return Ok();               // FCMOVB
-                    case (1, _): if (cpu.zf) StSet(cpu, 0, St(cpu, rm)); return Ok();               // FCMOVE
-                    case (2, _): if (cpu.cf || cpu.zf) StSet(cpu, 0, St(cpu, rm)); return Ok();     // FCMOVBE
-                    case (3, _): if (cpu.pf) StSet(cpu, 0, St(cpu, rm)); return Ok();               // FCMOVU
-                    case (5, 1): FpuCompare(cpu, St(cpu, 0), St(cpu, 1)); FpuPop(cpu); FpuPop(cpu); return Ok(); // FUCOMPP
-                    default: return Fail();
-                }
-
-            case 0xDB:
-                switch (reg, rm)
-                {
-                    case (0, _): if (!cpu.cf) StSet(cpu, 0, St(cpu, rm)); return Ok();              // FCMOVNB
-                    case (1, _): if (!cpu.zf) StSet(cpu, 0, St(cpu, rm)); return Ok();              // FCMOVNE
-                    case (2, _): if (!cpu.cf && !cpu.zf) StSet(cpu, 0, St(cpu, rm)); return Ok();   // FCMOVNBE
-                    case (3, _): if (!cpu.pf) StSet(cpu, 0, St(cpu, rm)); return Ok();              // FCMOVNU
-                    case (4, 2): cpu.fpu_sw &= 0x7F00; return Ok();                                 // FNCLEX
-                    case (4, 3): FpuInit(cpu); return Ok();                                         // FNINIT
-                    case (5, _): FpuCompareEflags(cpu, St(cpu, 0), St(cpu, rm)); return Ok();       // FUCOMI
-                    case (6, _): FpuCompareEflags(cpu, St(cpu, 0), St(cpu, rm)); return Ok();       // FCOMI
-                    default: return Fail();
-                }
-
-            case 0xDC: // ST(rm) op ST0(SUB/DIV は D8 と逆向き)
-                switch (reg)
-                {
-                    case 0: StSet(cpu, rm, St(cpu, rm) + St(cpu, 0)); return Ok();
-                    case 1: StSet(cpu, rm, St(cpu, rm) * St(cpu, 0)); return Ok();
-                    case 2: FpuCompare(cpu, St(cpu, 0), St(cpu, rm)); return Ok();
-                    case 3: FpuCompare(cpu, St(cpu, 0), St(cpu, rm)); FpuPop(cpu); return Ok();
-                    case 4: StSet(cpu, rm, St(cpu, 0) - St(cpu, rm)); return Ok(); // FSUBR
-                    case 5: StSet(cpu, rm, St(cpu, rm) - St(cpu, 0)); return Ok(); // FSUB
-                    case 6: StSet(cpu, rm, St(cpu, 0) / St(cpu, rm)); return Ok(); // FDIVR
-                    case 7: StSet(cpu, rm, St(cpu, rm) / St(cpu, 0)); return Ok(); // FDIV
-                    default: return Fail();
-                }
-
-            case 0xDD:
-                switch (reg)
-                {
-                    case 0: cpu.fpu_valid &= (byte)~(1 << StIdx(cpu, rm)); return Ok(); // FFREE
-                    case 2: StSet(cpu, rm, St(cpu, 0)); return Ok();                    // FST ST(i)
-                    case 3: StSet(cpu, rm, St(cpu, 0)); FpuPop(cpu); return Ok();       // FSTP ST(i)
-                    case 4: FpuCompare(cpu, St(cpu, 0), St(cpu, rm)); return Ok();      // FUCOM
-                    case 5: FpuCompare(cpu, St(cpu, 0), St(cpu, rm)); FpuPop(cpu); return Ok(); // FUCOMP
-                    default: return Fail();
-                }
-
-            case 0xDE: // 演算して pop(SUB/DIV は DC と同じ逆向き規約)
-                switch (reg, rm)
-                {
-                    case (0, _): StSet(cpu, rm, St(cpu, rm) + St(cpu, 0)); FpuPop(cpu); return Ok(); // FADDP
-                    case (1, _): StSet(cpu, rm, St(cpu, rm) * St(cpu, 0)); FpuPop(cpu); return Ok(); // FMULP
-                    case (2, _): FpuCompare(cpu, St(cpu, 0), St(cpu, rm)); FpuPop(cpu); return Ok();
-                    case (3, 1): FpuCompare(cpu, St(cpu, 0), St(cpu, 1)); FpuPop(cpu); FpuPop(cpu); return Ok(); // FCOMPP
-                    case (4, _): StSet(cpu, rm, St(cpu, 0) - St(cpu, rm)); FpuPop(cpu); return Ok(); // FSUBRP
-                    case (5, _): StSet(cpu, rm, St(cpu, rm) - St(cpu, 0)); FpuPop(cpu); return Ok(); // FSUBP
-                    case (6, _): StSet(cpu, rm, St(cpu, 0) / St(cpu, rm)); FpuPop(cpu); return Ok(); // FDIVRP
-                    case (7, _): StSet(cpu, rm, St(cpu, rm) / St(cpu, 0)); FpuPop(cpu); return Ok(); // FDIVP
-                    default: return Fail();
-                }
-
-            case 0xDF:
-                switch (reg, rm)
-                {
-                    case (4, 0): cpu.ax = FpuSw(cpu); return Ok();                                  // FNSTSW AX
-                    case (5, _): FpuCompareEflags(cpu, St(cpu, 0), St(cpu, rm)); FpuPop(cpu); return Ok(); // FUCOMIP
-                    case (6, _): FpuCompareEflags(cpu, St(cpu, 0), St(cpu, rm)); FpuPop(cpu); return Ok(); // FCOMIP
-                    default: return Fail();
-                }
-
-            default:
-                return Fail();
-        }
+    // レジスタ形式のうち rm まで固定の命令: (op, reg, rm) → 命令。
+    static readonly Dictionary<(int op, int reg, int rm), State<Unit>> FpuFixedForms = new()
+    {
+        [(0xD9, 2, 0)] = FpuNop,                                                      // FNOP
+        [(0xD9, 4, 0)] = Unary(x => -x),                                              // FCHS
+        [(0xD9, 4, 1)] = Unary(Math.Abs),                                             // FABS
+        [(0xD9, 4, 4)] = Compare(Zero),                                               // FTST
+        [(0xD9, 4, 5)] = Fpu(FpuExamine),                                             // FXAM
+        [(0xD9, 5, 0)] = Push(1.0),                                                   // FLD1
+        [(0xD9, 5, 1)] = Push(3.321928094887362),                                     // FLDL2T
+        [(0xD9, 5, 2)] = Push(1.4426950408889634),                                    // FLDL2E
+        [(0xD9, 5, 3)] = Push(Math.PI),                                               // FLDPI
+        [(0xD9, 5, 4)] = Push(0.3010299956639812),                                    // FLDLG2
+        [(0xD9, 5, 5)] = Push(0.6931471805599453),                                    // FLDLN2
+        [(0xD9, 5, 6)] = Push(0.0),                                                   // FLDZ
+        [(0xD9, 6, 0)] = Unary(x => Math.Pow(2.0, x) - 1.0),                          // F2XM1
+        [(0xD9, 6, 1)] = Compute(St1, St1, (x, y) => y * Math.Log2(x), pops: 1),      // FYL2X
+        [(0xD9, 6, 2)] = Unary(Math.Tan).Then(Push(1.0)).Then(ClearC2),               // FPTAN
+        [(0xD9, 6, 3)] = Compute(St1, St1, (x, y) => Math.Atan2(y, x), pops: 1),      // FPATAN
+        [(0xD9, 6, 4)] = Fpu(FpuExtract),                                             // FXTRACT
+        [(0xD9, 6, 5)] = Compute(St0, St1, Math.IEEERemainder).Then(ClearC2),         // FPREM1
+        [(0xD9, 6, 6)] = Fpu(c => c.fpu_top = (c.fpu_top - 1) & 7),                   // FDECSTP
+        [(0xD9, 6, 7)] = Fpu(c => c.fpu_top = (c.fpu_top + 1) & 7),                   // FINCSTP
+        [(0xD9, 7, 0)] = Fpu(FpuRemainder),                                           // FPREM
+        [(0xD9, 7, 1)] = Compute(St1, St1, (x, y) => y * Math.Log2(x + 1.0), pops: 1), // FYL2XP1
+        [(0xD9, 7, 2)] = Unary(Math.Sqrt),                                            // FSQRT
+        [(0xD9, 7, 3)] = Fpu(FpuSinCos),                                              // FSINCOS
+        [(0xD9, 7, 4)] = Fpu(c => StSet(c, 0, FpuRound(c, St(c, 0)))),                // FRNDINT
+        [(0xD9, 7, 5)] = Compute(St0, St1, (x, y) => x * Math.Pow(2.0, Math.Truncate(y))), // FSCALE
+        [(0xD9, 7, 6)] = Unary(Math.Sin).Then(ClearC2),                               // FSIN
+        [(0xD9, 7, 7)] = Unary(Math.Cos).Then(ClearC2),                               // FCOS
+        [(0xDA, 5, 1)] = Compare(St1, pops: 2),                                       // FUCOMPP
+        [(0xDB, 4, 2)] = Fpu(c => c.fpu_sw &= 0x7F00),                                // FNCLEX
+        [(0xDB, 4, 3)] = Fpu(FpuInit),                                                // FNINIT
+        [(0xDE, 3, 1)] = Compare(St1, pops: 2),                                       // FCOMPP
+        [(0xDF, 4, 0)] = Fpu(c => c.ax = FpuSw(c)),                                   // FNSTSW AX
     };
+
+    // レジスタ形式: (op, reg) → ST(i) の番号から命令を作る。
+    static readonly Dictionary<(int op, int reg), Func<int, State<Unit>>> FpuRegisterForms = BuildFpuRegisterForms();
+
+    static Dictionary<(int op, int reg), Func<int, State<Unit>>> BuildFpuRegisterForms()
+    {
+        var table = new Dictionary<(int op, int reg), Func<int, State<Unit>>>
+        {
+            [(0xD9, 0)] = i => Load(StReal(i)),                                   // FLD ST(i)
+            [(0xD9, 1)] = Exchange,                                               // FXCH
+            [(0xD9, 3)] = i => Store(StReal(i), pop: true),                       // FSTP ST(i)(別名)
+            [(0xDA, 0)] = i => ConditionalMove(c => c.cf, i),                     // FCMOVB
+            [(0xDA, 1)] = i => ConditionalMove(c => c.zf, i),                     // FCMOVE
+            [(0xDA, 2)] = i => ConditionalMove(c => c.cf || c.zf, i),             // FCMOVBE
+            [(0xDA, 3)] = i => ConditionalMove(c => c.pf, i),                     // FCMOVU
+            [(0xDB, 0)] = i => ConditionalMove(c => !c.cf, i),                    // FCMOVNB
+            [(0xDB, 1)] = i => ConditionalMove(c => !c.zf, i),                    // FCMOVNE
+            [(0xDB, 2)] = i => ConditionalMove(c => !c.cf && !c.zf, i),           // FCMOVNBE
+            [(0xDB, 3)] = i => ConditionalMove(c => !c.pf, i),                    // FCMOVNU
+            [(0xDB, 5)] = i => CompareEflags(StReal(i)),                          // FUCOMI
+            [(0xDB, 6)] = i => CompareEflags(StReal(i)),                          // FCOMI
+            [(0xDD, 0)] = i => Fpu(c => c.fpu_valid &= (byte)~(1 << StIdx(c, i))), // FFREE
+            [(0xDD, 2)] = i => Store(StReal(i)),                                  // FST ST(i)
+            [(0xDD, 3)] = i => Store(StReal(i), pop: true),                       // FSTP ST(i)
+            [(0xDD, 4)] = i => Compare(StReal(i)),                                // FUCOM
+            [(0xDD, 5)] = i => Compare(StReal(i), pops: 1),                       // FUCOMP
+            [(0xDF, 5)] = i => CompareEflags(StReal(i), pops: 1),                 // FUCOMIP
+            [(0xDF, 6)] = i => CompareEflags(StReal(i), pops: 1),                 // FCOMIP
+        };
+        for (var kind = 0; kind < 8; kind++)
+        {
+            var k = kind;
+            table[(0xD8, kind)] = i => Arith(k, StReal(i), St0, pop: false);           // ST0 <- ST0 op ST(i)
+            table[(0xDC, kind)] = i => Arith(k, StReal(i), StReal(i), pop: false);     // ST(i) <- ST(i) op ST0
+            if (kind != 3) table[(0xDE, kind)] = i => Arith(k, StReal(i), StReal(i), pop: true); // …して pop(FCOMPP は固定形式)
+        }
+        return table;
+    }
+
+    static readonly State<Unit> FpuUndefined = (env, cpu, ope) => (false, default, cpu, string.Empty);
+
+    // ModRM で表を引く。未定義のエンコーディングは失敗(STOP 診断に載り、Execute が EIP を巻き戻す)。
+    static State<Unit> FpuInstruction(int op, int mod, int reg, int rm) =>
+        mod != 3
+            ? FpuMemoryForms.TryGetValue((op, reg), out var memory)
+                ? (from address in GetMemOrRegAddr(mod, rm) from _ in memory(address.addr) select unit)
+                : FpuUndefined
+            : FpuFixedForms.TryGetValue((op, reg, rm), out var fixedForm) ? fixedForm
+            : FpuRegisterForms.TryGetValue((op, reg), out var register) ? register(rm)
+            : FpuUndefined;
+
+    // --- 本体 ----------------------------------------------------------------
+    static public State<Unit> Fpu_D8_DF =>
+        from ope in Opecodes
+        from m in ModRegRm()
+        from _ in FpuInstruction(ope[0], m.mod, m.reg, m.rm)
+        select unit;
 }
+
+// FPU のオペランド(Lens): double として読む State と書き戻す関数の組。
+public readonly record struct Real(State<double> Read, Func<double, State<Unit>> Write);
