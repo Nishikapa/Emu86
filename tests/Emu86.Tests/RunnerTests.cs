@@ -292,7 +292,7 @@ static class RunnerTests
         Equal("aaaa1111 bbbb2222 ", WindowsDiagnostics.Caller(env, cpu), "return addresses along the frame chain");
         Dword(0x3000, 0x5000); Dword(0x3004, 1); Dword(0x3008, 0x40010006); // ret、a1、a2 = DbgPrint
         Dword(0x5014, 5); Dword(0x5018, 0x6000);                           // 長さ 5、文字列ポインタ
-        "Hi! "u8.CopyTo(memory.AsSpan(0x6000));
+        "Hi!\u0001\0"u8.CopyTo(memory.AsSpan(0x6000));
         using var output = new StringWriter();
         WindowsDiagnostics.LogEntry(env, cpu, 7, output);
         Equal("ENTRY 7: 00401000 -> 00401000 cr3=00000000 ret=00005000 a1=00000001 a2=40010006 dbg=\"Hi!.\"", output.ToString().TrimEnd(), "entry with a debug string");
