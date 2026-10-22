@@ -233,7 +233,7 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | 制御転送 | `Jcc`（rel8/rel16/rel32）、`JMP`/`CALL`/`RET`（near/far/間接。far は外側特権レベルへの復帰を含む）、`LOOP`/`LOOPE`/`LOOPNE`、`JCXZ`/`JECXZ` |
 | 文字列 | `MOVS`/`STOS`/`LODS`/`CMPS`/`SCAS`/`INS`/`OUTS` + `REP`/`REPE`/`REPNE`（16/32 ビットアドレッシング、ページフォルト後の途中再開） |
 | 割り込み・例外 | `INT`/`INT3`/`INTO`/`IRET`（`IRETD`）。リアルモードは IVT、プロテクトモードは IDT の割り込み/トラップゲート経由で、リング遷移（TSS の SS0/ESP0）と V86 モードへの出入り（`IRETD` での突入、V86 内 `INT n` の #GP 反射、セグメントレジスタ付きフレーム）に対応。#PF/#UD/#GP を命令開始時の状態から配送 |
-| フラグ/その他 | `CLC`/`STC`/`CMC`/`CLD`/`STD`/`CLI`/`STI`、`SAHF`/`LAHF`、`NOP`/`HLT`（待機せず次へ進む）、`IN`/`OUT`、`WAIT` |
+| フラグ/その他 | `CLC`/`STC`/`CMC`/`CLD`/`STD`/`CLI`/`STI`、`SAHF`/`LAHF`、`NOP`/`HLT`（配送できる割り込みが無ければ次の割り込みまで仮想時間を進める）、`IN`/`OUT`、`WAIT` |
 | システム | `LGDT`/`LIDT`/`SGDT`/`SIDT`、`LLDT`/`LTR`/`SLDT`/`STR`（セレクタの保持のみ）、`MOV CRn`/`DRn`、`CPUID`（EAX=0/1）、`RDTSC`、`RDMSR`/`WRMSR`（汎用ストア）、`INVLPG`、`INVD`/`WBINVD`、プロテクトモード遷移、ページング（2 レベル、PSE、PAE、CR0.WP、Accessed/Dirty 更新）、V86 モード |
 | x87 FPU | ロード/ストア（f32/f64/f80/int16/32/64）、四則演算（全方向・P 付き）、比較（`FCOM`/`FUCOM`/`FCOMI` 系、`FTST`/`FXAM`）、`FCMOVcc`、`FXCH`/`FCHS`/`FABS`/定数ロード、`FSIN`/`FCOS`/`FSINCOS`/`FPTAN`/`FPATAN`/`F2XM1`/`FYL2X`/`FYL2XP1`、`FSQRT`/`FRNDINT`/`FSCALE`/`FPREM`/`FPREM1`/`FXTRACT`、制御語/状態語、`FNSAVE`/`FRSTOR`/`FNSTENV`/`FNINIT` |
 
@@ -260,7 +260,7 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 - TSS によるハードウェアタスクスイッチ・タスクゲート（NMI、#DF）・コールゲート・LDT は未実装です（`LLDT`/`LTR` はセレクタを保持するだけ）。#PF 配送中の再フォルトはダブルフォルトとして停止します。
 - SSE/MMX、`SYSENTER`/`SYSEXIT`、`FXSAVE`/`FXRSTOR` は未実装で、`CPUID` でも報告しません。
 - セグメントオーバーライドプレフィックスは ModRM 実効アドレス計算と moffs には反映されますが、文字列命令（`MOVS`/`STOS`/`LODS`/`CMPS`/`SCAS`）は DS:SI・ES:DI 固定で、オーバーライドは反映されません。
-- `HLT` は待機せずに次の命令へ進み、`LOCK` プレフィックスは無視します。
+- `HLT` は、配送できる割り込みが無ければ次のイベント（タイマ周期・サービス周期・保存・上限）まで命令数（= ゲストの時刻）を進めます。IF=0 と `--noirq` のときは待てないので次の命令へ進みます。スキップした量は終了時に `[halt]` として標準エラー出力に出ます。`LOCK` プレフィックスは無視します。
 - ゲストの時刻は命令数ベース（100 万命令 = 1 秒、IRQ0 は 1 万命令ごと、TSC と ACPI PM タイマーも同じ基準）で、実時間とは一致しません。RTC の時計は未実装です。
 - ATA はマスタドライブ・PIO 転送のみ。DMA・ATAPI・セカンダリコントローラは非対応です。VHD 形式への直接書き込みは非対応（差分書き込みは常に AVHDX オーバーレイに限定）。
 - 自動回帰テストはありますが、OS の長時間ブート確認は別途手動で行います。

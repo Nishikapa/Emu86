@@ -27,6 +27,7 @@ internal static class EmulationRunner
         long lastReport = count;
         long fastCount = 0;
         long translatedCount = 0;
+        long haltSkipped = 0, halts = 0;
         if (env.NextIrq == 0) env.NextIrq = count + IrqPeriod;
         // 定期保存なし(間隔 = long.MaxValue)のときは、再開後の count との加算が溢れないように飽和させる。
         long nextSnapshot = NextSnapshot(count, snapshotInterval);
@@ -159,6 +160,18 @@ internal static class EmulationRunner
             }
             // 完了した命令数(翻訳ブロックは複数。フォルト時は上で加算済み)に、完了しなかった 1 命令(#UD・フォルト・VGA BIOS スタブ)を足す。
             count += (fault == null ? executor.Executed : 0) + (completed ? 0 : 1);
+            // HLT: 配送できる割り込みが無ければ、次のイベント(タイマ周期・サービス周期・保存・上限)まで仮想時間を進める。
+            // ゲストの時刻は命令数が基準なので、実機が割り込みまで止まっているのと同じことになる。
+            // IF=0(割り込みで起きられない)や --noirq のときは従来どおり次の命令へ進む。
+            if (cpu.Halted)
+            {
+                cpu.Halted = false;
+                if (!options.NoIrq && cpu.jf && IrqDelivery.Select(env, cpu) < 0)
+                {
+                    var wake = Math.Min(Math.Min(env.NextIrq, nextService), Math.Min(nextSnapshot, options.Limit));
+                    if (wake > count) { halts++; haltSkipped += wake - count; count = wake; }
+                }
+            }
             env.Tsc = (ulong)count; // RDTSC の代用カウンタ
             // #PF の配送は命令完了トレースに含めない(#UD/#GP の配送は従来どおり命令の完了として扱う)。
             // ブロックの途中の命令は順次実行なので、最後に完了した命令だけを見れば分岐トレースは同じになる。
@@ -179,6 +192,8 @@ internal static class EmulationRunner
 
         if (count >= options.Limit) output.WriteLine("instruction limit reached");
         saveSnapshot?.Invoke(count, cpu, env);
+        if (halts > 0)
+            error.WriteLine($"[halt] {halts:N0} waits skipped {haltSkipped:N0} instructions of idle time ({100.0 * haltSkipped / Math.Max(1, count):F1}% of the count)");
         if (!options.Slow && count > 0)
             output.WriteLine($"fast-path coverage: {fastCount:N0}/{count:N0} ({100.0 * fastCount / count:F2}%)");
         if (env.Translations.Enabled && count > 0)

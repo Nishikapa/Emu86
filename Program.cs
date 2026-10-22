@@ -1322,8 +1322,10 @@ static partial class Program
         from _ in SetLog("Nop_90")
         select unit;
 
+    // HLT: 印を立てるだけ。待機(次の割り込みまで仮想時間を進める)はランナーが行う。
     static State<Unit> Hlt_F4 =>
-        from _ in SetLog("Hlt_F4")
+        from _1 in SetLog("Hlt_F4")
+        from _2 in SetCpu(cpu => { cpu.Halted = true; return cpu; })
         select unit;
 
     static State<Unit> Clc_F8 =>
