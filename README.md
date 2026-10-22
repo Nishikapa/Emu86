@@ -187,7 +187,7 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | `Fault.cs` | CPU 例外の値 `Fault`（ベクタ・エラーコード・#PF の線形アドレス）と、命令の途中で投げる `CpuFaultException`（`PageFaultException`/`GeneralProtectionException`）。ランナーは #UD/#PF/#GP を同じ `Raise` で配送する。 |
 | `CodeParser.cs` | 命令バイト列の読み口 `CodeSource`（CS:(E)IP 相対、16 ビット IP の折り返し、必要なバイトだけを遅延フェッチ）と Parser モナド `Parser<T>`（`Select`/`SelectMany`/`Where`/`Or`/`Fold`）。両コアが共有するプレフィックスの畳み込み（`Prefixes`）、ModRM/SIB/変位の構造（`ParseModRm`）、実効アドレスの計算（`EffectiveAddress`）。 |
 | `Semantics.cs` | 命令の意味論を第一級データ（式と文の `record`）で表す IR。LINQ クエリ（`Emit` モナド）で IR を組み立て、各ノードの `Evaluate`/`Run`（解釈器）と `System.Linq.Expressions` のコンパイラの 2 つが消費する。ALU・MOV・TEST/CMP・INC/DEC・LEA・MOVZX/MOVSX・PUSH/POP・Jcc/JMP が対象（`docs/adr/0002`）。 |
-| `TranslationCache.cs` | `--translate` で有効になる基本ブロックの翻訳キャッシュ。分岐（Jcc/JMP/CALL/RET）か STI までの IR 命令列をブロックの先頭物理アドレスで引き、8 回実行で IR に下ろして解釈し、`--compile-after` 回でコンパイルする。分岐先のブロックも翻訳済みなら、ランナーが渡す予算（次の割り込み周期などまでの命令数）の範囲で連結して続け、翻訳済みページへの書き込み（自己書き換え）と STI で止まる。XP 起動 1 億命令の 98.7% がブロックで走って 4〜5 割速く、状態は 1 命令ずつの実行と一致。コンパイル済みコードは CPU のレジスタ・EFLAGS・セグメント基底を直接読み書きし、32 ビットの実効アドレスを式木にする。 |
+| `TranslationCache.cs` | 基本ブロックの翻訳キャッシュ（既定で有効。`--no-translate` で 1 命令ずつの実行に戻せる。命令ごとに CPU を見る診断でも自動的に切れる）。分岐（Jcc/JMP/CALL/RET）か STI までの IR 命令列をブロックの先頭物理アドレスで引き、8 回実行で IR に下ろして解釈し、`--compile-after` 回でコンパイルする。分岐先のブロックも翻訳済みなら、ランナーが渡す予算（次の割り込み周期などまでの命令数）の範囲で連結して続け、翻訳済みページへの書き込み（自己書き換え）と STI で止まる。XP 起動 1 億命令の 98.7% がブロックで走って 4〜5 割速く、状態は 1 命令ずつの実行と一致。コンパイル済みコードは CPU のレジスタ・EFLAGS・セグメント基底を直接読み書きし、32 ビットの実効アドレスを式木にする。 |
 | `Instruction.cs` | オペコード属性表 `OpcodeTable`（ModRM の有無・即値の形・ニーモニック・オペランド書式）、命令全体のパーサ `InstructionParser`（Parser モナドのクエリ合成）と `Instruction` レコード、逆アセンブラ `Disassembler`。実行には使わず、診断（レジスタダイアログの次命令表示）とデコードキャッシュの土台。 |
 | `InstructionDecoding.cs` / `Registers.cs` | 通常コアの ModRM 読み取り State（`CodeParser.cs` の共有デコーダを呼び、消費した分だけ EIP を進める）と、両コア共通の配列を作らないレジスタ参照。 |
 | `Program.Runner.cs` / `RunOptions.cs` | CLI の起動処理、オプションの表（名前・引数・説明・値のパーサ・適用）、ウィンドウ付き実行と別スレッドでの実行ループ、ゲストリセット時の環境再生成、セクタダンプ。解析と `--help` の一覧は同じ表から作る。 |
@@ -254,7 +254,7 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 ## 主な制限
 
 - 単一 CPU のみ。Local APIC / I/O APIC と MMIO は未実装で、`CPUID` でも APIC を報告しません（マルチ CPU 対応は `docs/adr/0001-multithreading-and-smp.md` で保留中）。
-- 命令定義 1 つから解釈実行とコンパイル済み経路を導出する IR と基本ブロックの翻訳キャッシュは `--translate` でのオプトインです（XP 起動 1 億命令で状態が一致したまま 4〜5 割速い。既定で有効にするのは GUI 到達までの長時間ブートで一致を確かめてから。`docs/adr/0002-instruction-semantics-ir.md`）。
+- 命令定義 1 つから解釈実行とコンパイル済み経路を導出する IR と基本ブロックの翻訳キャッシュは既定で有効です（XP 起動で GUI に到達する 65 億命令まで、1 命令ずつの実行と状態がバイト一致したまま 4〜5 割速い。`--no-translate` で戻せる。`docs/adr/0002-instruction-semantics-ir.md`）。
 - TSS によるハードウェアタスクスイッチ・タスクゲート（NMI、#DF）・コールゲート・LDT は未実装です（`LLDT`/`LTR` はセレクタを保持するだけ）。#PF 配送中の再フォルトはダブルフォルトとして停止します。
 - SSE/MMX、`SYSENTER`/`SYSEXIT`、`FXSAVE`/`FXRSTOR` は未実装で、`CPUID` でも報告しません。
 - セグメントオーバーライドプレフィックスは ModRM 実効アドレス計算と moffs には反映されますが、文字列命令（`MOVS`/`STOS`/`LODS`/`CMPS`/`SCAS`）は DS:SI・ES:DI 固定で、オーバーライドは反映されません。
