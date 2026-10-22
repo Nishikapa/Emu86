@@ -157,80 +157,106 @@ public sealed class VgaDevice
     public static bool IsPort(int port) =>
         port is 0x3B4 or 0x3B5 or 0x3BA or (>= 0x3C0 and <= 0x3CF) or 0x3D4 or 0x3D5 or 0x3DA;
 
-    // tsc は垂直帰線(Input Status 1 bit3)と表示禁止(bit0)を周期的に変化させるための時刻源。
-    public byte ReadPort(int port, ulong tsc)
+    /// レジスタ(Lens)とポート表 ///////////////////////////////////////////
+    // Register は 1 つのポートの読み出し(tsc は Input Status 1 の垂直帰線用)と書き込み(null なら書けない)。
+    // インデックス/データのポート対(Sequencer/Graphics/CRTC/Attribute)は Indexed で作る: データ側はインデックスが指す
+    // 配列の要素で、範囲外は読むと 0、書いても何も起きない。書き込みは表示の更新フラグを立てる。
+    readonly record struct Register(Func<VgaDevice, ulong, byte> Read, Action<VgaDevice, byte> Write = null);
+
+    static Register Value(Func<VgaDevice, byte> get, Action<VgaDevice, byte> set = null) => new((vga, _) => get(vga), set);
+    static Register Constant(byte value, Action<VgaDevice, byte> set = null) => new((_, _) => value, set);
+
+    static (Register Index, Register Data) Indexed(
+        Func<VgaDevice, byte> getIndex, Action<VgaDevice, byte> setIndex, Func<VgaDevice, byte[]> array, Func<byte, int> element,
+        Action<VgaDevice, int, byte> writeElement = null)
     {
-        switch (port)
-        {
-            case 0x3C0: return AttributeIndex;
-            case 0x3C1: return (AttributeIndex & 0x1F) < Attribute.Length ? Attribute[AttributeIndex & 0x1F] : (byte)0;
-            case 0x3C2: return 0x00;
-            case 0x3C3: return 0x01;
-            case 0x3C4: return SequencerIndex;
-            case 0x3C5: return Sequencer[SequencerIndex & 7];
-            case 0x3C6: return DacMask;
-            case 0x3C7: return 0x00;
-            case 0x3C8: return DacWriteIndex;
-            case 0x3C9:
-                var component = Dac[DacReadIndex * 3 + DacReadPhase];
-                if (++DacReadPhase == 3) { DacReadPhase = 0; DacReadIndex++; }
-                return component;
-            case 0x3CA: return FeatureControl;
-            case 0x3CC: return MiscOutput;
-            case 0x3CE: return GraphicsIndex;
-            case 0x3CF: return GraphicsIndex < Graphics.Length ? Graphics[GraphicsIndex] : (byte)0;
-            case 0x3B4 or 0x3D4: return CrtcIndex;
-            case 0x3B5 or 0x3D5: return CrtcIndex < Crtc.Length ? Crtc[CrtcIndex] : (byte)0;
-            case 0x3BA or 0x3DA:
-                AttributeData = false;
-                var retrace = (int)(tsc >> 12) & 1;
-                return (byte)((retrace << 3) | retrace | ((int)(tsc >> 7) & 1));
-            default: return 0xFF;
-        }
+        int Element(VgaDevice vga) => element(getIndex(vga));
+        writeElement ??= (vga, index, value) => { array(vga)[index] = value; vga.Dirty = true; };
+        return (
+            Value(getIndex, setIndex),
+            new((vga, _) => Element(vga) < array(vga).Length ? array(vga)[Element(vga)] : (byte)0,
+                (vga, value) => { if (Element(vga) < array(vga).Length) writeElement(vga, Element(vga), value); }));
     }
+
+    static readonly (Register Index, Register Data) SequencerPorts =
+        Indexed(vga => vga.SequencerIndex, (vga, index) => vga.SequencerIndex = index, vga => vga.Sequencer, index => index & 7);
+    static readonly (Register Index, Register Data) GraphicsPorts =
+        Indexed(vga => vga.GraphicsIndex, (vga, index) => vga.GraphicsIndex = index, vga => vga.Graphics, index => index);
+    // CRTC 0-7 保護中(index 0x11 の bit7)は Overflow(7)の Line Compare bit8 だけ書き換えられる。
+    static readonly (Register Index, Register Data) CrtcPorts =
+        Indexed(vga => vga.CrtcIndex, (vga, index) => vga.CrtcIndex = index, vga => vga.Crtc, index => index, (vga, index, value) =>
+        {
+            if (index <= 7 && (vga.Crtc[0x11] & 0x80) != 0)
+            {
+                if (index == 7) vga.Crtc[7] = (byte)((vga.Crtc[7] & ~0x10) | (value & 0x10));
+                return;
+            }
+            vga.Crtc[index] = value;
+            vga.Dirty = true;
+        });
+    // Attribute は 0x3C0 の 1 ポートにインデックスとデータが交互に来る(フリップフロップ)。0x3C1 はデータの読み出しのみ。
+    static readonly (Register Index, Register Data) AttributePorts =
+        Indexed(vga => vga.AttributeIndex, (vga, index) => vga.AttributeIndex = index, vga => vga.Attribute, index => index & 0x1F);
+
+    // DAC: 書き込み/読み出しインデックスと、R/G/B の 3 相で進む成分。
+    static readonly Register DacData = new(
+        (vga, _) =>
+        {
+            var component = vga.Dac[vga.DacReadIndex * 3 + vga.DacReadPhase];
+            if (++vga.DacReadPhase == 3) { vga.DacReadPhase = 0; vga.DacReadIndex++; }
+            return component;
+        },
+        (vga, value) =>
+        {
+            vga.Dac[vga.DacWriteIndex * 3 + vga.DacWritePhase] = (byte)(value & 0x3F);
+            if (++vga.DacWritePhase == 3) { vga.DacWritePhase = 0; vga.DacWriteIndex++; }
+            vga.Dirty = true;
+        });
+
+    // Input Status 1: 読むと Attribute のフリップフロップをインデックス側へ戻す。垂直帰線(bit3)と表示禁止(bit0)は時刻で周期的に変わる。
+    static readonly Register InputStatus = new(
+        (vga, tsc) =>
+        {
+            vga.AttributeData = false;
+            var retrace = (int)(tsc >> 12) & 1;
+            return (byte)((retrace << 3) | retrace | ((int)(tsc >> 7) & 1));
+        },
+        (vga, value) => vga.FeatureControl = value);
+
+    // ポート → レジスタ。CRTC と Input Status はモノクロ(3Bx)とカラー(3Dx)の両方の番地に見える。
+    static readonly Dictionary<int, Register> Ports = new()
+    {
+        [0x3C0] = Value(vga => vga.AttributeIndex, (vga, value) =>
+        {
+            if (vga.AttributeData) AttributePorts.Data.Write(vga, value);
+            else vga.AttributeIndex = value;
+            vga.AttributeData = !vga.AttributeData;
+        }),
+        [0x3C1] = new(AttributePorts.Data.Read),
+        [0x3C2] = Constant(0x00, (vga, value) => vga.MiscOutput = value),
+        [0x3C3] = Constant(0x01),
+        [0x3C4] = SequencerPorts.Index,
+        [0x3C5] = SequencerPorts.Data,
+        [0x3C6] = Value(vga => vga.DacMask, (vga, value) => { vga.DacMask = value; vga.Dirty = true; }),
+        [0x3C7] = Constant(0x00, (vga, value) => { vga.DacReadIndex = value; vga.DacReadPhase = 0; }),
+        [0x3C8] = Value(vga => vga.DacWriteIndex, (vga, value) => { vga.DacWriteIndex = value; vga.DacWritePhase = 0; }),
+        [0x3C9] = DacData,
+        [0x3CA] = Value(vga => vga.FeatureControl),
+        [0x3CC] = Value(vga => vga.MiscOutput),
+        [0x3CE] = GraphicsPorts.Index,
+        [0x3CF] = GraphicsPorts.Data,
+        [0x3B4] = CrtcPorts.Index, [0x3D4] = CrtcPorts.Index,
+        [0x3B5] = CrtcPorts.Data, [0x3D5] = CrtcPorts.Data,
+        [0x3BA] = InputStatus, [0x3DA] = InputStatus,
+    };
+
+    // tsc は垂直帰線(Input Status 1 bit3)と表示禁止(bit0)を周期的に変化させるための時刻源。表にないポートは 0xFF。
+    public byte ReadPort(int port, ulong tsc) => Ports.TryGetValue(port, out var register) ? register.Read(this, tsc) : (byte)0xFF;
 
     public void WritePort(int port, byte value)
     {
         if (Log) Console.Error.WriteLine($"[vga] out {port:x3} <- {value:x2}");
-        switch (port)
-        {
-            case 0x3C0:
-                if (AttributeData)
-                {
-                    var index = AttributeIndex & 0x1F;
-                    if (index < Attribute.Length) { Attribute[index] = value; Dirty = true; }
-                }
-                else
-                    AttributeIndex = value;
-                AttributeData = !AttributeData;
-                break;
-            case 0x3C2: MiscOutput = value; break;
-            case 0x3C4: SequencerIndex = value; break;
-            case 0x3C5: Sequencer[SequencerIndex & 7] = value; Dirty = true; break;
-            case 0x3C6: DacMask = value; Dirty = true; break;
-            case 0x3C7: DacReadIndex = value; DacReadPhase = 0; break;
-            case 0x3C8: DacWriteIndex = value; DacWritePhase = 0; break;
-            case 0x3C9:
-                Dac[DacWriteIndex * 3 + DacWritePhase] = (byte)(value & 0x3F);
-                if (++DacWritePhase == 3) { DacWritePhase = 0; DacWriteIndex++; }
-                Dirty = true;
-                break;
-            case 0x3CE: GraphicsIndex = value; break;
-            case 0x3CF: if (GraphicsIndex < Graphics.Length) { Graphics[GraphicsIndex] = value; Dirty = true; } break;
-            case 0x3B4 or 0x3D4: CrtcIndex = value; break;
-            case 0x3B5 or 0x3D5:
-                if (CrtcIndex >= Crtc.Length) break;
-                if (CrtcIndex <= 7 && (Crtc[0x11] & 0x80) != 0)
-                {
-                    // CRTC 0-7 保護中は Overflow の Line Compare bit8 だけ書き換えられる。
-                    if (CrtcIndex == 7) Crtc[7] = (byte)((Crtc[7] & ~0x10) | (value & 0x10));
-                    break;
-                }
-                Crtc[CrtcIndex] = value;
-                Dirty = true;
-                break;
-            case 0x3BA or 0x3DA: FeatureControl = value; break;
-        }
+        if (Ports.TryGetValue(port, out var register)) register.Write?.Invoke(this, value);
     }
 
     /// 描画 ///////////////////////////////////////////
