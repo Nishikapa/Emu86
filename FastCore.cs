@@ -255,7 +255,7 @@ static public partial class Ext
                 break;
             }
             case 0x6C or 0x6D or 0x6E or 0x6F or 0xA4 or 0xA5 or 0xA6 or 0xA7 or 0xAA or 0xAB or 0xAC or 0xAD or 0xAE or 0xAF: // 文字列命令(単発)
-                FStrOne(env, cpu, op, (op & 1) != 0 ? (typeW == 2 ? 4 : 2) : 1, a32);
+                FStrOne(env, cpu, op, (op & 1) != 0 ? (typeW == 2 ? 4 : 2) : 1, a32, segBase);
                 break;
             case 0xA8 or 0xA9: // TEST acc, imm
             {
@@ -369,7 +369,7 @@ static public partial class Ext
                 var checkZf = op2 is 0xA6 or 0xA7 or 0xAE or 0xAF;
                 while ((a32 ? cpu.ecx : cpu.cx) != 0)
                 {
-                    FStrOne(env, cpu, op2, size, a32);
+                    FStrOne(env, cpu, op2, size, a32, segBase);
                     if (a32) cpu.ecx -= 1; else cpu.cx = (ushort)(cpu.cx - 1);
                     cpu.Decode.CommitRepeat(cpu);
                     if (checkZf && cpu.zf != repZf) break;
@@ -545,14 +545,14 @@ static public partial class Ext
     }
 
     // 文字列命令を 1 要素分だけ実行する(REP ループ・単発の両方から使う)。
-    // モナド版と同じく、セグメントオーバーライドは無視して DS/ES の基底を直接使う。
-    static void FStrOne(EmuEnvironment env, CPU c, byte op, int size, bool a32)
+    // source は源(DS:SI)の基底(セグメントオーバーライド適用済み)。先(ES:DI)は固定。
+    static void FStrOne(EmuEnvironment env, CPU c, byte op, int size, bool a32, uint source)
     {
         switch (op)
         {
             case 0xA4 or 0xA5: // MOVS
             {
-                var src = c.ds_base + (a32 ? c.esi : c.si);
+                var src = source + (a32 ? c.esi : c.si);
                 var dst = c.es_base + (a32 ? c.edi : c.di);
                 EnvWriteN(env, dst, size, EnvReadN(env, src, size));
                 FStrAdvance(c, size, a32, si: true, di: true);
@@ -560,7 +560,7 @@ static public partial class Ext
             }
             case 0xA6 or 0xA7: // CMPS
             {
-                var s = EnvReadN(env, c.ds_base + (a32 ? c.esi : c.si), size);
+                var s = EnvReadN(env, source + (a32 ? c.esi : c.si), size);
                 var d = EnvReadN(env, c.es_base + (a32 ? c.edi : c.di), size);
                 SetSubtractionFlags(c, size == 1 ? 0 : size == 2 ? 1 : 2, s, d);
                 FStrAdvance(c, size, a32, si: true, di: true);
@@ -575,7 +575,7 @@ static public partial class Ext
             }
             case 0xAC or 0xAD: // LODS
             {
-                var v = EnvReadN(env, c.ds_base + (a32 ? c.esi : c.si), size);
+                var v = EnvReadN(env, source + (a32 ? c.esi : c.si), size);
                 if (size == 1) c.al = (byte)v; else if (size == 2) c.ax = (ushort)v; else c.eax = v;
                 FStrAdvance(c, size, a32, si: true, di: false);
                 break;
@@ -589,7 +589,7 @@ static public partial class Ext
             }
             case 0x6E or 0x6F: // OUTS: [DS:SI] から 1 要素読んでポート DX へ
             {
-                EnvOutPortN(env, c.dx, size, EnvReadN(env, c.ds_base + (a32 ? c.esi : c.si), size));
+                EnvOutPortN(env, c.dx, size, EnvReadN(env, source + (a32 ? c.esi : c.si), size));
                 FStrAdvance(c, size, a32, si: true, di: false);
                 break;
             }
