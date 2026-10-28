@@ -24,7 +24,7 @@ static class RunnerTests
         Equal("snapshot.snap", defaults.SnapshotPath, "default snapshot");
         Equal(true, defaults.Diagnostics.Trace, "default trace");
         Equal(false, defaults.Resume, "default cold boot");
-        string[] arguments = ["--resume", "--slow", "--noirq", "--no-translate", "--window", "--boot-debug", "--com1", "pipe-a", "--com2", "pipe-b", "--limit", "123", "--snapshot", "other.snap",
+        string[] arguments = ["--resume", "--slow", "--noirq", "--no-translate", "--window", "--boot-debug", "--com1", "pipe-a", "--com2", "pipe-b", "--limit", "123", "--snapshot", "other.snap", "--rtc", "2026-10-28T12:34:56",
             "--disk", "other.vhd", "--overlay", "other.avhdx", "--dumplba", "42", "2",
             "--trace-all", "--regtrace", "--notrace", "--brhist", "--esptrap", "--pftrap",
             "--atalog", "--pcilog", "--piclog", "--vgalog", "--intlog", "--upflog", "321",
@@ -38,6 +38,8 @@ static class RunnerTests
         Equal(true, defaults.Com1Pipe == null && defaults.Com2Pipe == null && !defaults.BootDebug, "serial defaults");
         Equal(123L, parsed.Limit, "limit");
         Equal("other.snap", parsed.SnapshotPath, "snapshot path");
+        Equal(new DateTime(2026, 10, 28, 12, 34, 56), parsed.Rtc, "real-time clock start");
+        Equal(null, defaults.Rtc, "the clock defaults to the host's time");
         Equal("other.vhd", parsed.DiskPath, "base path");
         Equal("other.avhdx", parsed.OverlayPath, "overlay path");
         Equal((42L, 2), parsed.DumpLba.Value, "LBA decimal");
@@ -60,7 +62,7 @@ static class RunnerTests
         Equal(true, RunOptions.Parse(["--help"]).Help, "help");
         string[][] invalid = [
             ["--bogus"], ["--limit"], ["--limit", "--slow"], ["--limit", "-1"], ["--limit", "abc"],
-            ["--limit", "9223372036854775808"], ["--snapshot", ""], ["--breakeip", "100000000"],
+            ["--limit", "9223372036854775808"], ["--snapshot", ""], ["--breakeip", "100000000"], ["--rtc", "2026/10/28"],
             ["--breakeip", "-1"], ["--watch", "20"], ["--watch", "20", "10"], ["--watch", "10", "10"],
             ["--upflog", "oops"], ["--intlog", "0"], ["--intlog", "oops"], ["--com1"], ["--com2", "--slow"], ["--dumplba", "1"], ["--dumplba", "0", "0"],
             ["--dumplba", "9223372036854775807", "2"], ["--dumplba", "0", "2147483648"],

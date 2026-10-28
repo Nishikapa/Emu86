@@ -1,3 +1,4 @@
+using System.Globalization;
 using static Emu86.ArgParsers;
 using static Emu86.CommandOption;
 
@@ -52,6 +53,7 @@ internal sealed class RunOptions
     public long Limit { get; private set; } = InstructionLimit;
     public long SnapshotInterval { get; private set; } = 100_000_000;
     public string SnapshotPath { get; private set; } = "snapshot.snap";
+    public DateTime? Rtc { get; private set; }
     public string DiskPath { get; private set; }
     public string OverlayPath { get; private set; }
     public (long Start, int Count)? DumpLba { get; private set; }
@@ -70,6 +72,11 @@ internal sealed class RunOptions
         from _ in Require(count is > 0 and <= int.MaxValue && start <= long.MaxValue - count, "invalid sector range")
         select (start, (int)count);
 
+    static readonly ArgParser<DateTime> Timestamp = Value.Select(text =>
+        DateTime.TryParseExact(text, "yyyy-MM-dd'T'HH:mm:ss", CultureInfo.InvariantCulture, DateTimeStyles.None, out var time)
+            ? time
+            : throw new ArgumentException("expected yyyy-MM-ddTHH:mm:ss"));
+
     static readonly ArgParser<int> IntLogTail =
         (from last in Integer
          from _ in Require(last is >= 1 and <= 100000, "expected 1..100000")
@@ -80,6 +87,7 @@ internal sealed class RunOptions
     [
         Flag("Run", "--resume", "Resume from the snapshot instead of booting from the reset vector", o => o.Resume = true),
         Of("Run", "--snapshot", "path", "Snapshot file to save to and resume from (default snapshot.snap)", Value, (o, v) => o.SnapshotPath = v),
+        Of("Run", "--rtc", "yyyy-MM-ddTHH:mm:ss", "Start the real-time clock at this guest time on a cold boot (default: the host's local time)", Timestamp, (o, v) => o.Rtc = v),
         Of("Run", "--limit", "count|max", "Stop after count instructions (max = run until the window closes)",
             Word("max").Select(_ => long.MaxValue).Or(Integer), (o, v) => o.Limit = v),
         Of("Run", "--snapshot-interval", "count", "Save a snapshot every count instructions (default 100000000, 0 = only at the end)",

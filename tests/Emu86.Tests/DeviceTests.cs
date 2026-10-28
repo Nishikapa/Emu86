@@ -109,7 +109,7 @@ static class DeviceTests
             writer.Write(diagnostics.ToString().Replace("\r\n", "\n"));
             writer.Flush();
             var hash = Convert.ToHexString(SHA256.HashData(stream.ToArray()));
-            Equal("D6320CEA83449111BFE2D69B4D486D712D7383DBC2162D3A60F9361F3E0E4E42", hash, "device behavior (PCI VGA 2026-10-09, PS/2 mouse and 8042 A7/A8/FE 2026-10-10)");
+            Equal("C0102B8392C2C42742FFF4F69EAA0922E726A81344AD54130E7FD1E1D27018D2", hash, "device behavior (PCI VGA 2026-10-09, PS/2 mouse and 8042 A7/A8/FE 2026-10-10, RTC 2026-10-28)");
             Console.WriteLine($"Device compatibility SHA256={hash}");
         }
         finally
@@ -149,10 +149,51 @@ static class DeviceTests
         Equal(true, env.Keyboard.ResetRequested, "pulse with bit0 clear requests a reset");
     }
 
+    // RTC: 時刻はゲストの時刻(Tsc、100 万命令 = 1 秒)で進み、BCD/二進と 24/12 時間制は状態 B に従う。
+    // 時刻レジスタへの書き込みは「その時点の時刻」として合わせ、以後も Tsc で進む。曜日は日付から、C は 0、D は電池有効。
+    static void RealTimeClock()
+    {
+        using var env = new EmuEnvironment(memory: new byte[0x10000]);
+        var start = new DateTime(2026, 10, 28, 12, 34, 56);
+        env.CmosRtc.SetClock(start, 0);
+        string Clock(ulong tsc, params int[] registers)
+        {
+            env.Tsc = tsc;
+            return string.Join(",", registers.Select(register => { EnvOutPort(env, 0x70, (byte)register); return EnvInPort(env, 0x71).ToString("X2"); }));
+        }
+        void Write(int register, byte value) { EnvOutPort(env, 0x70, (byte)register); EnvOutPort(env, 0x71, value); }
+        static string Weekday(DateTime date) => ((int)date.DayOfWeek + 1).ToString("X2");
+        Equal($"56,34,12,{Weekday(start)},28,10,26,20", Clock(0, 0, 2, 4, 6, 7, 8, 9, 0x32), "BCD time, weekday, date and century");
+        Equal("26,36,12", Clock(90_000_000, 0, 2, 4), "90 seconds of guest time later");
+        var end = new DateTime(2099, 12, 31, 23, 59, 59);
+        Equal($"59,59,23,{Weekday(end)},31,12,99,20", Clock((ulong)(end - start).TotalSeconds * 1_000_000, 0, 2, 4, 6, 7, 8, 9, 0x32), "end of the century");
+        Equal("00,80,26", Clock(5_000_000, 0x0C, 0x0D, 0x0A), "status C clear, D battery valid, A default");
+        Write(0x0B, 0x06); // 二進、24 時間制
+        Equal("01,23,0C", Clock(5_000_000, 0, 2, 4), "binary encoding: 12:35:01 at +5 s");
+        Write(0x0B, 0x04); // 二進、12 時間制
+        Equal("8C", Clock(5_000_000, 4), "12-hour encoding: 12:35 is 12 PM");
+        Equal("0C", Clock(5_000_000 + (11 * 3600 + 30 * 60) * 1_000_000UL, 4), "12-hour encoding: 00:05 is 12 AM");
+        Equal("81", Clock(5_000_000 + 30 * 60 * 1_000_000UL, 4), "12-hour encoding: 13:05 is 1 PM");
+        Write(0x0B, 0x02); // BCD、24 時間制に戻す
+        env.Tsc = 5_000_000;
+        Write(0, 0x30); // 5 秒の時点の秒を 30 に合わせる
+        Equal("30,35,12", Clock(5_000_000, 0, 2, 4), "writing the seconds sets the clock at that moment");
+        Equal("40,35,12", Clock(15_000_000, 0, 2, 4), "and it keeps running from there");
+        Write(9, 0x30); Write(0x32, 0x19);
+        Equal($"19,30,{Weekday(new DateTime(1930, 10, 28))}", Clock(15_000_000, 0x32, 9, 6), "writing the year and century; the weekday follows the date");
+        Write(6, 0x07);
+        Equal(Weekday(new DateTime(1930, 10, 28)), Clock(15_000_000, 6), "the weekday cannot be written");
+        Write(8, 0xFF);
+        Equal("12", Clock(15_000_000, 8), "an invalid month is clamped");
+        Write(0x0A, 0xAB);
+        Equal("2B", Clock(15_000_000, 0x0A), "status A keeps the rate bits; UIP reads as 0");
+    }
+
     public static void Run()
     {
         PortSequences();
         Controller8042();
+        RealTimeClock();
         Compatibility();
         Console.WriteLine($"Device assertions passed: {checks}");
     }
