@@ -35,7 +35,10 @@ static partial class Program
                     Console.WriteLine($"[snapshot] resumed from {options.SnapshotPath} at instruction {count}");
                 }
                 else
+                {
                     cpu = ResetVector();
+                    env.CmosRtc.SetClock(options.Rtc ?? DateTime.Now, 0); // 冷起動: RTC をホスト(または --rtc)の時刻に合わせる(再開はスナップショットの時刻が続く)
+                }
                 using var trace = options.Diagnostics.Trace
                     ? new StreamWriter(new FileStream("trace.log", count > 0 ? FileMode.Append : FileMode.Create,
                         FileAccess.Write, FileShare.Read, 1 << 20))
@@ -99,6 +102,7 @@ static partial class Program
             var font = env.Vga.FallbackFont;
             var hadDisk = env.Ata != null;
             var fresh = EnvironmentFactory.Create(disk, attachDisk: hadDisk);
+            fresh.CmosRtc.SetClock(env.CmosRtc.Current((ulong)count), (ulong)count); // リセットをまたいでも時計は進み続ける
             AttachSerial(options, fresh, previous: env);
             env.Dispose();
             env = fresh;

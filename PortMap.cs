@@ -34,7 +34,7 @@ static class PortMap
     public static readonly PortMapping[] Table =
     [
         Port("CMOS index", 0x70, write: (env, _, v) => env.CmosRtc.Select(v)),
-        Port("CMOS data", 0x71, read: (env, _) => env.CmosRtc.Read(), write: (env, _, v) => env.CmosRtc.Write(v)),
+        Port("CMOS data", 0x71, read: (env, _) => env.CmosRtc.Read(env.Tsc), write: (env, _, v) => env.CmosRtc.Write(v, env.Tsc)),
         Port("PIT counter 0", 0x40, read: (env, p) => env.Pit.Read(p)),
         Port("PIT counter 2", 0x42, read: (env, p) => env.Pit.Read(p), write: (env, p, v) => env.Pit.Write(p, v)),
         Port("PIT control", 0x43, write: (env, p, v) => env.Pit.Write(p, v)),

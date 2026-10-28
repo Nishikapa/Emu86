@@ -309,7 +309,7 @@ static class SnapshotTests
             env.SaveDeviceState(writer); env.Vga.SaveState(writer); env.Mouse.SaveState(writer); env.Com1.SaveState(writer); env.Com2.SaveState(writer);
         }
         Equal(396430L, stream.Length, "v10 state length");
-        Equal("12CDF6644C63FEA0D2795570D16B0BEC6C259307581A776069A97A1584B4D42B", Sha256(stream.ToArray()), "v10 state layout");
+        Equal("8D3A11DE9561C91B38A1C89400429347267F1691DA614404369C483BCE3BB32E", Sha256(stream.ToArray()), "v10 state layout (CMOS defaults with the RTC, 2026-10-28)");
         var restored = Environment();
         using (var reader = new BinaryReader(new MemoryStream(stream.ToArray()), Encoding.UTF8))
         {
@@ -325,7 +325,7 @@ static class SnapshotTests
         }
         Close(restored.Ata); Close(env.Ata); env.Ata = null;
         SnapshotStore.Save("layout.snap", 777, cpu, env);
-        Equal("EE38A543461E14F6DAC5AB60F6B74B190FC9D23466D102955B59663A7C0871B0", Sha256(File.ReadAllBytes("layout.snap")), "v10 file layout");
+        Equal("24DCFB693EEB7B5DA326A8E928DA9C48A02C0836E1E39CA6B73AA69F8DA84D64", Sha256(File.ReadAllBytes("layout.snap")), "v10 file layout");
     }
 
     // フォルトの統一経路: #GP は例外として命令開始時の状態へ戻り、Raise が #PF/#UD と同じ形で IDT 経由で配送する。
