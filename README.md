@@ -231,7 +231,7 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | アトミック | `XCHG`（メモリ）、`CMPXCHG`、`XADD`、`CMPXCHG8B`。`LOCK` プレフィックスは受理して無視（単一 CPU のため） |
 | スタック | `PUSH`/`POP`（reg/imm/r/m/Sreg、FS/GS 含む）、`PUSHA`/`POPA`（`PUSHAD`/`POPAD`）、`PUSHF`/`POPF`（IOPL とユーザーモードの制約込み）、`ENTER`/`LEAVE` |
 | 制御転送 | `Jcc`（rel8/rel16/rel32）、`JMP`/`CALL`/`RET`（near/far/間接。far は外側特権レベルへの復帰を含む）、`LOOP`/`LOOPE`/`LOOPNE`、`JCXZ`/`JECXZ` |
-| 文字列 | `MOVS`/`STOS`/`LODS`/`CMPS`/`SCAS`/`INS`/`OUTS` + `REP`/`REPE`/`REPNE`（16/32 ビットアドレッシング、ページフォルト後の途中再開） |
+| 文字列 | `MOVS`/`STOS`/`LODS`/`CMPS`/`SCAS`/`INS`/`OUTS` + `REP`/`REPE`/`REPNE`（16/32 ビットアドレッシング、源 DS:SI のセグメントオーバーライド、ページフォルト後の途中再開） |
 | 割り込み・例外 | `INT`/`INT3`/`INTO`/`IRET`（`IRETD`）。リアルモードは IVT、プロテクトモードは IDT の割り込み/トラップゲート経由で、リング遷移（TSS の SS0/ESP0）と V86 モードへの出入り（`IRETD` での突入、V86 内 `INT n` の #GP 反射、セグメントレジスタ付きフレーム）に対応。#PF/#UD/#GP を命令開始時の状態から配送 |
 | フラグ/その他 | `CLC`/`STC`/`CMC`/`CLD`/`STD`/`CLI`/`STI`、`SAHF`/`LAHF`、`NOP`/`HLT`（配送できる割り込みが無ければ次の割り込みまで仮想時間を進める）、`IN`/`OUT`、`WAIT` |
 | システム | `LGDT`/`LIDT`/`SGDT`/`SIDT`、`LLDT`/`LTR`/`SLDT`/`STR`（セレクタの保持のみ）、`MOV CRn`/`DRn`、`CPUID`（EAX=0/1）、`RDTSC`、`RDMSR`/`WRMSR`（汎用ストア）、`INVLPG`、`INVD`/`WBINVD`、プロテクトモード遷移、ページング（2 レベル、PSE、PAE、CR0.WP、Accessed/Dirty 更新）、V86 モード |
@@ -259,7 +259,6 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 - 命令定義 1 つから解釈実行とコンパイル済み経路を導出する IR と基本ブロックの翻訳キャッシュは既定で有効です（XP 起動で GUI に到達する 65 億命令まで、1 命令ずつの実行と状態がバイト一致したまま 4〜5 割速い。`--no-translate` で戻せる。`docs/adr/0002-instruction-semantics-ir.md`）。
 - TSS によるハードウェアタスクスイッチ・タスクゲート（NMI、#DF）・コールゲート・LDT は未実装です（`LLDT`/`LTR` はセレクタを保持するだけ）。#PF 配送中の再フォルトはダブルフォルトとして停止します。
 - SSE/MMX、`SYSENTER`/`SYSEXIT`、`FXSAVE`/`FXRSTOR` は未実装で、`CPUID` でも報告しません。
-- セグメントオーバーライドプレフィックスは ModRM 実効アドレス計算と moffs には反映されますが、文字列命令（`MOVS`/`STOS`/`LODS`/`CMPS`/`SCAS`）は DS:SI・ES:DI 固定で、オーバーライドは反映されません。
 - `HLT` は、配送できる割り込みが無ければ次のイベント（タイマ周期・サービス周期・保存・上限）まで命令数（= ゲストの時刻）を進めます。IF=0 と `--noirq` のときは待てないので次の命令へ進みます。スキップした量は終了時に `[halt]` として標準エラー出力に出ます。`LOCK` プレフィックスは無視します。
 - ゲストの時刻は命令数ベース（100 万命令 = 1 秒、IRQ0 は 1 万命令ごと、TSC と ACPI PM タイマーも同じ基準）で、実時間とは一致しません。RTC の時計は未実装です。
 - ATA はマスタドライブ・PIO 転送のみ。DMA・ATAPI・セカンダリコントローラは非対応です。VHD 形式への直接書き込みは非対応（差分書き込みは常に AVHDX オーバーレイに限定）。

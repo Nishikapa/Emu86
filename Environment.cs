@@ -251,9 +251,10 @@ static public partial class Ext
     // 文字列命令の実効パラメータ。
     //   要素サイズ(バイト): operand size に従う(w かつ 32bit なら4、そうでなければ 2/1)。
     //   アドレスモード     : code32 でフラット32bit(ESI/EDI, ベース0)、そうでなければ real(DS:SI/ES:DI)。
+    //   源(DS:SI)はセグメントオーバーライドで差し替えられる。先(ES:DI)は固定。
     static int StrSize(CPU cpu, bool w) => w ? ((cpu.code32 != cpu.operand_size_prefix) ? 4 : 2) : 1;
     static bool StrA32(CPU cpu) => cpu.code32 != cpu.address_size_prefix;
-    static uint StrSrc(CPU cpu) => cpu.ds_base + (StrA32(cpu) ? cpu.esi : cpu.si);
+    static uint StrSrc(CPU cpu) => (OverrideBase(cpu.Decode.Prefixes, cpu) ?? cpu.ds_base) + (StrA32(cpu) ? cpu.esi : cpu.si);
     static uint StrDst(CPU cpu) => cpu.es_base + (StrA32(cpu) ? cpu.edi : cpu.di);
 
     static internal uint EnvReadN(EmuEnvironment env, uint addr, int size) =>

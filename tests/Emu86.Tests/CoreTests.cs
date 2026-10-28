@@ -581,6 +581,18 @@ static class CoreTests
     {
         foreach (var code in new byte[][] { [0xF3, 0xA5], [0x66, 0xF3, 0xAB], [0xF3, 0xAA], [0xA6], [0xA7], [0xAE], [0xAF], [0xAD], [0x50], [0x66, 0x50], [0x58], [0x66, 0x58] })
             Check(code, CreateCpu(0x87654321), env => Array.Fill(env.OneMegaMemory_, (byte)0x5a, 0x3000, 16));
+        // 文字列命令のセグメントオーバーライド: 源(DS:SI)だけが差し替わり、先(ES:DI)は固定。REP の前後どちらの位置でも効く。
+        foreach (var code in new byte[][] { [0x2E, 0xA4], [0x64, 0xF3, 0xA5], [0xF3, 0x65, 0xA4], [0x26, 0xAC], [0x36, 0xF3, 0xA6], [0x2E, 0x6E], [0x64, 0xF3, 0x6F], [0x26, 0xAA], [0x64, 0xAE] })
+        {
+            var segmented = CreateCpu(0x87654321);
+            segmented.cs_base = 0x100; segmented.ss_base = 0x200; segmented.fs_base = 0x300; segmented.gs_base = 0x400; segmented.es_base = 0x1000;
+            segmented.edx = 0x300;
+            Check(code, segmented, env =>
+            {
+                for (var offset = 0; offset < 0x800; offset++) env.OneMegaMemory_[0x3000 + offset] = (byte)(offset * 3 + 1);
+                for (var offset = 0; offset < 16; offset++) env.OneMegaMemory_[0x4000 + offset] = 0x5a;
+            });
+        }
         // INS/OUTS(単発と REP、8/16/32 ビット、DF): ポート 0x300.. は素通しの IoPort 配列なので両コアで同じ値を読む。
         foreach (var code in new byte[][] { [0x6C], [0x6D], [0x66, 0x6D], [0x6E], [0x6F], [0x66, 0x6F], [0xF3, 0x6D], [0x66, 0xF3, 0x6D], [0xF3, 0x6C], [0xF3, 0x6F], [0x66, 0xF3, 0x6E] })
         foreach (var direction in new uint[] { 0, 0x400 })
