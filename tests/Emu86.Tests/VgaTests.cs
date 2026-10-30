@@ -696,9 +696,23 @@ static class VgaTests
         Equal((0x1234u, 0x5678u), (cpu.eax, cpu.ebx), "an undefined function leaves the registers alone");
     }
 
+    // 画面の PNG 保存: テキストモード(80×25、8×16 のセル)の表示が 640×400 の画像になり、文字の前景色がその位置に出る。
+    static void Capture()
+    {
+        using var env = new EmuEnvironment(memory: new byte[0x100000]);
+        VgaBiosStub.Install(env);
+        env.Vga.Vram[0] = (byte)'X'; env.Vga.Vram[0x10000] = 0x0F; env.Vga.Vram[1] = 0; // 左上に白の 'X'、隣は空(文字 0)
+        ScreenCapture.Save(env.Vga, "capture.png");
+        using var image = new System.Drawing.Bitmap("capture.png");
+        Equal((640, 400), (image.Width, image.Height), "text mode capture size");
+        var lit = Enumerable.Range(0, 16).SelectMany(y => Enumerable.Range(0, 8).Select(x => image.GetPixel(x, y).ToArgb() & 0xFFFFFF)).Count(color => color != 0);
+        Equal(true, lit is > 10 and < 100, $"the glyph lights some pixels of the first cell ({lit})");
+        Equal(0, image.GetPixel(12, 8).ToArgb() & 0xFFFFFF, "a cell holding character 0 is black");
+    }
+
     public static void Run()
     {
-        MemoryWindow(); PlanarAndChain4(); Registers(); Rendering(); VirtualMode(); KeyboardInterrupt(); BiosStub(); BiosServices(); PciRom(); IretPrivilegeCheck(); Mouse(); ResetRequest(); Serial(); BootMenuAutomation(); BootMenuTimeouts(); Palette();
+        MemoryWindow(); PlanarAndChain4(); Registers(); Rendering(); VirtualMode(); KeyboardInterrupt(); BiosStub(); BiosServices(); Capture(); PciRom(); IretPrivilegeCheck(); Mouse(); ResetRequest(); Serial(); BootMenuAutomation(); BootMenuTimeouts(); Palette();
         Console.WriteLine($"VGA/V86/keyboard assertions passed: {assertions}");
     }
 }
