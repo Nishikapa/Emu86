@@ -1,3 +1,5 @@
+using static Emu86.DataAccess;
+
 namespace Emu86;
 
 static public partial class Ext

@@ -1,6 +1,8 @@
 using static Emu86.Alu;
 using static Emu86.Ext;
 using static Emu86.Operands;
+using static Emu86.Ports;
+using static Emu86.Mmu;
 
 namespace Emu86;
 

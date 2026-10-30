@@ -1,6 +1,7 @@
 using Emu86;
 using static Emu86.Ext;
 using static Emu86.FastCore;
+using static Emu86.Mmu;
 
 static class DecodeTests
 {

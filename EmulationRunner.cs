@@ -1,4 +1,6 @@
 using static Emu86.Ext;
+using static Emu86.Interrupts;
+using static Emu86.Mmu;
 
 namespace Emu86;
 

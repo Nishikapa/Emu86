@@ -3,6 +3,12 @@ using static Emu86.Ext;
 using static Emu86.Unit;
 using static Emu86.Operands;
 using static Emu86.States;
+using static Emu86.DataAccess;
+using static Emu86.StringOps;
+using static Emu86.Segments;
+using static Emu86.Ports;
+using static Emu86.BitOps;
+using static Emu86.Interrupts;
 
 namespace Emu86;
 

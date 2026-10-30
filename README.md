@@ -201,7 +201,7 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | `SnapshotStore.cs` | 保存形式の版管理、チェックサム検証、ディスク差分を含むチェックポイントの確定と復元。 |
 | `Codec.cs` | スナップショットの双方向コーデック `Codec<T>`。フィールドを保存形式の並び順に 1 度だけ登録し（`since:` で追加された版を指定）、保存と復元を同じ記述から導出する。 |
 | `CPU.Snapshot.cs` / `Environment.Snapshot.cs` | CPU レジスタ・FPU と、環境・デバイスの保存形式（`Codec<T>` の表）。PCI・ATA・VGA・マウス・UART の内部状態は各デバイスが自分の表を持つ。 |
-| `Environment.cs` | `EmuEnvironment`（既定 256 MB メモリ、64 KB I/O ポート、ATA 接続）と、メモリ/レジスタ/スタックアクセス、ページング変換（非 PAE 2 段と PAE 3 段を段の表 `PageLevel[]` で共通に歩く）と TLB、GDT ディスクリプタデコード、IDT 経由の割り込み配送、文字列・ビット操作。I/O ポートの入出力は `PortMap.cs` の表を引く。 |
+| `Environment.cs` | `EmuEnvironment`（既定 256 MB メモリ、64 KB I/O ポート、ATA 接続）と、役割ごとの静的クラス: `Mmu`（ページング変換（非 PAE 2 段と PAE 3 段を段の表 `PageLevel[]` で共通に歩く）と TLB、物理メモリの読み書き）、`Ports`（I/O ポート。`PortMap.cs` の表を引く）、`DataAccess`（State で書いたレジスタ・スタック・r/m オペランドの読み書き）、`StringOps`、`BitOps`、`Interrupts`（割り込み・例外の配送と IRET）、`Segments`（記述子の読み取り・照合とセグメントレジスタのロード）。 |
 | `PortMap.cs` | I/O ポートの表。1 項 = ポート範囲とデバイスの読み書き（1 バイト、幅付きを自分で扱う項、デバイスの有無や PCI の BAR で決まる範囲の条件）。起動時にポート番号ごとの配列に展開し、入出力は該当する項を表の順に試すだけ。該当がなければ 64 KB の `IoPort` 配列を素通し。 |
 | `Environment.Devices.cs` | 環境ごとのデバイス所有と、既存の状態名への転送プロパティ。保存形式のバイト順・バージョンは変更しない。 |
 | `PicDevice.cs` / `PitDevice.cs` / `CmosDevice.cs` / `KeyboardController.cs` / `MouseDevice.cs` / `AcpiPmDevice.cs` | PIC・PIT・CMOS・8042・PS/2 マウス・ACPI 電源管理の状態と入出力処理。PIC のマスタ/スレーブは共通実装の独立したインスタンス。8042 とマウスのコマンドは表（コマンド → 応答と動作、引数を取るものは次のバイトの処理）で、引数待ちの状態はスナップショットに残る `PendingCommand` のまま。 |
@@ -211,7 +211,7 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | `RomBuilder.cs` | オプション ROM のバイト列ビルダ（Writer）。ラベルで `jmp short` の変位やポインタを解決し、末尾でチェックサムを埋める。 |
 | `Operand.cs` / `Registers.cs` | 静的クラス `Operands`。オペランド Lens `Operand`（読み出す State と書き戻す関数）と `Reg`/`Rm`/`Const`、その上の `Move`/`Binary`/`Swap`。d ビットで向きが決まる命令はオペランドを入れ替えるだけで書く。 |
 | `VgaWindow.cs` / `RegisterDialog.cs` | Windows Forms の表示ウィンドウ（描画、キー入力とマウス捕捉、中断・再開ボタン）とレジスタ表示ダイアログ。 |
-| `Ext.cs` | 型変換ユーティリティ（`ToTypeData`/`MapType` 等）。`CPU.cs`・`CodeParser.cs`・`Environment.cs`・`Instruction.cs`・`InstructionDecoding.cs` の静的ヘルパも当面は同じ `Ext` の partial として残っている（順次、役割ごとのクラスへ移す）。 |
+| `Ext.cs` | 型変換ユーティリティ（`ToTypeData`/`MapType` 等）。`CPU.cs`・`CodeParser.cs`・`Instruction.cs`・`InstructionDecoding.cs` の静的ヘルパも当面は同じ `Ext` の partial として残っている（順次、役割ごとのクラスへ移す）。 |
 | `Program.cs` / `Program.*.cs` | 命令の実装とオペコードテーブル。起動処理は `Program.Runner.cs`。 |
 | `Disk.cs` | `DiskImage`（VHD/VHDX/AVHDX/生イメージの CoW ディスクバックエンド。セクタの所在は「自分 → 親 → ゼロ」の `Locate` チェーンで解決）と `AtaDevice`（ATA PIO デバイス、IRQ14。コマンドは「番号 → 動作」の表で、表にないものは abort）。ヘッダの読み取りは `DiskFormat.cs` のレイアウトを当てはめるだけ。 |
 | `DiskFormat.cs` | バイト列のパーサコンビネータ `Field<T>`（`U32`/`U64BE`/`Uuid`/`Utf16`、構造体の先頭からの位置 `At`、繰り返し `Count`、識別子 `Magic`）と、それで書いた VHD/VHDX の読み取り側の形式（フッタ、動的ヘッダとロケータ、リージョン表、メタデータ表と各項目、ペアレントロケータ）。 |

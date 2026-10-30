@@ -1,6 +1,8 @@
 using Emu86;
 using System.Security.Cryptography;
 using static Emu86.Ext;
+using static Emu86.Ports;
+using static Emu86.Mmu;
 
 // VGA デバイス(VRAM の振り分け・レジスタ・描画)、V86 モードの遷移、キーボード IRQ1 の回帰テスト。
 static class VgaTests

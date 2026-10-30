@@ -110,7 +110,7 @@ public static class SnapshotStore
                 }
             }
         }
-        Ext.EnvSyncPaging(env, cpu);
+        Mmu.EnvSyncPaging(env, cpu);
         return (count, cpu);
     }
 
