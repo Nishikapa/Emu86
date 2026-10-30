@@ -1,4 +1,5 @@
 using static Emu86.Ext;
+using static Emu86.FastCore;
 
 namespace Emu86;
 

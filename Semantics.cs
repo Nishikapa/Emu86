@@ -1,5 +1,8 @@
 using System.Linq.Expressions;
 using static Emu86.Ext;
+using static Emu86.FastCore;
+using static Emu86.Operands;
+using static Emu86.Alu;
 
 namespace Emu86;
 

@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using static Emu86.Operands;
 
 namespace Emu86;
 

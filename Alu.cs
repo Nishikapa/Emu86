@@ -1,6 +1,8 @@
+using static Emu86.Ext;
+
 namespace Emu86;
 
-static public partial class Ext
+static public class Alu
 {
     static internal uint CalculateAlu(CPU cpu, int type, uint left, uint right, int kind)
     {
@@ -54,7 +56,7 @@ static public partial class Ext
             of: ((left ^ right) & signBit) != 0 && ((left ^ result) & signBit) != 0);
     }
 
-    static void SetLogicFlags(CPU cpu, int type, uint result)
+    static internal void SetLogicFlags(CPU cpu, int type, uint result)
     {
         result &= Mask(type);
         SetArithmeticFlags(cpu, cf: false, pf: Par(result), af: false, zf: result == 0, sf: (result & Msb(type)) != 0, of: false);

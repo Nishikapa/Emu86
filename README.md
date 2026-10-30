@@ -178,11 +178,11 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | ファイル | 役割 |
 |---------|------|
 | `GlobalUsings.cs` | `Data`/`MemAddr` 型エイリアスの定義。 |
-| `State.cs` | `State<V>` モナドの定義と LINQ コンビネータ（`Select`/`SelectMany`/`Where`/`When`/`Unless`/`While`/`Choice`/`Group`/`Sequence`/`Many0`、失敗する `Undefined` 等）。 |
+| `State.cs` | 静的クラス `States`。`State<V>` モナドの定義と LINQ コンビネータ（`Select`/`SelectMany`/`Where`/`When`/`Unless`/`While`/`Choice`/`Group`/`Sequence`/`Many0`、失敗する `Undefined` 等）。 |
 | `CPU.cs` | `CPU` 状態、レジスタアクセサ、共通 ALU/フラグ更新処理を呼び出すモナド操作、シフト計算。 |
-| `Alu.cs` | 通常コアと高速コアで共有する算術・論理演算、フラグ更新、条件分岐の判定。 |
-| `Fpu.cs` | x87 FPU。ST スタック 8 本を double で保持し、80 ビット拡張実数と相互変換。命令は整数命令と同じく表（メモリ形式は (op, reg)、レジスタ形式は (op, reg, rm) か (op, reg)）で引き、各命令はオペランド Lens `Real`（ST(i) と f32/f64/int16/int32/int64/f80 のメモリ形式）に対する `Load`/`Store`/`Compute`/`Compare` の State で書く。四則演算は「x = ST0、y = もう一方」の式 1 つで D8/DA/DC/DE の全形式を表す。 |
-| `FastCore.cs` | 高速実行コア。プレフィックスと ModRM のデコードは `CodeParser.cs`、演算規則は `Alu.cs`、メモリアクセスは `Environment.cs` の共通処理を使用し、未対応命令は通常コアへ委譲。文字列命令は INS/OUTS を含めて REP ごと処理する。 |
+| `Alu.cs` | 静的クラス `Alu`。通常コアと高速コアで共有する算術・論理演算、フラグ更新、条件分岐の判定。 |
+| `Fpu.cs` | 静的クラス `Fpu`。x87 FPU。ST スタック 8 本を double で保持し、80 ビット拡張実数と相互変換。命令は整数命令と同じく表（メモリ形式は (op, reg)、レジスタ形式は (op, reg, rm) か (op, reg)）で引き、各命令はオペランド Lens `Real`（ST(i) と f32/f64/int16/int32/int64/f80 のメモリ形式）に対する `Load`/`Store`/`Compute`/`Compare` の State で書く。四則演算は「x = ST0、y = もう一方」の式 1 つで D8/DA/DC/DE の全形式を表す。 |
+| `FastCore.cs` | 静的クラス `FastCore`。高速実行コア。プレフィックスと ModRM のデコードは `CodeParser.cs`、演算規則は `Alu.cs`、メモリアクセスは `Environment.cs` の共通処理を使用し、未対応命令は通常コアへ委譲。文字列命令は INS/OUTS を含めて REP ごと処理する。 |
 | `InstructionExecutor.cs` | 両コアの実行・CPU 復元境界、命令ごとのデコード状態、REP の再開位置。 |
 | `Fault.cs` | CPU 例外の値 `Fault`（ベクタ・エラーコード・#PF の線形アドレス）と、命令の途中で投げる `CpuFaultException`（`PageFaultException`/`GeneralProtectionException`）。ランナーは #UD/#PF/#GP を同じ `Raise` で配送する。 |
 | `CodeParser.cs` | 命令バイト列の読み口 `CodeSource`（CS:(E)IP 相対、16 ビット IP の折り返し、必要なバイトだけを遅延フェッチ）と Parser モナド `Parser<T>`（`Select`/`SelectMany`/`Where`/`Or`/`Fold`）。両コアが共有するプレフィックスの畳み込み（`Prefixes`）、ModRM/SIB/変位の構造（`ParseModRm`）、実効アドレスの計算（`EffectiveAddress`）。 |
@@ -209,9 +209,9 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | `SerialPort.cs` | 16550 互換 UART と、ホストの名前付きパイプへの橋渡し（送受信は専用タスク）。レジスタはオフセット 0〜7 の `Register`（読み出しと書き込みの Lens）の表。 |
 | `VgaDevice.cs` / `VgaBiosStub.cs` | VGA のレジスタ・VRAM ウィンドウ・描画と、拡張 ROM として見せる最小 VGA BIOS（INT 10h を C# 側で処理）。レジスタは「ポート → `Register`（読み出しと書き込みの Lens）」の表で、インデックス/データのポート対（Sequencer/Graphics/CRTC/Attribute）は `Indexed` が作る（範囲外の要素、CRTC の保護、Attribute のフリップフロップ）。INT 10h は「AH → State」の表（AL/BL で分かれる機能は入れ子の表）で、レジスタの出し入れは `Accessor` の `Get`/`Set` で書く。 |
 | `RomBuilder.cs` | オプション ROM のバイト列ビルダ（Writer）。ラベルで `jmp short` の変位やポインタを解決し、末尾でチェックサムを埋める。 |
-| `Operand.cs` | オペランド Lens `Operand`（読み出す State と書き戻す関数）と `Reg`/`Rm`/`Const`、その上の `Move`/`Binary`/`Swap`。d ビットで向きが決まる命令はオペランドを入れ替えるだけで書く。 |
+| `Operand.cs` / `Registers.cs` | 静的クラス `Operands`。オペランド Lens `Operand`（読み出す State と書き戻す関数）と `Reg`/`Rm`/`Const`、その上の `Move`/`Binary`/`Swap`。d ビットで向きが決まる命令はオペランドを入れ替えるだけで書く。 |
 | `VgaWindow.cs` / `RegisterDialog.cs` | Windows Forms の表示ウィンドウ（描画、キー入力とマウス捕捉、中断・再開ボタン）とレジスタ表示ダイアログ。 |
-| `Ext.cs` | 型変換ユーティリティ（`ToTypeData`/`MapType` 等）。 |
+| `Ext.cs` | 型変換ユーティリティ（`ToTypeData`/`MapType` 等）。`CPU.cs`・`CodeParser.cs`・`Environment.cs`・`Instruction.cs`・`InstructionDecoding.cs` の静的ヘルパも当面は同じ `Ext` の partial として残っている（順次、役割ごとのクラスへ移す）。 |
 | `Program.cs` / `Program.*.cs` | 命令の実装とオペコードテーブル。起動処理は `Program.Runner.cs`。 |
 | `Disk.cs` | `DiskImage`（VHD/VHDX/AVHDX/生イメージの CoW ディスクバックエンド。セクタの所在は「自分 → 親 → ゼロ」の `Locate` チェーンで解決）と `AtaDevice`（ATA PIO デバイス、IRQ14。コマンドは「番号 → 動作」の表で、表にないものは abort）。ヘッダの読み取りは `DiskFormat.cs` のレイアウトを当てはめるだけ。 |
 | `DiskFormat.cs` | バイト列のパーサコンビネータ `Field<T>`（`U32`/`U64BE`/`Uuid`/`Utf16`、構造体の先頭からの位置 `At`、繰り返し `Count`、識別子 `Magic`）と、それで書いた VHD/VHDX の読み取り側の形式（フッタ、動的ヘッダとロケータ、リージョン表、メタデータ表と各項目、ペアレントロケータ）。 |

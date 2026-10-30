@@ -1,5 +1,6 @@
 using Emu86;
 using static Emu86.Ext;
+using static Emu86.States;
 
 static class StateTests
 {

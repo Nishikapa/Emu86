@@ -7,7 +7,7 @@ namespace Emu86;
 // オペランドを入れ替えるだけで書ける。
 public readonly record struct Operand(State<Data> Read, Func<Data, State<Unit>> Write);
 
-static public partial class Ext
+static public partial class Operands
 {
     // 汎用レジスタ reg(type: 0=8 ビット、1=16 ビット、2=32 ビット)。
     static public Operand Reg(int reg, int type) =>
