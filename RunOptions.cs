@@ -54,6 +54,7 @@ internal sealed class RunOptions
     public long SnapshotInterval { get; private set; } = 100_000_000;
     public string SnapshotPath { get; private set; } = "snapshot.snap";
     public DateTime? Rtc { get; private set; }
+    public string ScreenPath { get; private set; }
     public string DiskPath { get; private set; }
     public string OverlayPath { get; private set; }
     public (long Start, int Count)? DumpLba { get; private set; }
@@ -88,6 +89,7 @@ internal sealed class RunOptions
         Flag("Run", "--resume", "Resume from the snapshot instead of booting from the reset vector", o => o.Resume = true),
         Of("Run", "--snapshot", "path", "Snapshot file to save to and resume from (default snapshot.snap)", Value, (o, v) => o.SnapshotPath = v),
         Of("Run", "--rtc", "yyyy-MM-ddTHH:mm:ss", "Start the real-time clock at this guest time on a cold boot (default: the host's local time)", Timestamp, (o, v) => o.Rtc = v),
+        Of("Run", "--screen", "path", "Save the VGA display as a PNG at each snapshot and when the run stops", Value, (o, v) => o.ScreenPath = v),
         Of("Run", "--limit", "count|max", "Stop after count instructions (max = run until the window closes)",
             Word("max").Select(_ => long.MaxValue).Or(Integer), (o, v) => o.Limit = v),
         Of("Run", "--snapshot-interval", "count", "Save a snapshot every count instructions (default 100000000, 0 = only at the end)",

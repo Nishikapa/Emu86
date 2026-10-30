@@ -24,7 +24,7 @@ static class RunnerTests
         Equal("snapshot.snap", defaults.SnapshotPath, "default snapshot");
         Equal(true, defaults.Diagnostics.Trace, "default trace");
         Equal(false, defaults.Resume, "default cold boot");
-        string[] arguments = ["--resume", "--slow", "--noirq", "--no-translate", "--window", "--boot-debug", "--com1", "pipe-a", "--com2", "pipe-b", "--limit", "123", "--snapshot", "other.snap", "--rtc", "2026-10-28T12:34:56",
+        string[] arguments = ["--resume", "--slow", "--noirq", "--no-translate", "--window", "--boot-debug", "--com1", "pipe-a", "--com2", "pipe-b", "--limit", "123", "--snapshot", "other.snap", "--rtc", "2026-10-28T12:34:56", "--screen", "shot.png",
             "--disk", "other.vhd", "--overlay", "other.avhdx", "--dumplba", "42", "2",
             "--trace-all", "--regtrace", "--notrace", "--brhist", "--esptrap", "--pftrap",
             "--atalog", "--pcilog", "--piclog", "--vgalog", "--intlog", "--upflog", "321",
@@ -39,6 +39,8 @@ static class RunnerTests
         Equal(123L, parsed.Limit, "limit");
         Equal("other.snap", parsed.SnapshotPath, "snapshot path");
         Equal(new DateTime(2026, 10, 28, 12, 34, 56), parsed.Rtc, "real-time clock start");
+        Equal("shot.png", parsed.ScreenPath, "screen capture path");
+        Equal(null, defaults.ScreenPath, "no screen capture by default");
         Equal(null, defaults.Rtc, "the clock defaults to the host's time");
         Equal("other.vhd", parsed.DiskPath, "base path");
         Equal("other.avhdx", parsed.OverlayPath, "overlay path");

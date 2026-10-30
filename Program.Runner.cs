@@ -43,8 +43,11 @@ static partial class Program
                     ? new StreamWriter(new FileStream("trace.log", count > 0 ? FileMode.Append : FileMode.Create,
                         FileAccess.Write, FileShare.Read, 1 << 20))
                     : null;
-                void Save(long savedCount, CPU savedCpu, EmuEnvironment savedEnv) =>
+                void Save(long savedCount, CPU savedCpu, EmuEnvironment savedEnv)
+                {
                     SnapshotStore.Save(options.SnapshotPath, savedCount, savedCpu, savedEnv);
+                    if (options.ScreenPath != null) ScreenCapture.Save(savedEnv.Vga, options.ScreenPath);
+                }
                 env = options.Window
                     ? RunWithWindow(options, disk, env, cpu, count, trace, Save)
                     : RunUntilStopped(options, disk, env, cpu, count, trace, Save, default, null, null);
