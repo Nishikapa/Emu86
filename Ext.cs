@@ -42,8 +42,6 @@ static public partial class Ext
     static public byte[] ToByteArray(this ushort dw) => BitConverter.GetBytes(dw);
     static public byte[] ToByteArray(this uint dd) => BitConverter.GetBytes(dd);
 
-    static public T Choice<T, K>(K key, params (K key, T state)[] states) => states.ToDictionary(s => s.key, s => s.state)[key];
-    static public T Choice_<T>(int index, params T[] states) => states[index];
 
     // type(0=byte,1=word,2=dword) に応じて幅ごとの関数を適用し、結果を TypeData にまとめる。
     // NOT/NEG/INC/DEC など「型別の値計算 → 書き戻し用 TypeData」を 1 行で書くための共通化。

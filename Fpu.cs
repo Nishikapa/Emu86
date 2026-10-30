@@ -455,17 +455,15 @@ static public partial class Ext
         return table;
     }
 
-    static readonly State<Unit> FpuUndefined = (env, cpu, ope) => (false, default, cpu, string.Empty);
-
     // ModRM で表を引く。未定義のエンコーディングは失敗(STOP 診断に載り、Execute が EIP を巻き戻す)。
     static State<Unit> FpuInstruction(int op, int mod, int reg, int rm) =>
         mod != 3
             ? FpuMemoryForms.TryGetValue((op, reg), out var memory)
                 ? (from address in GetMemOrRegAddr(mod, rm) from _ in memory(address.addr) select unit)
-                : FpuUndefined
+                : Undefined
             : FpuFixedForms.TryGetValue((op, reg, rm), out var fixedForm) ? fixedForm
             : FpuRegisterForms.TryGetValue((op, reg), out var register) ? register(rm)
-            : FpuUndefined;
+            : Undefined;
 
     // --- 本体 ----------------------------------------------------------------
     static public State<Unit> Fpu_D8_DF =>
