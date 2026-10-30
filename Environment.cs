@@ -8,7 +8,11 @@ using static Emu86.StringOps;
 using static Emu86.BitOps;
 using static Emu86.Interrupts;
 using static Emu86.Segments;
-using static Emu86.Ext;
+using static Emu86.Conversions;
+using static Emu86.CpuStates;
+using static Emu86.Fetch;
+using static Emu86.AluStates;
+using static Emu86.Decoder;
 
 namespace Emu86;
 

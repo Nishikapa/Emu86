@@ -179,17 +179,17 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 |---------|------|
 | `GlobalUsings.cs` | `Data`/`MemAddr` 型エイリアスの定義。 |
 | `State.cs` | 静的クラス `States`。`State<V>` モナドの定義と LINQ コンビネータ（`Select`/`SelectMany`/`Where`/`When`/`Unless`/`While`/`Choice`/`Group`/`Sequence`/`Many0`、失敗する `Undefined` 等）。 |
-| `CPU.cs` | `CPU` 状態、レジスタアクセサ、共通 ALU/フラグ更新処理を呼び出すモナド操作、シフト計算。 |
-| `Alu.cs` | 静的クラス `Alu`。通常コアと高速コアで共有する算術・論理演算、フラグ更新、条件分岐の判定。 |
+| `CPU.cs` | `CPU` 状態とレジスタアクセサ。静的クラス `CpuStates`（State で CPU を読み書きする基本操作: `SetCpu`/`GetCpu`、アクセサの `Get`/`Set`/`Modify`、ログ・結果）、`Fetch`（命令ストリームからオペコード・即値・ModRM を読んで EIP を進める State。`InstructionDecoding.cs` と partial）、`AluStates`（`Calc`/`Group2`/`Jcc` とフラグ更新の State）。 |
+| `Alu.cs` | 静的クラス `Alu`。通常コアと高速コアで共有する算術・論理演算、シフト・回転の計算（`ComputeShift`）、フラグ更新、条件分岐の判定。 |
 | `Fpu.cs` | 静的クラス `Fpu`。x87 FPU。ST スタック 8 本を double で保持し、80 ビット拡張実数と相互変換。命令は整数命令と同じく表（メモリ形式は (op, reg)、レジスタ形式は (op, reg, rm) か (op, reg)）で引き、各命令はオペランド Lens `Real`（ST(i) と f32/f64/int16/int32/int64/f80 のメモリ形式）に対する `Load`/`Store`/`Compute`/`Compare` の State で書く。四則演算は「x = ST0、y = もう一方」の式 1 つで D8/DA/DC/DE の全形式を表す。 |
 | `FastCore.cs` | 静的クラス `FastCore`。高速実行コア。プレフィックスと ModRM のデコードは `CodeParser.cs`、演算規則は `Alu.cs`、メモリアクセスは `Environment.cs` の共通処理を使用し、未対応命令は通常コアへ委譲。文字列命令は INS/OUTS を含めて REP ごと処理する。 |
 | `InstructionExecutor.cs` | 両コアの実行・CPU 復元境界、命令ごとのデコード状態、REP の再開位置。 |
 | `Fault.cs` | CPU 例外の値 `Fault`（ベクタ・エラーコード・#PF の線形アドレス）と、命令の途中で投げる `CpuFaultException`（`PageFaultException`/`GeneralProtectionException`）。ランナーは #UD/#PF/#GP を同じ `Raise` で配送する。 |
-| `CodeParser.cs` | 命令バイト列の読み口 `CodeSource`（CS:(E)IP 相対、16 ビット IP の折り返し、必要なバイトだけを遅延フェッチ）と Parser モナド `Parser<T>`（`Select`/`SelectMany`/`Where`/`Or`/`Fold`）。両コアが共有するプレフィックスの畳み込み（`Prefixes`）、ModRM/SIB/変位の構造（`ParseModRm`）、実効アドレスの計算（`EffectiveAddress`）。 |
+| `CodeParser.cs` | 命令バイト列の読み口 `CodeSource`（CS:(E)IP 相対、16 ビット IP の折り返し、必要なバイトだけを遅延フェッチ）と Parser モナド `Parser<T>`（`Select`/`SelectMany`/`Where`/`Or`/`Fold`）。静的クラス `Decoder`（`Instruction.cs` と partial）に、両コアが共有するプレフィックスの畳み込み（`Prefixes`）、ModRM/SIB/変位の構造（`ParseModRm`）、実効アドレスの計算（`EffectiveAddress`）。 |
 | `Semantics.cs` | 命令の意味論を第一級データ（式と文の `record`）で表す IR。LINQ クエリ（`Emit` モナド）で IR を組み立て、各ノードの `Evaluate`/`Run`（解釈器）と `System.Linq.Expressions` のコンパイラの 2 つが消費する。ALU・MOV・TEST/CMP・INC/DEC・LEA・MOVZX/MOVSX・PUSH/POP・Jcc/JMP が対象（`docs/adr/0002`）。 |
 | `TranslationCache.cs` | 基本ブロックの翻訳キャッシュ（既定で有効。`--no-translate` で 1 命令ずつの実行に戻せる。命令ごとに CPU を見る診断でも自動的に切れる）。分岐（Jcc/JMP/CALL/RET）か STI までの IR 命令列をブロックの先頭物理アドレスで引き、8 回実行で IR に下ろして解釈し、`--compile-after` 回でコンパイルする。分岐先のブロックも翻訳済みなら、ランナーが渡す予算（次の割り込み周期などまでの命令数）の範囲で連結して続け、翻訳済みページへの書き込み（自己書き換え）と STI で止まる。XP 起動 1 億命令の 98.7% がブロックで走って 4〜5 割速く、状態は 1 命令ずつの実行と一致。コンパイル済みコードは CPU のレジスタ・EFLAGS・セグメント基底を直接読み書きし、32 ビットの実効アドレスを式木にする。 |
-| `Instruction.cs` | オペコード属性表 `OpcodeTable`（ModRM の有無・即値の形・ニーモニック・オペランド書式）、命令全体のパーサ `InstructionParser`（Parser モナドのクエリ合成）と `Instruction` レコード、逆アセンブラ `Disassembler`。実行には使わず、診断（レジスタダイアログの次命令表示）とデコードキャッシュの土台。 |
-| `InstructionDecoding.cs` / `Registers.cs` | 通常コアの ModRM 読み取り State（`CodeParser.cs` の共有デコーダを呼び、消費した分だけ EIP を進める）と、両コア共通の配列を作らないレジスタ参照。 |
+| `Instruction.cs` | オペコード属性表 `OpcodeTable`（ModRM の有無・即値の形・ニーモニック・オペランド書式）、命令全体のパーサ `Decoder.InstructionParser`（Parser モナドのクエリ合成）と `Instruction` レコード、逆アセンブラ `Disassembler`。実行には使わず、診断（レジスタダイアログの次命令表示）とデコードキャッシュの土台。 |
+| `InstructionDecoding.cs` / `Registers.cs` | 通常コアの ModRM 読み取り State（`Fetch` の partial。`CodeParser.cs` の共有デコーダを呼び、消費した分だけ EIP を進める）と、両コア共通の配列を作らないレジスタ参照。 |
 | `Program.Runner.cs` / `RunOptions.cs` | CLI の起動処理、オプションの表（名前・引数・説明・値のパーサ・適用）、ウィンドウ付き実行と別スレッドでの実行ループ、ゲストリセット時の環境再生成、セクタダンプ。解析と `--help` の一覧は同じ表から作る。 |
 | `ArgumentParsing.cs` | 引数列のパーサコンビネータ（`ArgParser<T>`: `Select`/`SelectMany`/`Choice`/`Many`/`Optional`/`Require` と `Value`/`Decimal`/`Hex`）と `CommandOption`。 |
 | `EmulationRunner.cs` | 命令実行ループ、例外配送、デバイスのポンプ、定期保存の呼び出し。 |
@@ -211,7 +211,7 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | `RomBuilder.cs` | オプション ROM のバイト列ビルダ（Writer）。ラベルで `jmp short` の変位やポインタを解決し、末尾でチェックサムを埋める。 |
 | `Operand.cs` / `Registers.cs` | 静的クラス `Operands`。オペランド Lens `Operand`（読み出す State と書き戻す関数）と `Reg`/`Rm`/`Const`、その上の `Move`/`Binary`/`Swap`。d ビットで向きが決まる命令はオペランドを入れ替えるだけで書く。 |
 | `VgaWindow.cs` / `RegisterDialog.cs` | Windows Forms の表示ウィンドウ（描画、キー入力とマウス捕捉、中断・再開ボタン）とレジスタ表示ダイアログ。 |
-| `Ext.cs` | 型変換ユーティリティ（`ToTypeData`/`MapType` 等）。`CPU.cs`・`CodeParser.cs`・`Instruction.cs`・`InstructionDecoding.cs` の静的ヘルパも当面は同じ `Ext` の partial として残っている（順次、役割ごとのクラスへ移す）。 |
+| `Ext.cs` | 静的クラス `Conversions`。型変換ユーティリティ（`ToTypeData`/`MapType`/`Bits`/`Mask` 等）。 |
 | `Program.cs` / `Program.*.cs` | 命令の実装とオペコードテーブル。起動処理は `Program.Runner.cs`。 |
 | `Disk.cs` | `DiskImage`（VHD/VHDX/AVHDX/生イメージの CoW ディスクバックエンド。セクタの所在は「自分 → 親 → ゼロ」の `Locate` チェーンで解決）と `AtaDevice`（ATA PIO デバイス、IRQ14。コマンドは「番号 → 動作」の表で、表にないものは abort）。ヘッダの読み取りは `DiskFormat.cs` のレイアウトを当てはめるだけ。 |
 | `DiskFormat.cs` | バイト列のパーサコンビネータ `Field<T>`（`U32`/`U64BE`/`Uuid`/`Utf16`、構造体の先頭からの位置 `At`、繰り返し `Count`、識別子 `Magic`）と、それで書いた VHD/VHDX の読み取り側の形式（フッタ、動的ヘッダとロケータ、リージョン表、メタデータ表と各項目、ペアレントロケータ）。 |

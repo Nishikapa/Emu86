@@ -1,5 +1,6 @@
 using System.Text;
-using static Emu86.Ext;
+using static Emu86.Conversions;
+using static Emu86.Decoder;
 
 namespace Emu86;
 
@@ -36,7 +37,7 @@ public readonly record struct Instruction(uint Address, bool Code32, Prefix Pref
     public override string ToString() => Disassembler.Format(this);
 }
 
-static public partial class Ext
+static public partial class Decoder
 {
     // 命令全体のパーサ(冷たい経路向け: 逆アセンブル、診断)。プレフィックス、REP、オペコード(1 バイトまたは 0F xx)、
     // ModRM(表で決まる)、即値(表とオペランド/アドレスサイズで決まる)の順に読む。

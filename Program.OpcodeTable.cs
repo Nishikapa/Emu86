@@ -1,7 +1,9 @@
 using static Emu86.CPU;
-using static Emu86.Ext;
+using static Emu86.Conversions;
 using static Emu86.Unit;
 using static Emu86.Fpu;
+using static Emu86.Fetch;
+using static Emu86.Decoder;
 
 namespace Emu86;
 
