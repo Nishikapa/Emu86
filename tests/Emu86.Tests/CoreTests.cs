@@ -577,6 +577,74 @@ static class CoreTests
         Equal("6FD342247873F2894F0F6C9FDF28118FE6FE00168F15C782D3FF7F40909DD888", hash, "FPU results match the pre-table implementation");
     }
 
+    // VERR/VERW/LAR/LSL: GDT の記述子(コード、読み書きデータ、読み取り専用データ、実行専用コード、DPL3 データ、TSS、
+    // コンフォーミングコード)を CPL0 から照合する。ヌル・RPL が DPL を超えるものは否。LAR はアクセス権、LSL は G 展開したリミット。
+    static void DescriptorChecks()
+    {
+        var env = SlowEnv;
+        void Descriptor(int selector, uint lo, uint hi)
+        {
+            BitConverter.GetBytes(lo).CopyTo(env.OneMegaMemory_, 0x500 + selector);
+            BitConverter.GetBytes(hi).CopyTo(env.OneMegaMemory_, 0x504 + selector);
+        }
+        (bool zf, uint eax) Run(byte[] code, ushort selector)
+        {
+            Reset(env, code);
+            Descriptor(8, 0x0000FFFF, 0x00CF9A00);  // コード、読み出し可、DPL0、4GB
+            Descriptor(16, 0x0000FFFF, 0x00CF9200); // データ、読み書き、DPL0、4GB
+            Descriptor(24, 0x00001000, 0x00009000); // データ、読み取り専用、リミット 0x1000(G=0)
+            Descriptor(32, 0x0000FFFF, 0x00CF9800); // コード、実行専用
+            Descriptor(40, 0x0000FFFF, 0x00CFF200); // データ、読み書き、DPL3
+            Descriptor(48, 0x00000067, 0x00008900); // TSS(利用可能)
+            Descriptor(56, 0x0000FFFF, 0x00CF9E00); // コンフォーミングコード、読み出し可
+            var cpu = CreateCpu(0x11111111, selector);
+            cpu.gdt_base = 0x500; cpu.gdt_limit = 0x3F;
+            CPU._cr0.setter(cpu)(1);
+            Equal(true, SlowStep(env, cpu, null).IsSuccess, $"descriptor check {Convert.ToHexString(code)} sel={selector:x}");
+            cases++;
+            return (cpu.zf, cpu.eax);
+        }
+        byte[] verr = [0x0F, 0x00, 0xE3], verw = [0x0F, 0x00, 0xEB], lar = [0x0F, 0x02, 0xC3], lsl = [0x0F, 0x03, 0xC3]; // ..., bx / eax, bx
+        Equal(true, Run(verr, 8).zf, "VERR: readable code");
+        Equal(false, Run(verw, 8).zf, "VERW: code is not writable");
+        Equal(true, Run(verw, 16).zf, "VERW: writable data");
+        Equal(true, Run(verr, 24).zf, "VERR: read-only data is readable");
+        Equal(false, Run(verw, 24).zf, "VERW: read-only data");
+        Equal(false, Run(verr, 32).zf, "VERR: execute-only code");
+        Equal(false, Run(verr, 48).zf, "VERR: a TSS is not a segment");
+        Equal(false, Run(verr, 0).zf, "VERR: null selector");
+        Equal(false, Run(verr, 16 | 3).zf, "VERR: RPL 3 exceeds DPL 0");
+        Equal(true, Run(verr, 40 | 3).zf, "VERR: RPL 3 on DPL 3 data");
+        Equal(true, Run(verr, 56 | 3).zf, "VERR: conforming code ignores RPL");
+        Equal(false, Run(verr, 0x3F8).zf, "VERR: beyond the GDT limit");
+        Equal((true, 0x00CF9200u), Run(lar, 16), "LAR: access rights of the data segment");
+        Equal((true, 0x00008900u), Run(lar, 48), "LAR: a TSS is allowed");
+        Equal((false, 0x11111111u), Run(lar, 16 | 3), "LAR: privilege failure leaves the register");
+        Equal((true, 0xFFFFFFFFu), Run(lsl, 16), "LSL: 4GB limit with granularity");
+        Equal((true, 0x00001000u), Run(lsl, 24), "LSL: byte-granular limit");
+        Equal((true, 0x00000067u), Run(lsl, 48), "LSL: TSS limit");
+        Equal((false, 0x11111111u), Run(lsl, 0), "LSL: null selector");
+    }
+
+    // 文字列命令以外に付いた REP/REPNE は無視される(`rep ret`、`repne nop`、`rep` + MOV)。通常コアで検証(高速コアは委譲する)。
+    static void RepPrefixOnOtherInstructions()
+    {
+        var env = SlowEnv;
+        (uint eip, uint eax, uint esp) Run(byte[] code)
+        {
+            Reset(env, code);
+            BitConverter.GetBytes(0x1234u).CopyTo(env.OneMegaMemory_, 0x8000);
+            var cpu = CreateCpu(0x11111111, 0x22222222);
+            Equal(true, SlowStep(env, cpu, null).IsSuccess, $"rep-prefixed {Convert.ToHexString(code)} executes");
+            cases++;
+            return (cpu.eip, cpu.eax, cpu.esp);
+        }
+        Equal((0x1234u, 0x11111111u, 0x8004u), Run([0xF3, 0xC3]), "rep ret returns");
+        Equal((0x1234u, 0x11111111u, 0x8004u), Run([0xF2, 0xC3]), "repne ret returns");
+        Equal((2u, 0x11111111u, 0x8000u), Run([0xF3, 0x90]), "rep nop (pause) advances");
+        Equal((3u, 0x22222222u, 0x8000u), Run([0xF3, 0x89, 0xD8]), "rep mov eax, ebx moves");
+    }
+
     static void Integration()
     {
         foreach (var code in new byte[][] { [0xF3, 0xA5], [0x66, 0xF3, 0xAB], [0xF3, 0xAA], [0xA6], [0xA7], [0xAE], [0xAF], [0xAD], [0x50], [0x66, 0x50], [0x58], [0x66, 0x58] })
@@ -661,6 +729,8 @@ static class CoreTests
         SemanticsIr();
         TranslationCacheExecution();
         FpuRegression();
+        DescriptorChecks();
+        RepPrefixOnOtherInstructions();
         Integration();
         OperandTransfers();
         Console.WriteLine($"Core cases passed: {cases}");

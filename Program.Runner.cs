@@ -47,6 +47,7 @@ static partial class Program
                 {
                     SnapshotStore.Save(options.SnapshotPath, savedCount, savedCpu, savedEnv);
                     if (options.ScreenPath != null) ScreenCapture.Save(savedEnv.Vga, options.ScreenPath);
+                    if (options.VramDumpPath != null) savedEnv.Vga.Dump(options.VramDumpPath);
                 }
                 env = options.Window
                     ? RunWithWindow(options, disk, env, cpu, count, trace, Save)

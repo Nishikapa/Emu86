@@ -55,6 +55,7 @@ internal sealed class RunOptions
     public string SnapshotPath { get; private set; } = "snapshot.snap";
     public DateTime? Rtc { get; private set; }
     public string ScreenPath { get; private set; }
+    public string VramDumpPath { get; private set; }
     public string DiskPath { get; private set; }
     public string OverlayPath { get; private set; }
     public (long Start, int Count)? DumpLba { get; private set; }
@@ -107,6 +108,7 @@ internal sealed class RunOptions
         Of("Disk", "--disk", "path", "Base disk image (default: sample.vhd or sample.vhdx in the current directory)", Value, (o, v) => o.DiskPath = v),
         Of("Disk", "--overlay", "path", "Writable overlay for --disk (default: the base path with .avhdx)", Value, (o, v) => o.OverlayPath = v),
         Of("Disk", "--dumplba", "start count", "Dump sectors from the existing overlay to lba_dump.bin", SectorRange, (o, v) => o.DumpLba = v),
+        Of("Diagnostics", "--dumpvram", "path", "Write the VGA registers and the four VRAM planes to the file when the run stops", Value, (o, v) => o.VramDumpPath = v),
         Flag("Diagnostics", "--trace-all", "Trace every instruction to trace.log, not only control transfers", o => o.Diagnostics.TraceAll = true),
         Flag("Diagnostics", "--regtrace", "Include the general registers and EFLAGS in each trace line", o => o.Diagnostics.RegTrace = true),
         Flag("Diagnostics", "--notrace", "Do not write trace.log", o => o.Diagnostics.NoTrace = true),

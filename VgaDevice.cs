@@ -259,6 +259,14 @@ public sealed class VgaDevice
         if (Ports.TryGetValue(port, out var register)) register.Write?.Invoke(this, value);
     }
 
+    // 診断: レジスタ一式(Misc、Sequencer、Graphics、CRTC、Attribute、DAC)に続けて 4 プレーンの VRAM をそのまま書く。
+    public void Dump(string path)
+    {
+        using var writer = new BinaryWriter(File.Create(path));
+        writer.Write(MiscOutput); writer.Write(Sequencer); writer.Write(Graphics); writer.Write(Crtc); writer.Write(Attribute); writer.Write(Dac);
+        writer.Write(Vram);
+    }
+
     /// 描画 ///////////////////////////////////////////
     public bool GraphicsMode => (Graphics[6] & 1) != 0;
     public bool Color256 => (Attribute[0x10] & 0x40) != 0 || Chain4;
