@@ -26,7 +26,7 @@ static class RunnerTests
         Equal(false, defaults.Resume, "default cold boot");
         string[] arguments = ["--resume", "--slow", "--noirq", "--no-translate", "--window", "--boot-debug", "--com1", "pipe-a", "--com2", "pipe-b", "--limit", "123", "--snapshot", "other.snap", "--rtc", "2026-10-28T12:34:56", "--screen", "shot.png",
             "--disk", "other.vhd", "--overlay", "other.avhdx", "--dumplba", "42", "2",
-            "--trace-all", "--regtrace", "--notrace", "--brhist", "--esptrap", "--pftrap",
+            "--trace-all", "--regtrace", "--notrace", "--brhist", "--esptrap", "--pftrap", "--dumpvram", "vram.bin",
             "--atalog", "--pcilog", "--piclog", "--vgalog", "--intlog", "--upflog", "321",
             "--breakeip", "0x80000000", "--breakeax", "FFFFFFFF", "--breakat", "44", "--watchval", "0",
             "--entrylog", "10", "20", "--breakrange", "30", "40", "--wlog", "50", "60", "--watch", "70", "80"];
@@ -40,6 +40,7 @@ static class RunnerTests
         Equal("other.snap", parsed.SnapshotPath, "snapshot path");
         Equal(new DateTime(2026, 10, 28, 12, 34, 56), parsed.Rtc, "real-time clock start");
         Equal("shot.png", parsed.ScreenPath, "screen capture path");
+        Equal("vram.bin", parsed.VramDumpPath, "VRAM dump path");
         Equal(null, defaults.ScreenPath, "no screen capture by default");
         Equal(null, defaults.Rtc, "the clock defaults to the host's time");
         Equal("other.vhd", parsed.DiskPath, "base path");

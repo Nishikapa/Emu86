@@ -477,3 +477,33 @@ rm sample.avhdx; ./bin/Release/net10.0/Emu86.exe --notrace --entrylog 7c90e47c 7
 - 先へ進める選択肢: (1) ダイアログで Cancel(Esc)を送って続行する自動操作(`BootAutomation` に、アイドルになったら Esc を
   注入する手順を足す。画面はグラフィックモードなので、文字の照合ではなくアイドル検知か画面のハッシュで判断する)、
   (2) イメージに i386 ソースを置く(ホスト側で VHD を編集)。
+
+### Debian(sample.vhdx)の再確認(2026-10-30)
+- `--screen` と `--dumpvram`(停止時に VGA のレジスタと 4 プレーンを書く)で、ウィンドウなしに到達点を見られるようにした。
+- 直した 3 つ:
+  1. **VERR/VERW(0F 00 /4,/5)が未実装**で、グループの表に無い reg 値のため `KeyNotFoundException` でエミュレータが落ちていた
+     (Linux 4.19 は MDS 緩和の `verw` を頻繁に実行する)。記述子を照合して ZF に入れる実装を追加。ついでに LAR/LSL(0F 02/03)も。
+  2. **文字列命令以外に付いた REP** を #UD にしていた(gcc/glibc の `rep ret`)。ユーザーモードのプロセスが SIGILL で落ちていた。
+     実 CPU と同じく無視してその命令を実行する。
+  3. ヘッドレスの画面保存で代替フォントが無く、文字が箱になっていた。ウィンドウのフォント生成を `ScreenCapture` に移して共有。
+- 到達点(冷起動、翻訳あり、`--rtc 2026-10-30T09:00:00`、200 億命令で実時間 834 秒、`HLT` 待機 22.6 万回・9.6 億命令):
+  約 150 億命令でユーザーモード(cs=0073)に入り、**initramfs の BusyBox シェル**で止まっている。コンソール(VRAM のプレーン 0 を
+  `--dumpvram` で読んだもの):
+  ```
+  [    0.000000] MPTABLE: no processors registered!
+  [    0.000000] BIOS bug, MP table errors detected!...
+  [ 4315.769312] mce: Unable to init MCE device (rc: -5)
+  [ 4378.096864] Problem loading in-kernel X.509 certificate (-110)
+  [ 4924.940027] watchdog: BUG: soft lockup - CPU#0 stuck for 22s! [systemd-udevd:94]
+  Gave up waiting for suspend/resume device
+  Gave up waiting for root file system device.  Common problems: ...
+  ALERT!  UUID=350f9256-2e9b-4b80-836a-31402f4c0af4 does not exist.  Dropping to a shell!
+  BusyBox v1.30.1 (Debian 1:1.30.1-4) built-in shell (ash)
+  (initramfs)
+  ```
+- 次の課題: root デバイス(ATA ディスク)が見つからない。libata/ata_piix の検出かモジュールのロードのどこで止まるかを、
+  initramfs のシェルで `cat /proc/modules`、`ls /dev`、`dmesg` を打って調べたい。ウィンドウなしでキー入力を注入する手段
+  (文字列 → スキャンコード、`--type` のようなオプション)があると、画面保存と合わせてヘッドレスで調べられる。
+- 気づき: 画面のプレーン 2(フォント)に 692 バイトの断片が書かれており、`HasLoadedFont` が真になって壊れたフォントで描いていた
+  (VRAM の文字自体は正しい)。本物の VGA ではプレーン 2 に BIOS がフォントを置くので、スタブのモード設定で代替フォントを
+  プレーン 2 に書き込むのが本来の形(未対応。いまは `--screen`/ウィンドウが代替フォントで描く)。

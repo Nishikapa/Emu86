@@ -698,6 +698,45 @@ static public partial class Ext
         _ => throw new KeyNotFoundException()
     };
 
+    // 記述子の照合(VERR/VERW/LAR/LSL): GDT のセレクタの記述子 8 バイトを返す。ヌルセレクタ、LDT(未対応)、GDT の範囲外は null。
+    static (uint lo, uint hi)? EnvDescriptorRaw(EmuEnvironment env, CPU cpu, ushort sel)
+    {
+        if ((sel & 0xFFFC) == 0 || (sel & 4) != 0 || (sel & 0xFFF8) + 7 > cpu.gdt_limit) return null;
+        var off = cpu.gdt_base + (uint)(sel & 0xFFF8);
+        return (EnvGetMemoryData32(env, off), EnvGetMemoryData32(env, off + 4));
+    }
+
+    // VERR/VERW: セレクタのセグメントが CPL と RPL から読める(書ける)か。システム記述子・実行専用(読み)・コードと読み取り専用(書き)は否。
+    // 非コンフォーミングのセグメントは DPL >= CPL かつ DPL >= RPL が要る。例外は出さず真偽だけ返す。
+    static internal bool EnvSegmentAccessible(EmuEnvironment env, CPU cpu, ushort sel, bool write)
+    {
+        if (EnvDescriptorRaw(env, cpu, sel) is not (_, var hi)) return false;
+        var access = (hi >> 8) & 0xFF;
+        if ((access & 0x10) == 0) return false;
+        var code = (access & 0x08) != 0;
+        var readableOrWritable = (access & 0x02) != 0;
+        if (write ? code || !readableOrWritable : code && !readableOrWritable) return false;
+        var conforming = code && (access & 0x04) != 0;
+        var dpl = (int)(access >> 5) & 3;
+        return conforming || (dpl >= cpu.cpl && dpl >= (sel & 3));
+    }
+
+    // LAR/LSL: アクセス権(hi の 0x00FFFF00)またはリミット(G ビットで 4K 単位を展開)。照合に通らなければ null。
+    // 許されるシステム記述子は LAR が TSS/LDT/コールゲート/タスクゲート、LSL が TSS/LDT。非コンフォーミングなら特権の検査も。
+    static internal uint? EnvDescriptorQuery(EmuEnvironment env, CPU cpu, ushort sel, bool limit)
+    {
+        if (EnvDescriptorRaw(env, cpu, sel) is not (var lo, var hi)) return null;
+        var access = (hi >> 8) & 0xFF;
+        var type = access & 0x0F;
+        if ((access & 0x10) == 0 && !(limit ? type is 1 or 2 or 3 or 9 or 11 : type is 1 or 2 or 3 or 4 or 5 or 9 or 11 or 12)) return null;
+        var conforming = (access & 0x18) == 0x18 && (access & 0x04) != 0;
+        var dpl = (int)(access >> 5) & 3;
+        if (!conforming && (dpl < cpu.cpl || dpl < (sel & 3))) return null;
+        if (!limit) return hi & 0x00FFFF00;
+        var segmentLimit = (lo & 0xFFFF) | (hi & 0x000F0000);
+        return (hi & 0x00800000) != 0 ? (segmentLimit << 12) | 0xFFF : segmentLimit;
+    }
+
     // GDT からセグメント記述子を読み、基底アドレスと D/B ビットを返す。
     static (uint base_, bool d) EnvReadDescriptor(EmuEnvironment env, CPU cpu, ushort sel)
     {

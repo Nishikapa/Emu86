@@ -171,8 +171,12 @@ static partial class Program
             return twoByte(env, cpuB, [0x0F, op2]);
         }
 
-        if (!stringOps.Contains(op) || !oneByte.TryGetValue(op, out var state))
+        if (!oneByte.TryGetValue(op, out var state))
             return (false, default, cpu1, log);
+
+        // 文字列命令以外に付いた REP は無視して、その命令をそのまま実行する(gcc/glibc の `rep ret` など。実 CPU も無視する)。
+        if (!stringOps.Contains(op))
+            return state(env, cpu2, [op]);
 
         // 比較系のみ ZF 条件を適用する（MOVS/STOS/LODS は CX だけで回す）。
         var checkZf = repZf is bool && zfStringOps.Contains(op);
@@ -1463,18 +1467,43 @@ static partial class Program
         })
         select unit;
 
-    // Group6 (0F 00): SLDT/STR/LLDT/LTR。LDT・タスクスイッチは未使用のため、
-    // LLDT/LTR はセレクタを読み捨て、SLDT/STR は 0 を返す最小実装(CPU 側に状態は持たない)。
+    // Group6 (0F 00): SLDT/STR/LLDT/LTR/VERR/VERW。LDT・タスクスイッチは未使用のため、
+    // LLDT/LTR はセレクタを保持するだけ。VERR/VERW は記述子を照合して ZF に入れる(Linux は MDS 緩和の `verw` を頻繁に実行する)。
     static State<Unit> Group6_0F00 =>
         from _1 in SetLog("Group6_0F00")
         from m in ModRegRm()
         from _ in Choice(
             m.reg,
-            (0, SldtStr(m)),   // SLDT
-            (1, SldtStr(m)),   // STR
-            (2, LldtLtr(m)),   // LLDT
-            (3, LldtLtr(m))    // LTR
+            (0, SldtStr(m)),            // SLDT
+            (1, SldtStr(m)),            // STR
+            (2, LldtLtr(m)),            // LLDT
+            (3, LldtLtr(m)),            // LTR
+            (4, Verify(m, write: false)), // VERR
+            (5, Verify(m, write: true))   // VERW
         )
+        select unit;
+
+    // VERR/VERW: セグメントが CPL/RPL から読める(書ける)なら ZF=1、そうでなければ ZF=0。例外は出さない。
+    static State<Unit> Verify((int mod, int reg, int rm) m, bool write) =>
+        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from sel in GetMemOrRegData16(addr)
+        from accessible in GetDataFromEnvCpu((env, cpu) => EnvSegmentAccessible(env, cpu, sel, write))
+        from _ in _zf.Set(accessible)
+        select unit;
+
+    // LAR/LSL (0F 02/03): r <- アクセス権 / リミット、ZF=1。照合に通らなければ ZF=0 で r は変えない。
+    static State<Unit> Lar_0F02 => LarLsl("Lar_0F02", limit: false);
+    static State<Unit> Lsl_0F03 => LarLsl("Lsl_0F03", limit: true);
+
+    static State<Unit> LarLsl(string name, bool limit) =>
+        from _1 in SetLog(name)
+        from m in ModRegRm()
+        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from sel in GetMemOrRegData16(addr)
+        from cpu in GetCpu
+        from value in GetDataFromEnvCpu((env, c) => EnvDescriptorQuery(env, c, sel, limit))
+        from _2 in _zf.Set(value != null)
+        from _3 in When(value != null, SetRegData(m.reg, cpu.code32 != cpu.operand_size_prefix ? (value ?? 0).ToTypeData() : ((ushort)(value ?? 0)).ToTypeData()))
         select unit;
 
     // SLDT/STR: 保持しているセレクタを返す(レジスタ形式は32bit幅のときゼロ拡張)。
