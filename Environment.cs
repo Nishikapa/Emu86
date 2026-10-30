@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using static Emu86.CPU;
+using static Emu86.States;
 
 namespace Emu86;
 
@@ -902,7 +903,7 @@ static public partial class Ext
     // ページング有効時は変換後の物理が先頭 RAM 内なので実質何もしない。
     static internal uint EnvAlias(uint addr) => addr >= 0xFFF00000 ? addr - 0xFFF00000 : addr;
 
-    static private void EnvWriteByte(EmuEnvironment env, uint addr, byte val)
+    static internal void EnvWriteByte(EmuEnvironment env, uint addr, byte val)
     {
         if (env.PagingOn) addr = EnvTranslate(env, addr, write: true);
         addr = EnvAlias(addr);
@@ -917,10 +918,10 @@ static public partial class Ext
         }
     }
 
-    static void EnvWriteWord(EmuEnvironment env, uint addr, ushort value) =>
+    static internal void EnvWriteWord(EmuEnvironment env, uint addr, ushort value) =>
         EnvWriteValue(env, addr, value, 2);
 
-    static void EnvWriteDword(EmuEnvironment env, uint addr, uint value) =>
+    static internal void EnvWriteDword(EmuEnvironment env, uint addr, uint value) =>
         EnvWriteValue(env, addr, value, 4);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

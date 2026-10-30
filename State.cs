@@ -4,7 +4,7 @@ namespace Emu86;
 
 public delegate (bool IsSuccess, V value, CPU cpu, string log) State<V>(EmuEnvironment env, CPU param, byte[] opecodes);
 
-static public partial class Ext
+static public class States
 {
     static public State<V> ToState<V>(this V value) => (env, cpu, ope) => (true, value, cpu, string.Empty);
 

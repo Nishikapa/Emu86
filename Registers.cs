@@ -1,6 +1,6 @@
 namespace Emu86;
 
-static public partial class Ext
+static public partial class Operands
 {
     // 32ビット汎用レジスタを番号で読む。
     static internal uint ReadRegister32(CPU cpu, int register) => register switch
@@ -16,6 +16,6 @@ static public partial class Ext
     };
 
     // SIB の index(4=なし)。
-    static private uint EnvGetIndexRegData32(CPU cpu, int reg) =>
+    static internal uint EnvGetIndexRegData32(CPU cpu, int reg) =>
         reg == 4 ? 0 : ReadRegister32(cpu, reg);
 }

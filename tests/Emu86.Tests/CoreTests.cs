@@ -1,6 +1,7 @@
 using Emu86;
 using System.Security.Cryptography;
 using static Emu86.Ext;
+using static Emu86.FastCore;
 
 static class CoreTests
 {
