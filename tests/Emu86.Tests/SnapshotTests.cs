@@ -2,6 +2,9 @@ using Emu86;
 using System.Security.Cryptography;
 using System.Text;
 using static Emu86.Ext;
+using static Emu86.Ports;
+using static Emu86.Mmu;
+using static Emu86.Interrupts;
 
 static class SnapshotTests
 {

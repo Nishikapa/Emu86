@@ -11,11 +11,11 @@ public readonly struct CodeSource(EmuEnvironment env, uint csBase, uint eip, boo
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public uint Address(int offset) => csBase + (code32 ? eip + (uint)offset : (ushort)(eip + offset));
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public byte Byte(int offset) => Ext.EnvGetMemoryData8(env, Address(offset));
+    public byte Byte(int offset) => Mmu.EnvGetMemoryData8(env, Address(offset));
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public ushort Word(int offset) => Ext.EnvGetMemoryData16(env, Address(offset));
+    public ushort Word(int offset) => Mmu.EnvGetMemoryData16(env, Address(offset));
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public uint Dword(int offset) => Ext.EnvGetMemoryData32(env, Address(offset));
+    public uint Dword(int offset) => Mmu.EnvGetMemoryData32(env, Address(offset));
 
     // 現在の CS:(E)IP から。
     public static CodeSource At(EmuEnvironment env, CPU cpu) => new(env, cpu.cs_base, cpu.eip, cpu.code32);

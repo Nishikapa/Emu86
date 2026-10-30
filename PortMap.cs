@@ -80,7 +80,7 @@ static class PortMap
             ReadWide: (env, p, _) => env.Pci.Address >> (8 * (p - 0xCF8)),
             WriteWide: (env, p, size, v) =>
             {
-                if (p == 0xCF9 && size == 1) { Ext.EnvOutPort(env, p, (byte)v); return; }
+                if (p == 0xCF9 && size == 1) { Ports.EnvOutPort(env, p, (byte)v); return; }
                 var shift = 8 * (p - 0xCF8);
                 var mask = size >= 4 ? 0xFFFFFFFF : (Mask(size) << shift);
                 env.Pci.Address = (env.Pci.Address & ~mask) | ((v << shift) & mask);

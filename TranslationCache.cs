@@ -1,5 +1,7 @@
 using System.Linq.Expressions;
 using static Emu86.Ext;
+using static Emu86.Mmu;
+using static Emu86.Ports;
 
 namespace Emu86;
 

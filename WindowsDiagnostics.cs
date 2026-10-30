@@ -1,6 +1,8 @@
 using System.Text;
 using static Emu86.Ext;
 using static Emu86.GuestMemory;
+using static Emu86.Ports;
+using static Emu86.Mmu;
 
 namespace Emu86;
 

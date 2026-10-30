@@ -3,12 +3,15 @@ using static Emu86.Unit;
 using static Emu86.Ext;
 using static Emu86.States;
 using static Emu86.Alu;
+using static Emu86.Mmu;
+using static Emu86.DataAccess;
+using static Emu86.Ports;
 
 namespace Emu86;
 
 static public partial class Ext
 {
-    static readonly int[] arrLen = [1, 2, 4];
+    static internal readonly int[] arrLen = [1, 2, 4];
 
     static public State<(Data data, MemAddr input)> GetMemoryDataIp(bool w) =>
         from cpu in GetCpu
