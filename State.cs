@@ -11,6 +11,18 @@ static public partial class Ext
     // 何もせず成功する State(When/Unless の「実行しない側」)。
     static public readonly State<Unit> Pass = Unit.unit.ToState();
 
+    // 失敗する State(未定義・未実装の命令)。CPU は変えない。実行器が #UD として扱う。
+    static public readonly State<Unit> Undefined = (env, cpu, ope) => (false, default, cpu, string.Empty);
+
+    // グループ命令(ModRM の reg フィールドで選ぶ)の表。表に無い値は Undefined。
+    // 辞書を作らず順に比べる(8 項以下)。以前の Choice は該当が無いとホスト側の例外で落ちていた。
+    static public State<Unit> Group(int key, params (int key, State<Unit> state)[] cases)
+    {
+        foreach (var (candidate, state) in cases)
+            if (candidate == key) return state;
+        return Undefined;
+    }
+
     // クエリ構文の where 句。述語が偽なら失敗にする(CPU は変更しない)。
     // 失敗を返す State は CPU を変更する前に置くこと(Choice/Many0 は失敗した枝の変更を巻き戻せない)。
     static public State<T> Where<T>(this State<T> state, Func<T, bool> predicate)

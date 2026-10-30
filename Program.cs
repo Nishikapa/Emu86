@@ -667,7 +667,7 @@ static partial class Program
         from m in ModRegRm()
         from addr in GetMemOrRegAddr(m.mod, m.rm)
         from data in GetMemOrRegData(addr, w)
-        from _2 in Choice(
+        from _2 in Group(
             m.reg,
             (0, Group3_Test(data)),
             (1, Group3_Test(data)),
@@ -829,7 +829,7 @@ static partial class Program
         from m in ModRegRm()
         from addr in GetMemOrRegAddr(m.mod, m.rm)
         from data in GetMemOrRegData(addr, false)
-        from _2 in Choice(
+        from _2 in Group(
             m.reg,
             (0, IncData(addr, data)),
             (1, DecData(addr, data))
@@ -842,7 +842,7 @@ static partial class Program
         from m in ModRegRm()
         from addr in GetMemOrRegAddr(m.mod, m.rm)
         from data in GetMemOrRegData(addr, true)
-        from _2 in Choice(
+        from _2 in Group(
             m.reg,
             (0, IncData(addr, data)),
             (1, DecData(addr, data)),
@@ -1472,7 +1472,7 @@ static partial class Program
     static State<Unit> Group6_0F00 =>
         from _1 in SetLog("Group6_0F00")
         from m in ModRegRm()
-        from _ in Choice(
+        from _ in Group(
             m.reg,
             (0, SldtStr(m)),            // SLDT
             (1, SldtStr(m)),            // STR
@@ -1524,7 +1524,7 @@ static partial class Program
     static State<Unit> Group7_0F01 =>
         from _1 in SetLog("Group7_0F01")
         from m in ModRegRm()
-        from _ in Choice(
+        from _ in Group(
             m.reg,
             (0, Sgdt(m.mod, m.rm, idt: false)),
             (1, Sgdt(m.mod, m.rm, idt: true)),

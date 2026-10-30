@@ -645,6 +645,20 @@ static class CoreTests
         Equal((3u, 0x22222222u, 0x8000u), Run([0xF3, 0x89, 0xD8]), "rep mov eax, ebx moves");
     }
 
+    // グループ命令の表に無い reg 値(0F 01 /4 SMSW、/5、/6 LMSW、FE /2 など)は失敗(#UD)になり、ホスト側の例外にはならない。
+    static void UndefinedGroupMembers()
+    {
+        var env = SlowEnv;
+        foreach (var code in new byte[][] { [0x0F, 0x01, 0xE0], [0x0F, 0x01, 0xE8], [0x0F, 0x01, 0xF0], [0xFE, 0xD0], [0x0F, 0x00, 0xF0], [0x0F, 0x00, 0xF8] })
+        {
+            Reset(env, code);
+            var cpu = CreateCpu();
+            CPU._cr0.setter(cpu)(1);
+            Equal(false, SlowStep(env, cpu, null).IsSuccess, $"undefined group member {Convert.ToHexString(code)} fails instead of throwing");
+            cases++;
+        }
+    }
+
     static void Integration()
     {
         foreach (var code in new byte[][] { [0xF3, 0xA5], [0x66, 0xF3, 0xAB], [0xF3, 0xAA], [0xA6], [0xA7], [0xAE], [0xAF], [0xAD], [0x50], [0x66, 0x50], [0x58], [0x66, 0x58] })
@@ -731,6 +745,7 @@ static class CoreTests
         FpuRegression();
         DescriptorChecks();
         RepPrefixOnOtherInstructions();
+        UndefinedGroupMembers();
         Integration();
         OperandTransfers();
         Console.WriteLine($"Core cases passed: {cases}");
