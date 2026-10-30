@@ -1,9 +1,13 @@
-using static Emu86.Ext;
+using static Emu86.Conversions;
 
 namespace Emu86;
 
 static public class Alu
 {
+    // 算術/論理グループを uint 上で幅共通に計算する。
+    // kind: 0=ADD 1=OR 2=ADC 3=SBB 4=AND 5=SUB 6=XOR 7=CMP
+    // ADC/SBB のキャリー入力はオペランドに畳み込まず個別に扱う
+    // (b=0xFF..FF かつ CF=1 のときにキャリー出力が失われるのを防ぐ)。
     static internal uint CalculateAlu(CPU cpu, int type, uint left, uint right, int kind)
     {
         var mask = Mask(type);
@@ -92,4 +96,71 @@ static public class Alu
         15 => cpu.sf == cpu.of && !cpu.zf,
         _ => throw new IndexOutOfRangeException(),
     };
+
+    // PF: 結果の下位 8 ビットの 1 の個数が偶数なら 1。
+    static public bool Par(uint v) => (System.Numerics.BitOperations.PopCount(v & 0xFF) & 1) == 0;
+
+    // Group2 シフト/ローテートを 1bit ずつ count 回適用する。
+    // kind: 0=ROL 1=ROR 2=RCL 3=RCR 4=SHL/SAL 5=SHR 6=SAL 7=SAR
+    static internal (uint result, bool cf, bool of) ComputeShift(uint v, int count, int kind, int bits, bool cfIn)
+    {
+        var mask = bits == 8 ? 0xFFu : bits == 16 ? 0xFFFFu : 0xFFFFFFFFu;
+        var msb = 1u << (bits - 1);
+        var result = v & mask;
+        var cf = cfIn;
+        for (int i = 0; i < count; i++)
+        {
+            switch (kind)
+            {
+                case 0: // ROL
+                    cf = (result & msb) != 0;
+                    result = ((result << 1) | (cf ? 1u : 0u)) & mask;
+                    break;
+                case 1: // ROR
+                    cf = (result & 1) != 0;
+                    result = ((result >> 1) | (cf ? msb : 0u)) & mask;
+                    break;
+                case 2: // RCL
+                    {
+                        var newcf = (result & msb) != 0;
+                        result = ((result << 1) | (cf ? 1u : 0u)) & mask;
+                        cf = newcf;
+                    }
+                    break;
+                case 3: // RCR
+                    {
+                        var newcf = (result & 1) != 0;
+                        result = ((result >> 1) | (cf ? msb : 0u)) & mask;
+                        cf = newcf;
+                    }
+                    break;
+                case 4: // SHL / SAL
+                case 6:
+                    cf = (result & msb) != 0;
+                    result = (result << 1) & mask;
+                    break;
+                case 5: // SHR
+                    cf = (result & 1) != 0;
+                    result = (result >> 1) & mask;
+                    break;
+                case 7: // SAR (算術右シフト: 符号ビットを保持)
+                    cf = (result & 1) != 0;
+                    result = ((result >> 1) | (result & msb)) & mask;
+                    break;
+            }
+        }
+        // OF は count==1 のときのみ定義される。
+        var of = false;
+        if (count == 1)
+        {
+            of = kind switch
+            {
+                0 or 2 or 4 or 6 => ((result & msb) != 0) ^ cf,                          // ROL/RCL/SHL
+                1 or 3 => ((result & msb) != 0) ^ ((result & (msb >> 1)) != 0),          // ROR/RCR: 上位2bit
+                5 => (v & msb) != 0,                                                      // SHR: 元の MSB
+                _ => false,                                                              // SAR
+            };
+        }
+        return (result, cf, of);
+    }
 }

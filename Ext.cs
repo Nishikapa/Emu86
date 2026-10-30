@@ -5,7 +5,7 @@ public class Unit
     public static Unit unit = default;
 }
 
-static public partial class Ext
+static public class Conversions
 {
     private static readonly Func<byte[], Data>[] funcArray =
     [

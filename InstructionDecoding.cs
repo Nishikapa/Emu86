@@ -1,8 +1,9 @@
 using static Emu86.DataAccess;
+using static Emu86.Decoder;
 
 namespace Emu86;
 
-static public partial class Ext
+static public partial class Fetch
 {
     // ModRM の残り(SIB・変位)を現在の (E)IP から読み、実効オフセット・セグメントベース・消費バイト数を返す。
     // 構造の読み取り(ParseModRm)と実効アドレスの計算(EffectiveAddress)は高速コアと共有する。

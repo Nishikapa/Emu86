@@ -1,7 +1,9 @@
 using Emu86;
-using static Emu86.Ext;
+using static Emu86.Conversions;
 using static Emu86.FastCore;
 using static Emu86.Mmu;
+using static Emu86.Fetch;
+using static Emu86.Decoder;
 
 static class DecodeTests
 {

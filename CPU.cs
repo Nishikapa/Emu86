@@ -1,154 +1,18 @@
 using static Emu86.CPU;
 using static Emu86.Unit;
-using static Emu86.Ext;
+using static Emu86.Conversions;
 using static Emu86.States;
 using static Emu86.Alu;
 using static Emu86.Mmu;
 using static Emu86.DataAccess;
 using static Emu86.Ports;
+using static Emu86.CpuStates;
 
 namespace Emu86;
 
-static public partial class Ext
+// State で CPU を読み書きする基本操作(SetCpu/GetCpu、Accessor の Get/Set/Modify、EIP の前進、ログ・結果・オペコード列)。
+static public class CpuStates
 {
-    static internal readonly int[] arrLen = [1, 2, 4];
-
-    static public State<(Data data, MemAddr input)> GetMemoryDataIp(bool w) =>
-        from cpu in GetCpu
-        let addr = GetCodeAddr(cpu)
-        from data in GetMemOrRegData(addr, w)
-        from _ in IpInc(arrLen[data.type])
-        select (data, (addr.isMem, addr.addr));
-
-    static public State<Data> GetMemoryDataIp_(int type) => MemoryDataIpByType[type];
-
-    static public State<(int mod, int reg, int rm)> ModRegRm() =>
-        from value in GetMemoryDataIp8
-        let mod = (value >> 6) & 0x3
-        let reg = (value >> 3) & 0x7
-        let rm = value & 0x7
-        select (mod, reg, rm);
-
-    static public State<Data> Choice(
-        int index, State<byte> dbState, State<ushort> dwState, State<uint> ddState) => index switch
-        {
-            0 => dbState.Select(ToTypeData),
-            1 => dwState.Select(ToTypeData),
-            2 => ddState.Select(ToTypeData),
-            _ => throw new IndexOutOfRangeException()
-        };
-
-    static public Func<T, Data> GetTypeData_<T>(
-        int index,
-        Func<T, byte> func_db,
-        Func<T, ushort> func_dw,
-        Func<T, uint> func_dd) => index switch
-        {
-            0 => value => func_db(value).ToTypeData(),
-            1 => value => func_dw(value).ToTypeData(),
-            2 => value => func_dd(value).ToTypeData(),
-            _ => throw new IndexOutOfRangeException()
-        };
-
-    // 算術/論理グループを uint 上で幅共通に計算する。
-    // kind: 0=ADD 1=OR 2=ADC 3=SBB 4=AND 5=SUB 6=XOR 7=CMP
-    // ADC/SBB のキャリー入力はオペランドに畳み込まず個別に扱う
-    // (b=0xFF..FF かつ CF=1 のときにキャリー出力が失われるのを防ぐ)。
-    // PF: 結果の下位 8 ビットの 1 の個数が偶数なら 1。
-    static public bool Par(uint v) => (System.Numerics.BitOperations.PopCount(v & 0xFF) & 1) == 0;
-
-    static public State<Data> Calc(Data d1, Data d2, int kind)
-    {
-        if (d1.type != d2.type)
-            throw new Exception();
-        return GetDataFromCpu(cpu => CalculateAlu(cpu, d1.type, d1.Value(), d2.Value(), kind).ToTypeData(d1.type));
-    }
-
-    // Group2 シフト/ローテートを 1bit ずつ count 回適用する。
-    // kind: 0=ROL 1=ROR 2=RCL 3=RCR 4=SHL/SAL 5=SHR 6=SAL 7=SAR
-    static internal (uint result, bool cf, bool of) ComputeShift(uint v, int count, int kind, int bits, bool cfIn)
-    {
-        var mask = bits == 8 ? 0xFFu : bits == 16 ? 0xFFFFu : 0xFFFFFFFFu;
-        var msb = 1u << (bits - 1);
-        var result = v & mask;
-        var cf = cfIn;
-
-        for (int i = 0; i < count; i++)
-        {
-            switch (kind)
-            {
-                case 0: // ROL
-                    cf = (result & msb) != 0;
-                    result = ((result << 1) | (cf ? 1u : 0u)) & mask;
-                    break;
-                case 1: // ROR
-                    cf = (result & 1) != 0;
-                    result = ((result >> 1) | (cf ? msb : 0u)) & mask;
-                    break;
-                case 2: // RCL
-                    {
-                        var newcf = (result & msb) != 0;
-                        result = ((result << 1) | (cf ? 1u : 0u)) & mask;
-                        cf = newcf;
-                    }
-                    break;
-                case 3: // RCR
-                    {
-                        var newcf = (result & 1) != 0;
-                        result = ((result >> 1) | (cf ? msb : 0u)) & mask;
-                        cf = newcf;
-                    }
-                    break;
-                case 4: // SHL / SAL
-                case 6:
-                    cf = (result & msb) != 0;
-                    result = (result << 1) & mask;
-                    break;
-                case 5: // SHR
-                    cf = (result & 1) != 0;
-                    result = (result >> 1) & mask;
-                    break;
-                case 7: // SAR (算術右シフト: 符号ビットを保持)
-                    cf = (result & 1) != 0;
-                    result = ((result >> 1) | (result & msb)) & mask;
-                    break;
-            }
-        }
-
-        // OF は count==1 のときのみ定義される。
-        var of = false;
-        if (count == 1)
-        {
-            of = kind switch
-            {
-                0 or 2 or 4 or 6 => ((result & msb) != 0) ^ cf,                          // ROL/RCL/SHL
-                1 or 3 => ((result & msb) != 0) ^ ((result & (msb >> 1)) != 0),          // ROR/RCR: 上位2bit
-                5 => (v & msb) != 0,                                                      // SHR: 元の MSB
-                _ => false,                                                              // SAR
-            };
-        }
-
-        return (result, cf, of);
-    }
-
-    // Group2 を実行し、フラグを更新して結果を type タプルで返す。
-    static public State<Data> Group2(
-        Data data, int count, int kind) =>
-        from cf0 in Get(_cf)
-        let cnt = count & 0x1F   // 80386 はシフト量を 5bit にマスクする
-        let res = ComputeShift(data.Value(), cnt, kind, Bits(data.type), cf0)
-        // count==0 のときはフラグを変更しない。シフト系(kind>=4)は ZF/SF も更新する。
-        from _f in Unless(cnt == 0, kind >= 4
-            ? SetCpu((_cf, res.cf), (_of, res.of), (_zf, res.result == 0), (_sf, (res.result & Msb(data.type)) != 0), (_pf, Par(res.result)))
-            : SetCpu((_cf, res.cf), (_of, res.of)))
-        select res.result.ToTypeData(data.type);
-
-    static public State<bool> Not(State<bool> s) =>
-        s.Select(b => !b);
-
-    static public State<bool> Jcc(int type) =>
-        GetDataFromCpu(cpu => EvaluateCondition(cpu, type));
-
     static internal State<T> Get<T>(this Accessor<CPU, T> acc) =>
         GetDataFromCpu(acc.getter);
 
@@ -178,6 +42,41 @@ static public partial class Ext
                 cpu = item.acc.setter(cpu)(item.value);
             return (true, unit, cpu, string.Empty);
         };
+
+    static public readonly State<CPU> GetCpu = GetDataFromEnvCpu((env, cpu) => cpu);
+
+    static public State<T> GetDataFromEnvCpu<T>(Func<EmuEnvironment, CPU, T> func) =>                              //無理
+        (env, cpu, ope) => (true, func(env, cpu), cpu, string.Empty);
+
+    static public State<Unit> SetCpu(CPU new_cpu) => (env, cpu, ope) => (true, unit, new_cpu, string.Empty); //無理
+
+    static public State<Unit> SetResult(bool f) => (env, cpu, ope) => (f, unit, cpu, string.Empty);          //無理
+
+    static public State<Unit> SetLog(string log) => (env, cpu, ope) => (true, unit, cpu, log);               //無理
+
+    static public readonly State<byte[]> Opecodes = (env, cpu, ope) => (true, ope, cpu, string.Empty);       //無理
+}
+
+// 命令ストリーム(CS:EIP)からの読み取り: オペコード・即値・ModRM(EIP を進める State)。
+static public partial class Fetch
+{
+    static internal readonly int[] arrLen = [1, 2, 4];
+
+    static public State<(Data data, MemAddr input)> GetMemoryDataIp(bool w) =>
+        from cpu in GetCpu
+        let addr = GetCodeAddr(cpu)
+        from data in GetMemOrRegData(addr, w)
+        from _ in IpInc(arrLen[data.type])
+        select (data, (addr.isMem, addr.addr));
+
+    static public State<Data> GetMemoryDataIp_(int type) => MemoryDataIpByType[type];
+
+    static public State<(int mod, int reg, int rm)> ModRegRm() =>
+        from value in GetMemoryDataIp8
+        let mod = (value >> 6) & 0x3
+        let reg = (value >> 3) & 0x7
+        let rm = value & 0x7
+        select (mod, reg, rm);
 
     static public State<IEnumerable<byte>> GetMemoryDataIp(int length) =>
         from data in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryDatas(env, GetCodeAddr(cpu).addr).Take(length))
@@ -209,10 +108,60 @@ static public partial class Ext
 
     static readonly State<Data>[] MemoryDataIpByType =
     [
-        GetMemoryDataIp8.Select(ToTypeData),
-        GetMemoryDataIp16.Select(ToTypeData),
-        GetMemoryDataIp32.Select(ToTypeData)
+        GetMemoryDataIp8.Select(Conversions.ToTypeData),
+        GetMemoryDataIp16.Select(Conversions.ToTypeData),
+        GetMemoryDataIp32.Select(Conversions.ToTypeData)
     ];
+}
+
+// State で書いた演算とフラグ更新(Calc、Group2 のシフト、条件判定、フラグ更新の State)。
+static public class AluStates
+{
+    static public State<Data> Choice(
+        int index, State<byte> dbState, State<ushort> dwState, State<uint> ddState) => index switch
+        {
+            0 => dbState.Select(Conversions.ToTypeData),
+            1 => dwState.Select(Conversions.ToTypeData),
+            2 => ddState.Select(Conversions.ToTypeData),
+            _ => throw new IndexOutOfRangeException()
+        };
+
+    static public Func<T, Data> GetTypeData_<T>(
+        int index,
+        Func<T, byte> func_db,
+        Func<T, ushort> func_dw,
+        Func<T, uint> func_dd) => index switch
+        {
+            0 => value => func_db(value).ToTypeData(),
+            1 => value => func_dw(value).ToTypeData(),
+            2 => value => func_dd(value).ToTypeData(),
+            _ => throw new IndexOutOfRangeException()
+        };
+
+    static public State<Data> Calc(Data d1, Data d2, int kind)
+    {
+        if (d1.type != d2.type)
+            throw new Exception();
+        return GetDataFromCpu(cpu => CalculateAlu(cpu, d1.type, d1.Value(), d2.Value(), kind).ToTypeData(d1.type));
+    }
+
+    // Group2 を実行し、フラグを更新して結果を type タプルで返す。
+    static public State<Data> Group2(
+        Data data, int count, int kind) =>
+        from cf0 in _cf.Get()
+        let cnt = count & 0x1F   // 80386 はシフト量を 5bit にマスクする
+        let res = ComputeShift(data.Value(), cnt, kind, Bits(data.type), cf0)
+        // count==0 のときはフラグを変更しない。シフト系(kind>=4)は ZF/SF も更新する。
+        from _f in Unless(cnt == 0, kind >= 4
+            ? SetCpu((_cf, res.cf), (_of, res.of), (_zf, res.result == 0), (_sf, (res.result & Msb(data.type)) != 0), (_pf, Par(res.result)))
+            : SetCpu((_cf, res.cf), (_of, res.of)))
+        select res.result.ToTypeData(data.type);
+
+    static public State<bool> Not(State<bool> s) =>
+        s.Select(b => !b);
+
+    static public State<bool> Jcc(int type) =>
+        GetDataFromCpu(cpu => EvaluateCondition(cpu, type));
 
     static public State<Unit> update_eflags(byte value) => update_eflags(value.ToTypeData());
 
@@ -244,6 +193,7 @@ static public partial class Ext
         });
 
     static public State<Unit> update_eflags_inc(Data data) => update_eflags_incdec(data, +1);
+
     static public State<Unit> update_eflags_dec(Data data) => update_eflags_incdec(data, -1);
 
     static State<Unit> update_eflags_incdec(Data data, int delta) =>
@@ -252,18 +202,8 @@ static public partial class Ext
             SetIncDecFlags(cpu, data.type, data.Value(), delta);
             return cpu;
         });
-
-    static public readonly State<CPU> GetCpu = GetDataFromEnvCpu((env, cpu) => cpu);
-
-    /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-    static public State<T> GetDataFromEnvCpu<T>(Func<EmuEnvironment, CPU, T> func) =>                              //無理
-        (env, cpu, ope) => (true, func(env, cpu), cpu, string.Empty);
-
-    static public State<Unit> SetCpu(CPU new_cpu) => (env, cpu, ope) => (true, unit, new_cpu, string.Empty); //無理
-    static public State<Unit> SetResult(bool f) => (env, cpu, ope) => (f, unit, cpu, string.Empty);          //無理
-    static public State<Unit> SetLog(string log) => (env, cpu, ope) => (true, unit, cpu, log);               //無理
-    static public readonly State<byte[]> Opecodes = (env, cpu, ope) => (true, ope, cpu, string.Empty);       //無理
 }
+
 
 public class Accessor<O, P>(Func<O, P> g, Func<O, Func<P, O>> s)
 {

@@ -1,6 +1,7 @@
 using static Emu86.CPU;
-using static Emu86.Ext;
+using static Emu86.Conversions;
 using static Emu86.States;
+using static Emu86.CpuStates;
 
 namespace Emu86;
 

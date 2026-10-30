@@ -46,7 +46,7 @@ public readonly struct ModRm(byte mod, byte reg, byte rm, bool hasSib, byte scal
     public readonly int Length = length;
 }
 
-static public partial class Ext
+static public partial class Decoder
 {
     /// Parser コンビネータ ///////////////////////////////
     // Select/Where/Fold で組んだパーサは、組み立てを static に 1 度だけ行えば評価時に割り当てない。
