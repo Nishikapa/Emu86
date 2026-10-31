@@ -585,6 +585,62 @@ static public class StringOps
 
     static uint StrDst(CPU cpu) => cpu.es_base + (StrA32(cpu) ? cpu.edi : cpu.di);
 
+    // 1 要素分の命令的な形(高速コアと IR が使う)。source は源(DS:SI)の基底(セグメントオーバーライド適用済み)、先(ES:DI)は固定。
+    // 書き込み先の検査は EnvWriteN に任せる(読み取りが先なので、フォルト時に状態は変わっていない)。
+    static internal void Element(EmuEnvironment env, CPU c, int op, int size, bool a32, uint source)
+    {
+        var type = size == 1 ? 0 : size == 2 ? 1 : 2;
+        switch (op)
+        {
+            case 0xA4 or 0xA5: // MOVS
+                EnvWriteN(env, c.es_base + (a32 ? c.edi : c.di), size, EnvReadN(env, source + (a32 ? c.esi : c.si), size));
+                Advance(c, size, a32, si: true, di: true);
+                break;
+            case 0xA6 or 0xA7: // CMPS
+            {
+                var s = EnvReadN(env, source + (a32 ? c.esi : c.si), size);
+                var d = EnvReadN(env, c.es_base + (a32 ? c.edi : c.di), size);
+                Alu.SetSubtractionFlags(c, type, s, d);
+                Advance(c, size, a32, si: true, di: true);
+                break;
+            }
+            case 0xAA or 0xAB: // STOS
+                EnvWriteN(env, c.es_base + (a32 ? c.edi : c.di), size, c.eax & Mask(type));
+                Advance(c, size, a32, si: false, di: true);
+                break;
+            case 0xAC or 0xAD: // LODS
+            {
+                var v = EnvReadN(env, source + (a32 ? c.esi : c.si), size);
+                if (size == 1) c.al = (byte)v; else if (size == 2) c.ax = (ushort)v; else c.eax = v;
+                Advance(c, size, a32, si: true, di: false);
+                break;
+            }
+            case 0x6C or 0x6D: // INS: ポート DX から 1 要素読んで [ES:DI] へ(XP の ATA ドライバは rep insw でセクタを読む)
+                EnvWriteN(env, c.es_base + (a32 ? c.edi : c.di), size, EnvInPortN(env, c.dx, size));
+                Advance(c, size, a32, si: false, di: true);
+                break;
+            case 0x6E or 0x6F: // OUTS: [DS:SI] から 1 要素読んでポート DX へ
+                EnvOutPortN(env, c.dx, size, EnvReadN(env, source + (a32 ? c.esi : c.si), size));
+                Advance(c, size, a32, si: true, di: false);
+                break;
+            case 0xAE or 0xAF: // SCAS
+            {
+                var m = EnvReadN(env, c.es_base + (a32 ? c.edi : c.di), size);
+                Alu.SetSubtractionFlags(c, type, c.eax & Mask(type), m);
+                Advance(c, size, a32, si: false, di: true);
+                break;
+            }
+        }
+    }
+
+    // DF に従って SI/DI(a32 なら ESI/EDI)を size 分だけ増減する(命令的な形)。
+    static void Advance(CPU c, int size, bool a32, bool si, bool di)
+    {
+        var delta = c.df ? -size : size;
+        if (si) { if (a32) c.esi = (uint)(c.esi + delta); else c.si = (ushort)(c.si + delta); }
+        if (di) { if (a32) c.edi = (uint)(c.edi + delta); else c.di = (ushort)(c.di + delta); }
+    }
+
     // DF に従って SI/DI(32bit なら ESI/EDI)を size 分だけ増減する。
     static CPU StrAdvance(CPU cpu, int size, bool si, bool di)
     {
@@ -699,7 +755,7 @@ static public class BitOps
               from _w in SetRegData(reg, ((uint)BitScanIndex(src.Value, forward, Bits(src.type))).ToTypeData(src.type))
               select Unit.unit;
 
-    static int BitScanIndex(uint src, bool forward, int bits)
+    static internal int BitScanIndex(uint src, bool forward, int bits)
     {
         if (forward)
         {

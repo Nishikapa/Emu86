@@ -9,6 +9,7 @@ using static Emu86.CpuStates;
 using static Emu86.Fetch;
 using static Emu86.Decoder;
 using static Emu86.AluStates;
+using static Emu86.Alu;
 
 namespace Emu86;
 
@@ -147,29 +148,6 @@ static partial class Instructions
             (_sf, (r.result & Msb(type)) != 0)
         )
         select unit;
-
-    static (uint result, bool cf, bool of) DoubleShift(uint dst, uint src, int count, int bits, bool left)
-    {
-        uint mask = bits == 16 ? 0xFFFFu : 0xFFFFFFFFu;
-        uint msb = bits == 16 ? 0x8000u : 0x80000000u;
-        ulong d = dst & mask, s = src & mask;
-        int rest = bits - count; // 通常 1..bits-1(16bit で count>=16 は未定義。安全のため下でガード)
-        if (rest <= 0) rest = bits;
-        uint result;
-        bool cf;
-        if (left)
-        {
-            result = (uint)(((d << count) | (s >> rest)) & mask);
-            cf = ((dst >> rest) & 1) != 0;         // dst から押し出された最後のビット
-        }
-        else
-        {
-            result = (uint)(((d >> count) | (s << rest)) & mask);
-            cf = ((dst >> (count - 1)) & 1) != 0;
-        }
-        bool of = count == 1 && (((result & msb) != 0) != ((dst & msb) != 0));
-        return (result, cf, of);
-    }
 
     // BT/BTS/BTR/BTC r/m, r (0F A3/AB/B3/BB): ビット番号はレジスタ reg。
     //   ope2 の bit3-4 で op を選ぶ: A3->BT(0) AB->BTS(1) B3->BTR(2) BB->BTC(3)
@@ -322,61 +300,13 @@ static partial class Instructions
         from _2 in ImulInto(m.reg, type, src.data.Signed, imm.Signed)
         select unit;
 
-    // DIV r/m : 符号なし除算。商と剰余を AL/AH, AX/DX, EAX/EDX へ。
+    // DIV r/m : 符号なし除算。商と剰余を AL/AH, AX/DX, EAX/EDX へ(規則は Alu.Divide。IR と共有)。
     static State<Unit> Group3_Div(Data data) =>
-        SetCpu(c =>
-        {
-            if (data.type == 0)
-            {
-                if (data.db == 0) throw new DivideByZeroException();
-                uint dividend = c.ax;
-                c.al = (byte)(dividend / data.db);
-                c.ah = (byte)(dividend % data.db);
-            }
-            else if (data.type == 1)
-            {
-                if (data.dw == 0) throw new DivideByZeroException();
-                uint dividend = ((uint)c.dx << 16) | c.ax;
-                c.ax = (ushort)(dividend / data.dw);
-                c.dx = (ushort)(dividend % data.dw);
-            }
-            else
-            {
-                if (data.dd == 0) throw new DivideByZeroException();
-                ulong dividend = ((ulong)c.edx << 32) | c.eax;
-                c.eax = (uint)(dividend / data.dd);
-                c.edx = (uint)(dividend % data.dd);
-            }
-            return c;
-        });
+        SetCpu(c => { Divide(c, data.type, data.Value, signed: false); return c; });
 
     // IDIV r/m : 符号付き除算。
     static State<Unit> Group3_Idiv(Data data) =>
-        SetCpu(c =>
-        {
-            if (data.type == 0)
-            {
-                if (data.db == 0) throw new DivideByZeroException();
-                int dividend = (short)c.ax;
-                c.al = (byte)(sbyte)(dividend / (sbyte)data.db);
-                c.ah = (byte)(sbyte)(dividend % (sbyte)data.db);
-            }
-            else if (data.type == 1)
-            {
-                if (data.dw == 0) throw new DivideByZeroException();
-                int dividend = (int)(((uint)c.dx << 16) | c.ax);
-                c.ax = (ushort)(short)(dividend / (short)data.dw);
-                c.dx = (ushort)(short)(dividend % (short)data.dw);
-            }
-            else
-            {
-                if (data.dd == 0) throw new DivideByZeroException();
-                long dividend = (long)(((ulong)c.edx << 32) | c.eax);
-                c.eax = (uint)(dividend / (int)data.dd);
-                c.edx = (uint)(dividend % (int)data.dd);
-            }
-            return c;
-        });
+        SetCpu(c => { Divide(c, data.type, data.Value, signed: true); return c; });
 
     // INC r/m: type に応じて +1 し、フラグ(CF以外)を更新して書き戻す。
     static State<Unit> IncData(MemAddr addr, Data data) =>
@@ -476,44 +406,19 @@ static partial class Instructions
         })
         select unit;
 
-    // BCD 調整命令群。Linux は使わないが、Windows の HAL/NTLDR 等の 16/32bit コードが使う。
-    static bool ParityEven(byte v) => (System.Numerics.BitOperations.PopCount(v) & 1) == 0;
-
+    // BCD 調整命令群(規則は Alu.AdjustDecimal。IR と共有)。Linux は使わないが、Windows の HAL/NTLDR 等の 16/32bit コードが使う。
     // AAA (0x37) / AAS (0x3F): 加減算後の非パック BCD 調整。
     static State<Unit> AaaAas_37_3F =>
         from _1 in SetLog("AaaAas_37_3F")
         from opecode in Opecodes
-        from _2 in SetCpu(cpu =>
-        {
-            bool adjust = (cpu.al & 0x0F) > 9 || cpu.af;
-            if (adjust)
-            {
-                if (opecode[0] == 0x37) { cpu.al = (byte)(cpu.al + 6); cpu.ah = (byte)(cpu.ah + 1); }
-                else { cpu.al = (byte)(cpu.al - 6); cpu.ah = (byte)(cpu.ah - 1); }
-            }
-            cpu.af = adjust; cpu.cf = adjust;
-            cpu.al = (byte)(cpu.al & 0x0F);
-            return cpu;
-        })
+        from _2 in SetCpu(cpu => { AdjustDecimal(cpu, opecode[0] == 0x37 ? 0 : 1, 0); return cpu; })
         select unit;
 
     // DAA (0x27) / DAS (0x2F): 加減算後のパック BCD 調整。
     static State<Unit> DaaDas_27_2F =>
         from _1 in SetLog("DaaDas_27_2F")
         from opecode in Opecodes
-        from _2 in SetCpu(cpu =>
-        {
-            byte old = cpu.al; bool oldCf = cpu.cf; bool sub = opecode[0] == 0x2F;
-            bool af = (old & 0x0F) > 9 || cpu.af;
-            bool cf = oldCf || old > 0x99;
-            int al = old;
-            if (af) al = sub ? al - 6 : al + 6;
-            if (cf) al = sub ? al - 0x60 : al + 0x60;
-            cpu.al = (byte)al;
-            cpu.af = af; cpu.cf = cf;
-            cpu.zf = cpu.al == 0; cpu.sf = (cpu.al & 0x80) != 0; cpu.pf = ParityEven(cpu.al);
-            return cpu;
-        })
+        from _2 in SetCpu(cpu => { AdjustDecimal(cpu, opecode[0] == 0x27 ? 2 : 3, 0); return cpu; })
         select unit;
 
     // AAM (D4 ib) / AAD (D5 ib): AL を基数 ib で分解 / AH:AL を基数 ib で結合。
@@ -522,12 +427,6 @@ static partial class Instructions
         from opecode in Opecodes
         from imm in GetMemoryDataIp8
         where opecode[0] != 0xD4 || imm != 0 // AAM 0 は #DE
-        from _3 in SetCpu(cpu =>
-        {
-            if (opecode[0] == 0xD4) { byte al = cpu.al; cpu.ah = (byte)(al / imm); cpu.al = (byte)(al % imm); }
-            else { cpu.al = (byte)(cpu.al + cpu.ah * imm); cpu.ah = 0; }
-            cpu.zf = cpu.al == 0; cpu.sf = (cpu.al & 0x80) != 0; cpu.pf = ParityEven(cpu.al);
-            return cpu;
-        })
+        from _3 in SetCpu(cpu => { AdjustDecimal(cpu, opecode[0] == 0xD4 ? 4 : 5, imm); return cpu; })
         select unit;
 }

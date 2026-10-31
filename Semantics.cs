@@ -19,6 +19,10 @@ namespace Emu86;
 // の 2 つが消費する。対象(Lower が null を返さないもの): ALU の 00-3D と Group1、INC/DEC、PUSH/POP(レジスタ・即値・r/m)、
 // MOV(88-8B、A0-A3、B0-BF、C6/C7)、TEST/CMP、LEA、MOVZX/MOVSX、XCHG、Group2 のシフト/ローテート、Group3 の TEST/NOT/NEG/MUL/IMUL、
 // IMUL r,r/m(,imm)、SETcc、CBW/CWD 系、CLC/STC/CMC/CLD/STD/CLI/STI、NOP、Jcc/JMP rel、CALL/JMP(相対・近傍間接)、RET、LEAVE。
+// docs/adr/0003 の段階 1 で高速コアから移した命令: 文字列命令と REP、DIV/IDIV、POP r/m、PUSHF/POPF、SAHF/LAHF、PUSHA/POPA、
+// LOOP/LOOPE/LOOPNE/JCXZ、HLT、XLAT、BSWAP、CMOVcc、XADD、CMPXCHG、BT/BTS/BTR/BTC、BSF/BSR、SHLD/SHRD、AAA/AAS/DAA/DAS/AAM/AAD。
+// これらは「共通の基本操作(Alu/StringOps/Mmu)を呼ぶ文」で、状態を変える前にページを検査して、フォルト時の CPU が命令の先頭の
+// 状態のままになる規律(段階 3)を守る。
 // メモリオペランドは実効アドレスの式で表し、読み書きは Environment の共通経路(ページフォルトは例外のまま)を呼ぶ。
 // 状態を変える前に読んだ値を後で使う命令(XCHG、CALL 間接)は Let で一時変数に束縛する(TempExpr)。
 
@@ -136,6 +140,32 @@ public sealed record TempExpr(int Slot) : Expr
     public override uint Evaluate(EmuEnvironment env, CPU cpu) => env.Translations.Temps[Slot];
 }
 
+// EFLAGS(type の幅: LAHF は下位 8 ビット、PUSHF はオペランドサイズ)
+public sealed record FlagsExpr(int Type) : Expr
+{
+    public override uint Evaluate(EmuEnvironment env, CPU cpu) => Semantics.Flags(cpu, Type);
+}
+
+// BSWAP
+public sealed record BswapExpr(Expr Value) : Expr
+{
+    public override uint Evaluate(EmuEnvironment env, CPU cpu) => Semantics.Bswap(Value.Evaluate(env, cpu));
+}
+
+// XLAT の表引きアドレス
+public sealed record XlatAddressExpr : Expr
+{
+    public override uint Evaluate(EmuEnvironment env, CPU cpu) => Semantics.XlatAddress(cpu);
+}
+
+// オペランドの置き場所: レジスタ番号か、アドレス式。
+public readonly record struct Place(int Reg, Expr Address)
+{
+    public static Place Register(int reg) => new(reg, null);
+    public static Place Memory(Expr address) => new(-1, address);
+    public bool IsMemory => Address != null;
+}
+
 public abstract record Stmt
 {
     public abstract void Run(EmuEnvironment env, CPU cpu);
@@ -216,6 +246,94 @@ public sealed record FlagStmt(int Kind) : Stmt
     public override void Run(EmuEnvironment env, CPU cpu) => Semantics.Flag(cpu, Kind);
 }
 
+// POPF(CPL>0 の IOPL/IF の保護は Alu.PopFlags)
+public sealed record PopFlagsStmt(int Type) : Stmt
+{
+    public override void Run(EmuEnvironment env, CPU cpu) => Semantics.PopFlags(env, cpu, Type);
+}
+
+// PUSHA / POPA
+public sealed record PushAllStmt(int Type) : Stmt
+{
+    public override void Run(EmuEnvironment env, CPU cpu) => Semantics.PushAll(env, cpu, Type);
+}
+
+public sealed record PopAllStmt(int Type) : Stmt
+{
+    public override void Run(EmuEnvironment env, CPU cpu) => Semantics.PopAll(env, cpu, Type);
+}
+
+// POP m(書き込み先を検査してから pop する)
+public sealed record PopIntoMemoryStmt(Expr Address, int Type) : Stmt
+{
+    public override void Run(EmuEnvironment env, CPU cpu) => Semantics.PopIntoMemory(env, cpu, Address.Evaluate(env, cpu), Type);
+}
+
+// LOOPNE(0)/LOOPE(1)/LOOP(2)/JCXZ(3): CX を数えて rel8 分岐
+public sealed record LoopStmt(int Kind, int Length, uint Displacement) : Stmt
+{
+    public override void Run(EmuEnvironment env, CPU cpu) => Semantics.Loop(cpu, Kind, Length, Displacement);
+}
+
+// HLT: ランナーが待機に使う印を立てる(ブロックの終端)
+public sealed record HaltStmt : Stmt
+{
+    public override void Run(EmuEnvironment env, CPU cpu) => cpu.Halted = true;
+}
+
+// CMPXCHG r/m, r
+public sealed record CompareExchangeStmt(Place Dst, int Reg, int Type) : Stmt
+{
+    public override void Run(EmuEnvironment env, CPU cpu) =>
+        Semantics.CompareExchange(env, cpu, Dst.IsMemory, Dst.IsMemory ? Dst.Address.Evaluate(env, cpu) : 0, Dst.Reg, Reg, Type);
+}
+
+// XADD r/m, r
+public sealed record ExchangeAddStmt(Place Dst, int Reg, int Type) : Stmt
+{
+    public override void Run(EmuEnvironment env, CPU cpu) =>
+        Semantics.ExchangeAdd(env, cpu, Dst.IsMemory, Dst.IsMemory ? Dst.Address.Evaluate(env, cpu) : 0, Dst.Reg, Reg, Type);
+}
+
+// BT(0)/BTS(1)/BTR(2)/BTC(3) r/m, bit。BitString はレジスタのビット番号でメモリのワードを選ぶ形(0F A3 系)。
+public sealed record BitTestStmt(Place Dst, Expr Bit, bool BitString, int Op, int Type) : Stmt
+{
+    public override void Run(EmuEnvironment env, CPU cpu) =>
+        Semantics.BitTest(env, cpu, Dst.IsMemory, Dst.IsMemory ? Dst.Address.Evaluate(env, cpu) : 0, Dst.Reg, Bit.Evaluate(env, cpu), BitString, Op, Type);
+}
+
+// BSF/BSR r, r/m
+public sealed record BitScanStmt(int Reg, Expr Source, bool Forward, int Type) : Stmt
+{
+    public override void Run(EmuEnvironment env, CPU cpu) => Semantics.BitScan(cpu, Reg, Source.Evaluate(env, cpu), Forward, Type);
+}
+
+// SHLD/SHRD r/m, r, count
+public sealed record DoubleShiftStmt(Place Dst, int Reg, Expr Count, bool Left, int Type) : Stmt
+{
+    public override void Run(EmuEnvironment env, CPU cpu) =>
+        Semantics.DoubleShift(env, cpu, Dst.IsMemory, Dst.IsMemory ? Dst.Address.Evaluate(env, cpu) : 0, Dst.Reg, Reg, Count.Evaluate(env, cpu), Left, Type);
+}
+
+// DIV/IDIV r/m
+public sealed record DivideStmt(Expr Divisor, int Type, bool Signed) : Stmt
+{
+    public override void Run(EmuEnvironment env, CPU cpu) => Semantics.Divide(cpu, Type, Divisor.Evaluate(env, cpu), Signed);
+}
+
+// BCD 調整: 0 AAA、1 AAS、2 DAA、3 DAS、4 AAM、5 AAD
+public sealed record AdjustStmt(int Kind, uint Immediate) : Stmt
+{
+    public override void Run(EmuEnvironment env, CPU cpu) => Semantics.AdjustDecimal(cpu, Kind, Immediate);
+}
+
+// 文字列命令(Repeat: 0 単発、1 REP/REPE、2 REPNE)。REP は反復ごとに ECX/ESI/EDI/EFLAGS を更新するので、
+// 途中のフォルトからはそのまま再開できる(EIP は命令の先頭のまま)。
+public sealed record StringStmt(int Op, int Size, bool Address32, Prefix Prefixes, int Repeat) : Stmt
+{
+    public override void Run(EmuEnvironment env, CPU cpu) => Semantics.StringOp(env, cpu, Op, Size, Address32, (int)Prefixes, Repeat);
+}
+
 public sealed record Block(IReadOnlyList<Stmt> Statements) : Stmt
 {
     public override void Run(EmuEnvironment env, CPU cpu)
@@ -236,13 +354,6 @@ public static class Semantics
         var a = emit(sink);
         return projector(a, selector(a)(sink));
     };
-
-    // オペランドの置き場所: レジスタ番号か、アドレス式。
-    readonly record struct Place(int Reg, Expr Address)
-    {
-        public static Place Register(int reg) => new(reg, null);
-        public static Place Memory(Expr address) => new(-1, address);
-    }
 
     static Emit<Expr> Read(Place place, int type) => _ => place.Address == null ? new RegExpr(place.Reg, type) : new LoadExpr(place.Address, type);
     static Emit<Expr> Const(uint value, int type) => _ => new ImmExpr(value, type);
@@ -395,6 +506,20 @@ public static class Semantics
         from _2 in adjust == 0 ? Nothing : Statement(new AdjustStackStmt(adjust))
         select Unit.unit;
 
+    static Emit<Unit> DivideBy(Place divisor, int type, bool signed, int length) =>
+        from value in Read(divisor, type)
+        from _1 in Statement(new DivideStmt(value, type, signed))
+        from _2 in Advance(length)
+        select Unit.unit;
+
+    // CMOVcc: 条件に関わらず r/m を読む(メモリならフォルトしうる)。読んだ値を束縛して条件付きで書く。
+    static Emit<Unit> ConditionalMove(int condition, int reg, Place src, int type, int length) =>
+        from value in Read(src, type)
+        from bound in Let(value)
+        from _1 in Statement(new IfStmt(condition, new SetRegStmt(reg, type, bound), new Block([])))
+        from _2 in Advance(length)
+        select Unit.unit;
+
     static Emit<Unit> Simple(Stmt statement, int length) =>
         from _1 in Statement(statement)
         from _2 in Advance(length)
@@ -403,8 +528,9 @@ public static class Semantics
     // デコード済み命令を IR に下ろす。対象外なら null(呼び出し側は既存の経路へ)。
     public static Block Lower(Instruction instruction)
     {
-        if (instruction.Repeat != null) return null;
         var op = instruction.Opcode;
+        // REP は文字列命令にだけ意味を持つ。他の命令に付いた REP は無視して、その命令として下ろす(F3 90 = PAUSE は NOP)。
+        var repeat = instruction.Repeat switch { 0xF3 => 1, 0xF2 => 2, _ => 0 };
         var prefixes = instruction.Prefixes;
         var length = instruction.Length;
         var operand32 = instruction.OperandSize32;
@@ -479,6 +605,35 @@ public static class Semantics
             0x0FAF => MultiplyInto(Reg(), Read(Reg(), typeW), Read(Rm(), typeW), typeW, length),
             0x0FB6 or 0x0FB7 => MoveExtended(reg, Rm(), op == 0x0FB6 ? 0 : 1, false, typeW, length),
             0x0FBE or 0x0FBF => MoveExtended(reg, Rm(), op == 0x0FBE ? 0 : 1, true, typeW, length),
+            // ---- docs/adr/0003 段階 1: 高速コアから移した命令 ----
+            0x27 => Simple(new AdjustStmt(2, 0), length),
+            0x2F => Simple(new AdjustStmt(3, 0), length),
+            0x37 => Simple(new AdjustStmt(0, 0), length),
+            0x3F => Simple(new AdjustStmt(1, 0), length),
+            0xD4 when instruction.Immediate != 0 => Simple(new AdjustStmt(4, instruction.Immediate), length), // AAM 0 は通常コアで #DE
+            0xD5 => Simple(new AdjustStmt(5, instruction.Immediate), length),
+            0x60 => Simple(new PushAllStmt(typeW), length),
+            0x61 => Simple(new PopAllStmt(typeW), length),
+            0x6C or 0x6D or 0x6E or 0x6F or (>= 0xA4 and <= 0xA7) or (>= 0xAA and <= 0xAF) =>
+                Simple(new StringStmt(op, (op & 1) != 0 ? Bytes(typeW) : 1, instruction.AddressSize32, prefixes, repeat), length),
+            0x8F when reg == 0 => instruction.ModRm is { Mod: 3 } ? PopInto(Rm(), typeW, length) : Simple(new PopIntoMemoryStmt(Rm().Address, typeW), length),
+            0x9C => PushValue(typeW, _ => new FlagsExpr(typeW), length),
+            0x9D => Simple(new PopFlagsStmt(typeW), length),
+            0x9E => Simple(new FlagStmt(7), length),
+            0x9F => Move(Place.Register(4), _ => new FlagsExpr(0), 0, length),
+            0xD7 => Move(Acc(), _ => new LoadExpr(new XlatAddressExpr(), 0), 0, length),
+            >= 0xE0 and <= 0xE3 => Statement(new LoopStmt(op & 3, length, instruction.Immediate)),
+            0xF4 => Simple(new HaltStmt(), length),
+            0xF6 or 0xF7 when reg is 6 or 7 => DivideBy(Rm(), type, reg == 7, length),
+            >= 0x0F40 and <= 0x0F4F => ConditionalMove(op & 0xF, reg, Rm(), typeW, length),
+            0x0FA3 or 0x0FAB or 0x0FB3 or 0x0FBB => Simple(new BitTestStmt(Rm(), new RegExpr(reg, typeW), true, (op >> 3) & 3, typeW), length),
+            0x0FA4 or 0x0FAC => Simple(new DoubleShiftStmt(Rm(), reg, new ImmExpr(instruction.Immediate, 0), op == 0x0FA4, typeW), length),
+            0x0FA5 or 0x0FAD => Simple(new DoubleShiftStmt(Rm(), reg, new RegExpr(1, 0), op == 0x0FA5, typeW), length),
+            0x0FB0 or 0x0FB1 => Simple(new CompareExchangeStmt(Rm(), reg, type), length),
+            0x0FBA when reg >= 4 => Simple(new BitTestStmt(Rm(), new ImmExpr(instruction.Immediate, 0), false, reg & 3, typeW), length),
+            0x0FBC or 0x0FBD => from source in Read(Rm(), typeW) from _1 in Statement(new BitScanStmt(reg, source, op == 0x0FBC, typeW)) from _2 in Advance(length) select Unit.unit,
+            0x0FC0 or 0x0FC1 => Simple(new ExchangeAddStmt(Rm(), reg, type), length),
+            >= 0x0FC8 and <= 0x0FCF => Move(Place.Register(op & 7), _ => new BswapExpr(new RegExpr(op & 7, 2)), 2, length),
             _ => null,
         };
         if (program == null) return null;
@@ -490,12 +645,16 @@ public static class Semantics
     // ブロックの終端になる命令: 制御転送と STI。STI は保留中の割り込みを配送できるようにするので、
     // 1 命令ずつの実行と同じく直後の Step 境界で配送されるよう、ブロックをそこで切る(CLI は逆向きなので切らなくてよい:
     // ブロックの途中で新たに保留になる割り込みはタイマ周期(予算の境界)でしか生じない)。
+    // HLT・POPF・IN/OUT 系(INS/OUTS)も終端で、かつ連結しない(StopsChain): HLT はランナーが待機を見る必要があり、
+    // POPF は IF を立てうる(STI と同じ配送点の理由)、ポート入出力はデバイスが割り込み要求を立てうる。
     public static bool EndsBlock(Instruction instruction) => instruction.Opcode switch
     {
-        (>= 0x70 and <= 0x7F) or 0xE8 or 0xE9 or 0xEB or 0xC2 or 0xC3 or 0xFB or (>= 0x0F80 and <= 0x0F8F) => true,
+        (>= 0x70 and <= 0x7F) or (>= 0xE0 and <= 0xE3) or 0xE8 or 0xE9 or 0xEB or 0xC2 or 0xC3 or (>= 0x0F80 and <= 0x0F8F) => true,
         0xFF => instruction.ModRm is { Reg: 2 or 4 },
-        _ => false,
+        _ => StopsChain(instruction),
     };
+
+    public static bool StopsChain(Instruction instruction) => instruction.Opcode is 0xFB or 0xF4 or 0x9D or (>= 0x6C and <= 0x6F);
 
     /// 解釈器(各ノードの Evaluate/Run) ///////////////////////////////
     public static void Interpret(Stmt statement, EmuEnvironment env, CPU cpu) => statement.Run(env, cpu);
@@ -615,9 +774,27 @@ public static class Semantics
         LeaveStmt leave => Call(nameof(Leave), s.Env, s.Cpu, Const(leave.Type)),
         MultiplyStmt multiply => Call(nameof(Multiply), s.Cpu, Const(multiply.Type), CompileExpression(multiply.Value, s), Const(multiply.Signed)),
         FlagStmt flag => Call(nameof(Flag), s.Cpu, Const(flag.Kind)),
+        PopFlagsStmt popFlags => Call(nameof(PopFlags), s.Env, s.Cpu, Const(popFlags.Type)),
+        PushAllStmt pushAll => Call(nameof(PushAll), s.Env, s.Cpu, Const(pushAll.Type)),
+        PopAllStmt popAll => Call(nameof(PopAll), s.Env, s.Cpu, Const(popAll.Type)),
+        PopIntoMemoryStmt popInto => Call(nameof(PopIntoMemory), s.Env, s.Cpu, CompileExpression(popInto.Address, s), Const(popInto.Type)),
+        LoopStmt loop => Call(nameof(Loop), s.Cpu, Const(loop.Kind), Const(loop.Length), Const(loop.Displacement)),
+        HaltStmt => Expression.Assign(Expression.Field(s.Cpu, nameof(CPU.Halted)), Const(true)),
+        CompareExchangeStmt cmpxchg => Call(nameof(CompareExchange), s.Env, s.Cpu, Const(cmpxchg.Dst.IsMemory), CompilePlaceAddress(cmpxchg.Dst, s), Const(cmpxchg.Dst.Reg), Const(cmpxchg.Reg), Const(cmpxchg.Type)),
+        ExchangeAddStmt xadd => Call(nameof(ExchangeAdd), s.Env, s.Cpu, Const(xadd.Dst.IsMemory), CompilePlaceAddress(xadd.Dst, s), Const(xadd.Dst.Reg), Const(xadd.Reg), Const(xadd.Type)),
+        BitTestStmt bit => Call(nameof(BitTest), s.Env, s.Cpu, Const(bit.Dst.IsMemory), CompilePlaceAddress(bit.Dst, s), Const(bit.Dst.Reg), CompileExpression(bit.Bit, s), Const(bit.BitString), Const(bit.Op), Const(bit.Type)),
+        BitScanStmt scan => Call(nameof(BitScan), s.Cpu, Const(scan.Reg), CompileExpression(scan.Source, s), Const(scan.Forward), Const(scan.Type)),
+        DoubleShiftStmt shift => Call(nameof(DoubleShift), s.Env, s.Cpu, Const(shift.Dst.IsMemory), CompilePlaceAddress(shift.Dst, s), Const(shift.Dst.Reg), Const(shift.Reg), CompileExpression(shift.Count, s), Const(shift.Left), Const(shift.Type)),
+        DivideStmt divide => Call(nameof(Divide), s.Cpu, Const(divide.Type), CompileExpression(divide.Divisor, s), Const(divide.Signed)),
+        AdjustStmt adjust => Call(nameof(AdjustDecimal), s.Cpu, Const(adjust.Kind), Const(adjust.Immediate)),
+        StringStmt text => Call(nameof(StringOp), s.Env, s.Cpu, Const(text.Op), Const(text.Size), Const(text.Address32), Const((int)text.Prefixes), Const(text.Repeat)),
+        Block { Statements.Count: 0 } => Expression.Empty(),
         Block block => Expression.Block(block.Statements.Select(inner => CompileStatement(inner, s))),
         _ => throw new ArgumentOutOfRangeException(nameof(statement)),
     };
+
+    // メモリの置き場所ならアドレスの式、レジスタなら 0(ヘルパは IsMemory で見分ける)。
+    static Expression CompilePlaceAddress(Place place, Scope s) => place.IsMemory ? CompileExpression(place.Address, s) : Const(0u);
 
     // アドレスを評価 → 書き込み先を検査 → 値を評価 → 書く(解釈器と同じ順序)。
     static Expression CompileStore(StoreStmt store, Scope s)
@@ -649,6 +826,9 @@ public static class Semantics
         ReturnAddressExpr r => Expression.Add(Expression.Property(s.Cpu, nameof(CPU.eip)), Const((uint)r.Length)),
         SignFillExpr f => Call(nameof(SignFill), CompileExpression(f.Value, s), Const(f.Type)),
         TempExpr t => s.Temp(t.Slot),
+        FlagsExpr f => Expression.And(Eflags(s), Const(Mask(f.Type))),
+        BswapExpr b => Call(nameof(Bswap), CompileExpression(b.Value, s)),
+        XlatAddressExpr => Call(nameof(XlatAddress), s.Cpu),
         _ => throw new ArgumentOutOfRangeException(nameof(expr)),
     };
 
@@ -817,7 +997,7 @@ public static class Semantics
         if (type == 2) cpu.ebp = value; else cpu.bp = (ushort)value;
     }
 
-    // 0 CLC、1 STC、2 CMC、3 CLD、4 STD、5 CLI、6 STI
+    // 0 CLC、1 STC、2 CMC、3 CLD、4 STD、5 CLI、6 STI、7 SAHF
     public static void Flag(CPU cpu, int kind)
     {
         switch (kind)
@@ -828,7 +1008,166 @@ public static class Semantics
             case 3: cpu.df = false; break;
             case 4: cpu.df = true; break;
             case 5: cpu.jf = false; break;
-            default: cpu.jf = true; break;
+            case 6: cpu.jf = true; break;
+            default: Sahf(cpu); break;
+        }
+    }
+
+    /// docs/adr/0003 段階 1 で加えた基本操作(通常コアと同じ規則。精密性のため、状態を変える前にページを検査する) ///////////////////////////////
+    public static uint Flags(CPU cpu, int type) => cpu.eflags & Mask(type);
+
+    public static uint Bswap(uint value) => ((value & 0xFF) << 24) | ((value & 0xFF00) << 8) | ((value >> 8) & 0xFF00) | (value >> 24);
+
+    // XLAT: 通常コアと同じく DS:BX(16 ビット)+ AL(セグメントオーバーライドとアドレスサイズは見ない)。
+    public static uint XlatAddress(CPU cpu) => cpu.ds_base + (ushort)(cpu.bx + cpu.al);
+
+    public static void PopFlags(EmuEnvironment env, CPU cpu, int type) => Emu86.Alu.PopFlags(cpu, type, Pop(env, cpu, type));
+
+    // PUSHA: AX,CX,DX,BX,(開始時の SP),BP,SI,DI。8 個分の書き込み先を先に検査してから書く(途中のフォルトで一部だけ push された状態を残さない)。
+    public static void PushAll(EmuEnvironment env, CPU cpu, int type)
+    {
+        var size = Bytes(type);
+        var original = ReadRegister(cpu, 4, type);
+        var start = cpu.stack32 ? cpu.esp : cpu.sp;
+        Span<uint> pointers = stackalloc uint[8];
+        for (var index = 0; index < 8; index++)
+            pointers[index] = cpu.stack32 ? (uint)(start - size * (index + 1)) : (ushort)(start - size * (index + 1));
+        foreach (var pointer in pointers) Probe(env, cpu.ss_base + pointer, type, readsFirst: false);
+        for (var index = 0; index < 8; index++)
+            EnvWriteN(env, cpu.ss_base + pointers[index], size, index == 4 ? original : ReadRegister(cpu, index, type));
+        if (cpu.stack32) cpu.esp = pointers[7]; else cpu.sp = (ushort)pointers[7];
+    }
+
+    // POPA: DI,SI,BP,(読み飛ばし),BX,DX,CX,AX。8 個を読んでから書く(読み取りは状態を変えないので、途中のフォルトでも精密)。
+    public static void PopAll(EmuEnvironment env, CPU cpu, int type)
+    {
+        var size = Bytes(type);
+        var start = cpu.stack32 ? cpu.esp : cpu.sp;
+        Span<uint> values = stackalloc uint[8];
+        for (var index = 0; index < 8; index++)
+        {
+            var pointer = cpu.stack32 ? (uint)(start + size * index) : (ushort)(start + size * index);
+            values[index] = EnvReadN(env, cpu.ss_base + pointer, size);
+        }
+        for (var index = 0; index < 8; index++)
+            if (index != 3) WriteRegister(cpu, 7 - index, type, values[index]);
+        if (cpu.stack32) cpu.esp = (uint)(start + 8 * size); else cpu.sp = (ushort)(start + 8 * size);
+    }
+
+    // POP m: 書き込み先を検査してから pop する(pop が SP を進めた後に書き込みでフォルトしないため)。
+    public static void PopIntoMemory(EmuEnvironment env, CPU cpu, uint address, int type)
+    {
+        Probe(env, address, type, readsFirst: false);
+        Store(env, address, type, Pop(env, cpu, type));
+    }
+
+    // 0 LOOPNE、1 LOOPE、2 LOOP(CX を減らしてから判定)、3 JCXZ(CX は変えない)。通常コアと同じく CX(16 ビット)で数える。
+    public static void Loop(CPU cpu, int kind, int length, uint displacement)
+    {
+        bool taken;
+        if (kind == 3) taken = cpu.cx == 0;
+        else
+        {
+            var count = (ushort)(cpu.cx - 1);
+            cpu.cx = count;
+            taken = kind switch { 0 => count != 0 && !cpu.zf, 1 => count != 0 && cpu.zf, _ => count != 0 };
+        }
+        cpu.eip = cpu.eip + (uint)length + (taken ? displacement : 0);
+    }
+
+    // CMPXCHG: acc と r/m を比べて(CMP のフラグ)、等しければ r/m <- reg、違えば acc <- r/m。メモリは検査してから読む。
+    public static void CompareExchange(EmuEnvironment env, CPU cpu, bool memory, uint address, int dstReg, int reg, int type)
+    {
+        uint destination;
+        if (memory) { Probe(env, address, type, readsFirst: true); destination = Load(env, address, type); }
+        else destination = ReadRegister(cpu, dstReg, type);
+        var accumulator = ReadRegister(cpu, 0, type);
+        CalculateAlu(cpu, type, accumulator, destination, 7);
+        if (accumulator == destination)
+        {
+            var source = ReadRegister(cpu, reg, type);
+            if (memory) Store(env, address, type, source); else WriteRegister(cpu, dstReg, type, source);
+        }
+        else WriteRegister(cpu, 0, type, destination);
+    }
+
+    // XADD: reg <- r/m の旧値、r/m <- r/m + reg(ADD のフラグ)。レジスタ形式は通常コアと同じ順(reg を先に書く: 同じレジスタなら和が残る)。
+    public static void ExchangeAdd(EmuEnvironment env, CPU cpu, bool memory, uint address, int dstReg, int reg, int type)
+    {
+        var source = ReadRegister(cpu, reg, type);
+        if (memory)
+        {
+            Probe(env, address, type, readsFirst: true);
+            var destination = Load(env, address, type);
+            Store(env, address, type, CalculateAlu(cpu, type, destination, source, 0));
+            WriteRegister(cpu, reg, type, destination);
+        }
+        else
+        {
+            var destination = ReadRegister(cpu, dstReg, type);
+            var sum = CalculateAlu(cpu, type, destination, source, 0);
+            WriteRegister(cpu, reg, type, destination);
+            WriteRegister(cpu, dstReg, type, sum);
+        }
+    }
+
+    // BT 系: r/m の bit 番目を CF へ。BTS/BTR/BTC は書き戻す(BT は書かない)。bitString ならビット番号(符号付き)でワードを選ぶ。
+    public static void BitTest(EmuEnvironment env, CPU cpu, bool memory, uint address, int dstReg, uint bit, bool bitString, int op, int type)
+    {
+        var bits = Bits(type);
+        if (memory && bitString) address += (uint)(((int)bit >> (type == 1 ? 4 : 5)) * Bytes(type));
+        var mask = 1u << ((int)bit & (bits - 1));
+        uint value;
+        if (memory)
+        {
+            if (op != 0) Probe(env, address, type, readsFirst: true);
+            value = Load(env, address, type);
+        }
+        else value = ReadRegister(cpu, dstReg, type);
+        cpu.cf = (value & mask) != 0;
+        if (op == 0) return;
+        value = op switch { 1 => value | mask, 2 => value & ~mask, _ => value ^ mask };
+        if (memory) Store(env, address, type, value); else WriteRegister(cpu, dstReg, type, value);
+    }
+
+    // BSF/BSR: 源が 0 なら ZF=1 で書かない。そうでなければ ZF=0 でビット位置を書く。
+    public static void BitScan(CPU cpu, int reg, uint source, bool forward, int type)
+    {
+        if (source == 0) { cpu.zf = true; return; }
+        cpu.zf = false;
+        WriteRegister(cpu, reg, type, (uint)BitOps.BitScanIndex(source, forward, Bits(type)));
+    }
+
+    // SHLD/SHRD: count は 5 ビット。0 なら結果もフラグも変えない(書き戻しもしない)。
+    public static void DoubleShift(EmuEnvironment env, CPU cpu, bool memory, uint address, int dstReg, int srcReg, uint count, bool left, int type)
+    {
+        var n = (int)(count & 0x1F);
+        if (n == 0) return;
+        uint destination;
+        if (memory) { Probe(env, address, type, readsFirst: true); destination = Load(env, address, type); }
+        else destination = ReadRegister(cpu, dstReg, type);
+        var (result, cf, of) = Emu86.Alu.DoubleShift(destination, ReadRegister(cpu, srcReg, type), n, Bits(type), left);
+        if (memory) Store(env, address, type, result); else WriteRegister(cpu, dstReg, type, result);
+        cpu.cf = cf; cpu.of = of; cpu.zf = (result & Mask(type)) == 0; cpu.sf = (result & Msb(type)) != 0;
+    }
+
+    public static void Divide(CPU cpu, int type, uint divisor, bool signed) => Emu86.Alu.Divide(cpu, type, divisor, signed);
+
+    public static void AdjustDecimal(CPU cpu, int kind, uint immediate) => Emu86.Alu.AdjustDecimal(cpu, kind, immediate);
+
+    // 文字列命令。repeat: 0 単発、1 REP/REPE、2 REPNE。CMPS/SCAS だけ ZF で打ち切る。
+    public static void StringOp(EmuEnvironment env, CPU cpu, int op, int size, bool address32, int prefixes, int repeat)
+    {
+        var source = OverrideBase((Prefix)prefixes, cpu) ?? cpu.ds_base;
+        if (repeat == 0) { StringOps.Element(env, cpu, op, size, address32, source); return; }
+        var repeatZf = repeat == 1;
+        var checkZf = op is 0xA6 or 0xA7 or 0xAE or 0xAF;
+        while ((address32 ? cpu.ecx : cpu.cx) != 0)
+        {
+            StringOps.Element(env, cpu, op, size, address32, source);
+            if (address32) cpu.ecx -= 1; else cpu.cx = (ushort)(cpu.cx - 1);
+            cpu.Decode.CommitRepeat(cpu);
+            if (checkZf && cpu.zf != repeatZf) break;
         }
     }
 }

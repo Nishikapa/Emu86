@@ -8,6 +8,7 @@ using static Emu86.Segments;
 using static Emu86.CpuStates;
 using static Emu86.Fetch;
 using static Emu86.Decoder;
+using static Emu86.Alu;
 
 namespace Emu86;
 
@@ -144,19 +145,6 @@ static partial class Instructions
         from _1 in SetLog("Popf_9D")
         from type in OperandType(true)
         from fl in Pop(type)
-        from _2 in SetCpu(cpu =>
-        {
-            var nv = type == 2 ? fl.dd : (cpu.eflags & 0xFFFF0000) | fl.dw;
-            if (cpu.pe && cpu.cpl != 0)
-            {
-                // CPL>0(V86 モードも CPL=3): IOPL は変更不可。CPL>IOPL なら IF も変更不可。VM/RF は POPF では変わらない。
-                const uint IOPL = 0x3000, IF = 0x200, VM = 0x20000, RF = 0x10000;
-                var keep = IOPL | VM | RF;
-                if (cpu.cpl > ((cpu.eflags >> 12) & 3)) keep |= IF;
-                nv = (nv & ~keep) | (cpu.eflags & keep);
-            }
-            cpu.eflags = nv;
-            return cpu;
-        })
+        from _2 in SetCpu(cpu => { PopFlags(cpu, type, fl.Value); return cpu; }) // CPL>0 の IOPL/IF の保護は Alu.PopFlags(IR と共有)
         select unit;
 }

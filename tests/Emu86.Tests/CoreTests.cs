@@ -301,6 +301,25 @@ static class CoreTests
             // CALL/JMP(相対・間接)、RET、LEAVE、PUSH r/m
             [0xE8, 0x10, 0x00, 0x00, 0x00], [0x66, 0xE8, 0x10, 0x00], [0xFF, 0xD3], [0xFF, 0xD4], [0xFF, 0x13], [0x66, 0xFF, 0xD3], [0xFF, 0xE3], [0xFF, 0x23], [0x66, 0xFF, 0xE3],
             [0xC3], [0xC2, 0x08, 0x00], [0x66, 0xC3], [0x66, 0xC2, 0x02, 0x00], [0xC9], [0x66, 0xC9], [0xFF, 0x33], [0xFF, 0xF3], [0xFF, 0x34, 0x24], [0xFF, 0xF4],
+            // docs/adr/0003 段階 1: PUSHF/POPF、SAHF/LAHF、PUSHA/POPA、POP r/m、LOOP/JCXZ、HLT、XLAT、BSWAP
+            [0x9C], [0x66, 0x9C], [0x9D], [0x66, 0x9D], [0x9E], [0x9F], [0x60], [0x66, 0x60], [0x61], [0x66, 0x61],
+            [0x8F, 0xC3], [0x8F, 0x03], [0x66, 0x8F, 0xC3], [0x8F, 0x04, 0x24], [0xE2, 0x10], [0xE1, 0x10], [0xE0, 0xF0], [0xE3, 0x10], [0xF4], [0xD7],
+            [0x0F, 0xC8], [0x0F, 0xCB],
+            // CMOVcc、XADD、CMPXCHG
+            [0x0F, 0x44, 0xC3], [0x0F, 0x45, 0x03], [0x66, 0x0F, 0x4C, 0xC3], [0x0F, 0x4F, 0x03],
+            [0x0F, 0xC1, 0xD8], [0x0F, 0xC1, 0xC0], [0x0F, 0xC1, 0x03], [0x0F, 0xC0, 0xE0], [0x66, 0x0F, 0xC1, 0x03],
+            [0x0F, 0xB1, 0xD8], [0x0F, 0xB1, 0x03], [0x0F, 0xB0, 0xE0], [0x66, 0x0F, 0xB1, 0xC3], [0x0F, 0xB1, 0xC3],
+            // BT/BTS/BTR/BTC(レジスタ、即値、メモリのビット列アドレッシング)、BSF/BSR、SHLD/SHRD
+            [0x0F, 0xA3, 0xD8], [0x0F, 0xAB, 0xD8], [0x0F, 0xB3, 0xC3], [0x0F, 0xBB, 0xC3], [0x66, 0x0F, 0xA3, 0xD8], [0x0F, 0xA3, 0x03], [0x0F, 0xAB, 0x03], [0x0F, 0xBB, 0x03],
+            [0x0F, 0xBA, 0xE0, 0x05], [0x0F, 0xBA, 0xE8, 0x1F], [0x0F, 0xBA, 0xF0, 0x21], [0x0F, 0xBA, 0xF8, 0x00], [0x0F, 0xBA, 0x2B, 0x21], [0x0F, 0xBA, 0x23, 0x07], [0x66, 0x0F, 0xBA, 0xE0, 0x11],
+            [0x0F, 0xBC, 0xC3], [0x0F, 0xBD, 0xC3], [0x0F, 0xBC, 0x03], [0x0F, 0xBD, 0x03], [0x66, 0x0F, 0xBC, 0xC3], [0x66, 0x0F, 0xBD, 0x03],
+            [0x0F, 0xA4, 0xD8, 0x04], [0x0F, 0xAC, 0xD8, 0x01], [0x0F, 0xA5, 0x03], [0x0F, 0xAD, 0xC3], [0x66, 0x0F, 0xA4, 0xD8, 0x04], [0x0F, 0xA4, 0xD8, 0x00], [0x0F, 0xA4, 0xD8, 0x20], [0x66, 0x0F, 0xAD, 0x03],
+            // BCD
+            [0x37], [0x3F], [0x27], [0x2F], [0xD4, 0x0A], [0xD5, 0x0A], [0xD4, 0x07], [0xD5, 0xFF],
+            // 文字列命令(単発、REP/REPNE、16 ビット幅、16 ビットアドレッシング、セグメントオーバーライド、I/O)と REP の無視(PAUSE、非文字列命令)
+            [0xA4], [0xA5], [0x66, 0xA5], [0xAA], [0xAB], [0xAC], [0xAD], [0xA6], [0xA7], [0xAE], [0xAF], [0x6C], [0x6D], [0x6E], [0x6F],
+            [0xF3, 0xA4], [0xF3, 0xA5], [0x66, 0xF3, 0xAB], [0xF3, 0xAD], [0xF3, 0xA6], [0xF3, 0xA7], [0xF2, 0xAE], [0xF2, 0xAF], [0xF3, 0x6D], [0xF3, 0x6F],
+            [0x67, 0xF3, 0xA4], [0x67, 0xAB], [0x26, 0xF3, 0xA5], [0x64, 0xA4], [0xF3, 0x90], [0xF3, 0x01, 0xD8], [0xF2, 0x0F, 0xBC, 0xC3],
         ];
         uint[] values = [0, 1, 0x7F, 0x80, 0xFF, 0x7FFF, 0x8000, 0xFFFF, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF, 0x12345678, 0x3000];
         static void Prepare(EmuEnvironment env, byte[] code)
@@ -318,12 +337,20 @@ static class CoreTests
         Equal(true, Semantics.Lower(DecodeInstruction(reference, new CPU { code32 = true })) is { Statements: [IfStmt { Condition: 5, Then: SetEipStmt { Value: BranchTargetExpr { Length: 2, Displacement: 0x10 } }, Else: AdvanceStmt { Length: 2 } }] },
             "JNE lowers to a conditional EIP assignment");
         Prepare(reference, [0xF7, 0xF3]);
-        Equal(true, Semantics.Lower(DecodeInstruction(reference, new CPU { code32 = true })) == null, "DIV is outside the IR");
+        Equal(true, Semantics.Lower(DecodeInstruction(reference, new CPU { code32 = true })) is { Statements: [DivideStmt { Type: 2, Signed: false, Divisor: RegExpr { Reg: 3 } }, AdvanceStmt { Length: 2 }] }, "DIV lowers to a divide statement");
+        Prepare(reference, [0xD4, 0x00]);
+        Equal(true, Semantics.Lower(DecodeInstruction(reference, new CPU { code32 = true })) == null, "AAM 0 stays outside the IR (#DE in the reference core)");
+        Prepare(reference, [0xF4]);
+        Equal(true, Semantics.Lower(DecodeInstruction(reference, new CPU { code32 = true })) is { Statements: [HaltStmt, AdvanceStmt] } && Semantics.StopsChain(DecodeInstruction(reference, new CPU { code32 = true })), "HLT lowers and stops chaining");
         Prepare(reference, [0xFF, 0xD3]);
         Equal(true, Semantics.Lower(DecodeInstruction(reference, new CPU { code32 = true })) is { Statements: [LetStmt { Slot: 0, Value: RegExpr { Reg: 3, Type: 2 } }, PushStmt { Type: 2, Value: ReturnAddressExpr { Length: 2 } }, SetEipStmt { Value: NearTargetExpr { Value: TempExpr { Slot: 0 }, Operand32: true } }] },
             "CALL ebx binds the target before the push and sets EIP from the bound value");
         Prepare(reference, [0xF3, 0xAB]);
-        Equal(true, Semantics.Lower(DecodeInstruction(reference, new CPU { code32 = true })) == null, "REP is outside the IR");
+        Equal(true, Semantics.Lower(DecodeInstruction(reference, new CPU { code32 = true })) is { Statements: [StringStmt { Op: 0xAB, Size: 4, Address32: true, Repeat: 1 }, AdvanceStmt { Length: 2 }] }, "REP STOSD lowers to a repeated string statement");
+        Prepare(reference, [0xF2, 0x66, 0xAF]);
+        Equal(true, Semantics.Lower(DecodeInstruction(reference, new CPU { code32 = true })) is { Statements: [StringStmt { Op: 0xAF, Size: 2, Repeat: 2 }, AdvanceStmt { Length: 3 }] }, "REPNE SCASW lowers with the 16-bit width");
+        Prepare(reference, [0xF3, 0x6D]);
+        Equal(true, Semantics.EndsBlock(DecodeInstruction(reference, new CPU { code32 = true })), "REP INSD ends a block (port input can raise an interrupt)");
         foreach (var code in encodings)
         {
             Prepare(reference, code);
@@ -353,6 +380,37 @@ static class CoreTests
                 cases++;
             }
         }
+        // DIV/IDIV(0 除算は両方とも例外になるので、除数が 0 でない組だけ)。メモリ形式は [ebx] = 0x3000 の 0x83828180 で割る。
+        byte[][] divisions = [[0xF7, 0xF3], [0xF7, 0xFB], [0xF6, 0xF3], [0xF6, 0xFB], [0x66, 0xF7, 0xF3], [0x66, 0xF7, 0xFB], [0xF7, 0x33], [0xF7, 0x3B], [0x66, 0xF7, 0x3B]];
+        foreach (var code in divisions)
+        {
+            Prepare(reference, code);
+            var block = Semantics.Lower(DecodeInstruction(reference, new CPU { code32 = true }));
+            var run = Semantics.Compile(block);
+            var memoryForm = code[^1] is 0x33 or 0x3B;
+            var divisorMask = Mask(code[0] == 0xF6 ? 0 : code[0] == 0x66 ? 1 : 2);
+            foreach (var left in values)
+            foreach (var right in values.Where(value => memoryForm ? value == 0x3000 : (value & divisorMask) != 0))
+            {
+                var expected = CreateCpu(left, right);
+                Prepare(reference, code);
+                Equal(true, SlowStep(reference, expected, null).IsSuccess, $"reference {Convert.ToHexString(code)}");
+                var interpreted = CreateCpu(left, right);
+                Prepare(interpreterEnv, code);
+                Semantics.Interpret(block, interpreterEnv, interpreted);
+                Equal(Convert.ToHexString(CpuBytes(expected)), Convert.ToHexString(CpuBytes(interpreted)), $"interpreter {Convert.ToHexString(code)} {left:x} {right:x}");
+                var compiled = CreateCpu(left, right);
+                Prepare(compilerEnv, code);
+                run(compilerEnv, compiled);
+                Equal(Convert.ToHexString(CpuBytes(expected)), Convert.ToHexString(CpuBytes(compiled)), $"compiled {Convert.ToHexString(code)} {left:x} {right:x}");
+                cases++;
+            }
+        }
+        // HLT は CPU のバイト列に含まれない Halted を立てる。
+        Prepare(interpreterEnv, [0xF4]);
+        var halted = CreateCpu();
+        Semantics.Interpret(Semantics.Lower(DecodeInstruction(interpreterEnv, new CPU { code32 = true })), interpreterEnv, halted);
+        Equal((true, 1u), (halted.Halted, halted.eip), "HLT sets Halted and advances");
         // 1 命令あたりの時間(ADD eax, ebx): 高速コア、IR 解釈器、IR コンパイル済み。
         Prepare(reference, [0x01, 0xD8]);
         var block2 = Semantics.Lower(DecodeInstruction(reference, new CPU { code32 = true }));

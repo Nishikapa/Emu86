@@ -262,7 +262,7 @@ static public class FastCore
                 break;
             }
             case 0x6C or 0x6D or 0x6E or 0x6F or 0xA4 or 0xA5 or 0xA6 or 0xA7 or 0xAA or 0xAB or 0xAC or 0xAD or 0xAE or 0xAF: // 文字列命令(単発)
-                FStrOne(env, cpu, op, (op & 1) != 0 ? (typeW == 2 ? 4 : 2) : 1, a32, segBase);
+                StringOps.Element(env, cpu, op, (op & 1) != 0 ? (typeW == 2 ? 4 : 2) : 1, a32, segBase);
                 break;
             case 0xA8 or 0xA9: // TEST acc, imm
             {
@@ -376,7 +376,7 @@ static public class FastCore
                 var checkZf = op2 is 0xA6 or 0xA7 or 0xAE or 0xAF;
                 while ((a32 ? cpu.ecx : cpu.cx) != 0)
                 {
-                    FStrOne(env, cpu, op2, size, a32, segBase);
+                    StringOps.Element(env, cpu, op2, size, a32, segBase);
                     if (a32) cpu.ecx -= 1; else cpu.cx = (ushort)(cpu.cx - 1);
                     cpu.Decode.CommitRepeat(cpu);
                     if (checkZf && cpu.zf != repZf) break;
@@ -549,74 +549,6 @@ static public class FastCore
 
         cpu.eip = startEip + len;
         return true;
-    }
-
-    // 文字列命令を 1 要素分だけ実行する(REP ループ・単発の両方から使う)。
-    // source は源(DS:SI)の基底(セグメントオーバーライド適用済み)。先(ES:DI)は固定。
-    static void FStrOne(EmuEnvironment env, CPU c, byte op, int size, bool a32, uint source)
-    {
-        switch (op)
-        {
-            case 0xA4 or 0xA5: // MOVS
-            {
-                var src = source + (a32 ? c.esi : c.si);
-                var dst = c.es_base + (a32 ? c.edi : c.di);
-                EnvWriteN(env, dst, size, EnvReadN(env, src, size));
-                FStrAdvance(c, size, a32, si: true, di: true);
-                break;
-            }
-            case 0xA6 or 0xA7: // CMPS
-            {
-                var s = EnvReadN(env, source + (a32 ? c.esi : c.si), size);
-                var d = EnvReadN(env, c.es_base + (a32 ? c.edi : c.di), size);
-                SetSubtractionFlags(c, size == 1 ? 0 : size == 2 ? 1 : 2, s, d);
-                FStrAdvance(c, size, a32, si: true, di: true);
-                break;
-            }
-            case 0xAA or 0xAB: // STOS
-            {
-                var dst = c.es_base + (a32 ? c.edi : c.di);
-                EnvWriteN(env, dst, size, size == 1 ? c.al : size == 2 ? c.ax : c.eax);
-                FStrAdvance(c, size, a32, si: false, di: true);
-                break;
-            }
-            case 0xAC or 0xAD: // LODS
-            {
-                var v = EnvReadN(env, source + (a32 ? c.esi : c.si), size);
-                if (size == 1) c.al = (byte)v; else if (size == 2) c.ax = (ushort)v; else c.eax = v;
-                FStrAdvance(c, size, a32, si: true, di: false);
-                break;
-            }
-            case 0x6C or 0x6D: // INS: ポート DX から 1 要素読んで [ES:DI] へ(XP の ATA ドライバは rep insw でセクタを読む)
-            {
-                var dst = c.es_base + (a32 ? c.edi : c.di);
-                EnvWriteN(env, dst, size, EnvInPortN(env, c.dx, size));
-                FStrAdvance(c, size, a32, si: false, di: true);
-                break;
-            }
-            case 0x6E or 0x6F: // OUTS: [DS:SI] から 1 要素読んでポート DX へ
-            {
-                EnvOutPortN(env, c.dx, size, EnvReadN(env, source + (a32 ? c.esi : c.si), size));
-                FStrAdvance(c, size, a32, si: true, di: false);
-                break;
-            }
-            case 0xAE or 0xAF: // SCAS
-            {
-                uint a = size == 1 ? c.al : size == 2 ? c.ax : c.eax;
-                var m = EnvReadN(env, c.es_base + (a32 ? c.edi : c.di), size);
-                SetSubtractionFlags(c, size == 1 ? 0 : size == 2 ? 1 : 2, a, m);
-                FStrAdvance(c, size, a32, si: false, di: true);
-                break;
-            }
-        }
-    }
-
-    // DF に従って SI/DI(a32 なら ESI/EDI)を size 分だけ増減する。
-    static void FStrAdvance(CPU c, int size, bool a32, bool si, bool di)
-    {
-        var delta = c.df ? -size : size;
-        if (si) { if (a32) c.esi = (uint)(c.esi + delta); else c.si = (ushort)(c.si + delta); }
-        if (di) { if (a32) c.edi = (uint)(c.edi + delta); else c.di = (ushort)(c.di + delta); }
     }
 
     // PUSH: SP/ESP を減らしてからスタックトップへ書く(Push と同一)。
