@@ -18,7 +18,7 @@ internal static class EmulationRunner
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(snapshotInterval);
         output ??= Console.Out;
         error ??= Console.Error;
-        EnvSyncPaging(env, cpu);
+        env.Paging.Sync(cpu);
         var diagnostics = new RunDiagnostics(options.Diagnostics, env, cpu, output, trace, count);
         var executor = new InstructionExecutor(useFast: !options.Slow);
         // 命令ごとに CPU を見る診断(全命令トレース・ブレークポイント・監視点)があるときは、ブロックをまとめて実行できない。

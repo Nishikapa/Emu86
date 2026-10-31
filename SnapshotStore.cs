@@ -110,7 +110,7 @@ public static class SnapshotStore
                 }
             }
         }
-        Mmu.EnvSyncPaging(env, cpu);
+        env.Paging.Sync(cpu);
         return (count, cpu);
     }
 

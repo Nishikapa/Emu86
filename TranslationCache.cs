@@ -170,7 +170,7 @@ public sealed class TranslationCache
     TranslatedBlock Find(EmuEnvironment env, CPU cpu)
     {
         var linear = GetCodeAddr(cpu).addr;
-        var physical = env.PagingOn ? EnvTranslate(env, linear, false) : EnvAlias(linear);
+        var physical = env.Paging.Enabled ? EnvTranslate(env, linear, false) : EnvAlias(linear);
         if (physical >= (uint)codePages.Length << 12) return null;
         var index = (int)(physical & (Size - 1));
         ref var entry = ref entries[index];

@@ -307,8 +307,8 @@ public partial class CPU
 
     private uint cr0 { get; set; }
     public uint cr2 { get; set; }          // #PF 発生時にフォルトした線形アドレスを保持する
-    public uint cr3 { get; private set; }  // EnvSyncPaging がページテーブル基底として参照する
-    public uint cr4 { get; private set; }  // EnvSyncPaging が PAE ビットを参照する
+    public uint cr3 { get; private set; }  // Paging.Sync がページテーブル基底として参照する
+    public uint cr4 { get; private set; }  // Paging.Sync が PAE ビットを参照する
 
     static public readonly Accessor<CPU, ushort> _sp = new(c => c.sp, c => v => { c.sp = v; return c; });
     static public readonly Accessor<CPU, ushort> _bp = new(c => c.bp, c => v => { c.bp = v; return c; });
@@ -351,7 +351,7 @@ public partial class CPU
     public int cpl => this.vm ? 3 : this.cs & 3;
 
     // ページング有効(CR0.PG)。変換に使う実際の状態は EmuEnvironment 側に
-    // ミラーされる(EnvSyncPaging)。CR 書き込みとスナップショット復元時に同期する。
+    // ミラーされる(Paging.Sync)。CR 書き込みとスナップショット復元時に同期する。
     public bool pg => 0 != (this.cr0 & 0x80000000u);
 
     // 書き込み保護(CR0.WP)。リング0 でも読み取り専用ページへの書き込みを #PF にする。

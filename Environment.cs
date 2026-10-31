@@ -19,35 +19,13 @@ namespace Emu86;
 // 線形→物理アドレス変換(ページング・TLB)と、物理メモリの読み書き(RAM・VGA ウィンドウ・ROM 窓・別名)。
 static public class Mmu
 {
-    // CPU の CR0.PG/CR3 をページング変換状態へ反映する(CR 書き込み・スナップショット復元時に呼ぶ)。
-    static public void EnvSyncPaging(EmuEnvironment env, CPU cpu)
-    {
-        env.PagingOn = cpu.pg;
-        env.PaeOn = 0 != (cpu.cr4 & 0x20);
-        env.WpOn = cpu.wp; // CR0.WP: リング0 の読み取り専用ページ書き込みを禁じる
-        // PAE では CR3 は 32 バイト境界の PDPT を指す。
-        env.Cr3Base = cpu.cr3 & (env.PaeOn ? 0xFFFFFFE0 : 0xFFFFF000);
-        env.FlushTlb();
-    }
-
-    // 線形→物理アドレス変換(2レベルページテーブル + 直結 TLB)。
-    // リング0 のブートコードが対象のため、U/S・R/W の保護チェックは行わない(存在チェックのみ)。
-    static internal uint EnvTranslate(EmuEnvironment env, uint lin, bool write)
-    {
-        var vpn = lin >> 12;
-        var idx = vpn & (EmuEnvironment.TlbSize - 1);
-        if (write)
-        {
-            if (env.TlbTagW[idx] == (0x80000000u | vpn))
-                return env.TlbPhysW[idx] | (lin & 0xFFF);
-        }
-        else if (env.TlbTagR[idx] == (0x80000000u | vpn))
-            return env.TlbPhysR[idx] | (lin & 0xFFF);
-        return EnvWalkPageTable(env, lin, write);
-    }
+    // 線形→物理アドレス変換(TLB を引き、外れたらページテーブルを歩く)。
+    // リング0 のブートコードが対象のため、U/S の保護チェックは行わない(存在と、CR0.WP 時の R/W のみ)。
+    static internal uint EnvTranslate(EmuEnvironment env, uint lin, bool write) =>
+        env.Paging.TryLookup(lin, write, out var physical) ? physical : EnvWalkPageTable(env, lin, write);
 
     static uint EnvWalkPageTable(EmuEnvironment env, uint lin, bool write) =>
-        EnvTlbFill(env, lin, write, EnvWalk(env, lin, write, env.PaeOn ? PaeLevels : LegacyLevels));
+        env.Paging.Fill(lin, write, EnvWalk(env, lin, write, env.Paging.Pae ? PaeLevels : LegacyLevels));
 
     // ページテーブルの 1 段。Shift/IndexBits が線形アドレス中のインデックス、EntrySize がエントリ幅。
     // HasAccessBits は R/W と Accessed を持つ段(PAE の PDPT は持たない)、LargePageMask は PS ビットで
@@ -71,7 +49,7 @@ static public class Mmu
     // 途中の段(PDE)の Accessed は最終段の検査が通ってから立てる(Linux のページ管理が参照する)。
     static uint EnvWalk(EmuEnvironment env, uint lin, bool write, PageLevel[] levels)
     {
-        var tableBase = env.Cr3Base;
+        var tableBase = env.Paging.Cr3Base;
         var writable = true;
         var pendingAccess = false; // Accessed を後から立てる途中段(PDE)
         uint pendingAddress = 0, pendingEntry = 0;
@@ -107,18 +85,9 @@ static public class Mmu
     // 違反なら保護フォルトを投げる。許されるなら Accessed/Dirty 更新用のビットを返す。
     static uint EnvCheckWrite(EmuEnvironment env, uint lin, bool write, bool rw)
     {
-        if (write && env.WpOn && !rw)
+        if (write && env.Paging.WriteProtect && !rw)
             throw new PageFaultException(lin, 0b011); // present + write + supervisor
         return write ? 0x40u : 0u;
-    }
-
-    static uint EnvTlbFill(EmuEnvironment env, uint lin, bool write, uint physPage)
-    {
-        var vpn = lin >> 12;
-        var idx = vpn & (EmuEnvironment.TlbSize - 1);
-        if (write) { env.TlbTagW[idx] = 0x80000000u | vpn; env.TlbPhysW[idx] = physPage; }
-        else { env.TlbTagR[idx] = 0x80000000u | vpn; env.TlbPhysR[idx] = physPage; }
-        return physPage | (lin & 0xFFF);
     }
 
     // ページテーブル自体へのアクセスは物理アドレス直指定(変換しない)。
@@ -140,7 +109,7 @@ static public class Mmu
     // (SeaBIOS の 32bit 初期化コードは 0xFFFF1xxx で動くため、ここを直さないとモナド版の ModRM デコードが失敗する)。
     static public IEnumerable<byte> EnvGetMemoryDatas(EmuEnvironment env, uint addr)
     {
-        if (env.PagingOn) return EnumerateLinear(env, addr);
+        if (env.Paging.Enabled) return EnumerateLinear(env, addr);
         var physical = EnvAlias(addr);
         return physical < (uint)env.OneMegaMemory_.Length
             ? new ArraySegment<byte>(env.OneMegaMemory_, (int)physical, env.OneMegaMemory_.Length - (int)physical)
@@ -190,11 +159,10 @@ static public class Mmu
 
     static internal void EnvWriteByte(EmuEnvironment env, uint addr, byte val)
     {
-        if (env.PagingOn) addr = EnvTranslate(env, addr, write: true);
+        var paging = env.Paging.Enabled;
+        if (paging) addr = EnvTranslate(env, addr, write: true);
         addr = EnvAlias(addr);
-        if (env.PagingOn && addr >= env.WatchLo && addr < env.WatchHi) env.WatchTriggered = true;
-        if (env.WriteLog != null && addr >= env.WLogLo && addr < env.WLogHi)
-            env.WriteLog.Add($"{env.CurEip:x8}: [{addr:x8}]={val:x2}");
+        env.Diagnostics?.OnWriteByte(addr, val, paging);
         if (VgaDevice.Contains(addr)) { env.Vga.Write(addr, val); return; }
         if (addr < (uint)env.OneMegaMemory_.Length)
         {
@@ -212,16 +180,16 @@ static public class Mmu
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     static void EnvWriteValue(EmuEnvironment env, uint addr, uint value, int size)
     {
-        if ((addr & 0xFFF) > 0x1000 - size || env.WriteLog != null)
+        if ((addr & 0xFFF) > 0x1000 - size || env.Diagnostics is { WriteLog: not null })
         {
             for (var byteIndex = 0; byteIndex < size; byteIndex++)
                 EnvWriteByte(env, addr + (uint)byteIndex, (byte)(value >> (8 * byteIndex)));
             return;
         }
-        if (env.PagingOn) addr = EnvTranslate(env, addr, write: true);
+        var paging = env.Paging.Enabled;
+        if (paging) addr = EnvTranslate(env, addr, write: true);
         addr = EnvAlias(addr);
-        if (env.PagingOn && (ulong)addr + (uint)size > env.WatchLo && addr < env.WatchHi)
-            env.WatchTriggered = true;
+        env.Diagnostics?.OnWrite(addr, size, paging);
         if (VgaDevice.Contains(addr))
         {
             // VGA ウィンドウはページ境界に揃っているので、ここに来る複数バイトは全部ウィンドウ内。
@@ -254,7 +222,7 @@ static public class Mmu
 
     static public byte EnvGetMemoryData8(EmuEnvironment env, uint addr)
     {
-        if (env.PagingOn) addr = EnvTranslate(env, addr, write: false);
+        if (env.Paging.Enabled) addr = EnvTranslate(env, addr, write: false);
         addr = EnvAlias(addr);
         if (VgaDevice.Contains(addr)) return env.Vga.Read(addr);
         return addr < (uint)env.OneMegaMemory_.Length ? env.OneMegaMemory_[addr] : EnvReadOutsideRam(env, addr);
@@ -266,7 +234,7 @@ static public class Mmu
 
     static internal ushort EnvGetMemoryData16(EmuEnvironment env, uint addr)
     {
-        if (env.PagingOn)
+        if (env.Paging.Enabled)
         {
             if ((addr & 0xFFF) >= 0xFFF)
                 return (ushort)(EnvGetMemoryData8(env, addr) | (EnvGetMemoryData8(env, addr + 1) << 8));
@@ -280,7 +248,7 @@ static public class Mmu
 
     static internal uint EnvGetMemoryData32(EmuEnvironment env, uint addr)
     {
-        if (env.PagingOn)
+        if (env.Paging.Enabled)
         {
             if ((addr & 0xFFF) > 0xFFC)
                 return (uint)(EnvGetMemoryData8(env, addr)
@@ -392,7 +360,7 @@ static public class DataAccess
     // CR 書き込み後はページング状態を env へ同期する(PG 切替・CR3 変更で TLB もフラッシュ)。
     static public State<Unit> SetCrReg(int reg, uint data) =>
         from _1 in GetControlRegister(reg).Set(data)
-        from _2 in Effect(EnvSyncPaging)
+        from _2 in Effect((env, cpu) => env.Paging.Sync(cpu))
         select Unit.unit;
 
     static public State<Unit> SetRegData(int reg, Data data) =>
@@ -805,13 +773,9 @@ static public class Interrupts
     static State<Unit> InterruptProtected(int vector, bool hasError, uint errorCode) =>
         from _log in GetDataFromEnvCpu((env, cpu) =>
         {
-            if (env.IntLog != null && cpu.pg)
-            {
-                var entry = $"vec={vector:x2} err={(hasError ? errorCode.ToString("x") : "-")} at cs:eip={cpu.cs:x4}:{cpu.eip:x8} esp={cpu.esp:x8}";
-                env.IntLog.Add(entry);
-                // V86 モード(NT の BIOS 呼び出し中)からの配送は件数が少ないので全件を別に残す。
-                if (cpu.vm) env.IntLogV86.Add($"{entry} (instr {env.Tsc}, cr3={cpu.cr3:x8})");
-            }
+            if (env.Diagnostics is { InterruptLog: not null } diagnostics && cpu.pg)
+                diagnostics.LogInterrupt($"vec={vector:x2} err={(hasError ? errorCode.ToString("x") : "-")} at cs:eip={cpu.cs:x4}:{cpu.eip:x8} esp={cpu.esp:x8}",
+                    fromV86: cpu.vm, env.Tsc, cpu.cr3);
             return Unit.unit;
         })
         from gateLo in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryData32(env, cpu.idt_base + (uint)vector * 8))
@@ -1050,9 +1014,6 @@ static public class Segments
 
 public partial class EmuEnvironment : IDisposable
 {
-    // --piclog: PIC マスクの変化を記録する。
-    public bool PicLog;
-
     // 搭載RAM量。SeaBIOS の init 再配置は 1MB 超のRAMを要求するため、
     // 1MBちょうどではなく拡張メモリを持たせる。BIOS(bios.bin)は先頭1MBの末尾に配置される。
     public const int RamSize = 256 * 1024 * 1024; // 256MB(Debian の initramfs をロードするには 32MB では不足)
@@ -1091,28 +1052,11 @@ public partial class EmuEnvironment : IDisposable
     // 翻訳キャッシュ(docs/adr/0002)。RAM への書き込みで該当ページの翻訳を捨てる。スナップショットには含めない。
     public TranslationCache Translations;
 
-    // ページング変換状態(CPU の CR0.PG/CR3 のミラー。EnvSyncPaging で同期)。
-    // TLB は直結マップ(tag = 0x80000000 | vpn、0 は無効)。読み取り用と、
-    // Dirty ビット設定済みを保証する書き込み用を分けて持つ。
-    // いずれも過渡状態なのでスナップショットには保存しない(復元時に再同期される)。
-    public bool PagingOn;
-    public bool PaeOn;
-    public bool WpOn;
-    public uint Cr3Base;
+    // ページング変換状態と TLB(CPU の制御レジスタのミラー。Paging.Sync で同期。スナップショットには含めない)。
+    public readonly Paging Paging = new();
 
-    // 物理アドレス書き込みウォッチポイント(デバッグ用)。WatchLo<=phys<WatchHi の
-    // 書き込みで WatchTriggered を立て、Runner が原因命令の EIP を出力する。
-    public uint WatchLo, WatchHi;
-    public bool WatchTriggered;
-
-    // プロテクトモード(ページング有効)割り込み配送のログ(デバッグ用、null で無効)。
-    public System.Collections.Generic.List<string> IntLog;
-    public System.Collections.Generic.List<string> IntLogV86 = [];
-
-    // 物理アドレス範囲への書き込みを値付きでログする(デバッグ用)。
-    public uint WLogLo, WLogHi;
-    public uint CurEip; // Runner が命令実行前に現在 EIP をセットする(ログの帰属用)
-    public System.Collections.Generic.List<string> WriteLog;
+    // ウォッチポイント・書き込みログ・割り込みログ(デバッグ用)。何も有効でなければ null。
+    public MemoryDiagnostics Diagnostics;
 
     // タイムスタンプカウンタの代用(Runner が毎命令、実行済み命令数を書き込む)。
     public ulong Tsc;
@@ -1125,13 +1069,4 @@ public partial class EmuEnvironment : IDisposable
 
     // デバッグレジスタ DR0-DR7(保持のみ。ブレークポイント機能はなし)。
     public uint[] Dr = new uint[8];
-
-    public const int TlbSize = 4096;
-    public uint[] TlbTagR = new uint[TlbSize], TlbPhysR = new uint[TlbSize];
-    public uint[] TlbTagW = new uint[TlbSize], TlbPhysW = new uint[TlbSize];
-    public void FlushTlb()
-    {
-        Array.Clear(TlbTagR);
-        Array.Clear(TlbTagW);
-    }
 }

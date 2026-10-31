@@ -37,13 +37,11 @@ static class CoreTests
     {
         Array.Clear(env.OneMegaMemory_);
         code.CopyTo(env.OneMegaMemory_, 0);
-        env.PagingOn = false;
-        env.PaeOn = false;
-        env.WpOn = false;
-        env.WatchLo = env.WatchHi = 0;
-        env.WatchTriggered = false;
-        env.WriteLog = null;
-        env.FlushTlb();
+        env.Paging.Enabled = false;
+        env.Paging.Pae = false;
+        env.Paging.WriteProtect = false;
+        env.Paging.Flush();
+        env.Diagnostics = null;
     }
 
     static byte[] CpuBytes(CPU cpu)
@@ -77,8 +75,8 @@ static class CoreTests
         Equal(true, SlowEnv.OneMegaMemory_.AsSpan().SequenceEqual(FastEnv.OneMegaMemory_), $"memory {Convert.ToHexString(code)}");
         if (diagnostics)
         {
-            Equal(SlowEnv.WatchTriggered, FastEnv.WatchTriggered, "watchpoint");
-            Equal(string.Join("|", SlowEnv.WriteLog ?? []), string.Join("|", FastEnv.WriteLog ?? []), "write log");
+            Equal(SlowEnv.Diagnostics?.WatchTriggered, FastEnv.Diagnostics?.WatchTriggered, "watchpoint");
+            Equal(string.Join("|", SlowEnv.Diagnostics?.WriteLog ?? []), string.Join("|", FastEnv.Diagnostics?.WriteLog ?? []), "write log");
         }
         expected?.Invoke(slowCpu, SlowEnv);
         expected?.Invoke(fastCpu, FastEnv);
@@ -127,9 +125,9 @@ static class CoreTests
         BitConverter.GetBytes(0x0003u).CopyTo(env.OneMegaMemory_, 0xA000);
         BitConverter.GetBytes(0x5003u).CopyTo(env.OneMegaMemory_, 0xA004);
         if (secondPresent) BitConverter.GetBytes(0x7003u).CopyTo(env.OneMegaMemory_, 0xA008);
-        env.Cr3Base = 0x9000;
-        env.PagingOn = true;
-        env.WpOn = true;
+        env.Paging.Cr3Base = 0x9000;
+        env.Paging.Enabled = true;
+        env.Paging.WriteProtect = true;
     }
 
     static byte[] Store(int type) => type == 0 ? [0x88, 0x03] : type == 1 ? [0x66, 0x89, 0x03] : [0x89, 0x03];
@@ -145,8 +143,8 @@ static class CoreTests
             {
                 foreach (var address in new uint[] { 0xfff03000, 0xffffffff })
                     Check(Store(type), CreateCpu(0x87654321, address));
-                Check(Store(type), CreateCpu(0x87654321, 0x1fff), env => { MapPages(env); env.WatchLo = 0x5fff; env.WatchHi = 0x6000; env.WLogLo = 0x5000; env.WLogHi = 0x8000; env.WriteLog = []; }, (_, env) => Equal(true, env.WatchTriggered, "paged watch"), diagnostics: true);
-                Check(Store(type), CreateCpu(0x87654321, 0x1000), env => { MapPages(env); env.WatchLo = 0x5000; env.WatchHi = 0x5001; env.WLogLo = 0x5000; env.WLogHi = 0x5001; env.WriteLog = []; }, diagnostics: true);
+                Check(Store(type), CreateCpu(0x87654321, 0x1fff), env => { MapPages(env); env.Diagnostics = new() { WatchLo = 0x5fff, WatchHi = 0x6000, WriteLogLo = 0x5000, WriteLogHi = 0x8000, WriteLog = [] }; }, (_, env) => Equal(true, env.Diagnostics.WatchTriggered, "paged watch"), diagnostics: true);
+                Check(Store(type), CreateCpu(0x87654321, 0x1000), env => { MapPages(env); env.Diagnostics = new() { WatchLo = 0x5000, WatchHi = 0x5001, WriteLogLo = 0x5000, WriteLogHi = 0x5001, WriteLog = [] }; }, diagnostics: true);
             }
         }
         if (extended)
@@ -198,7 +196,7 @@ static class CoreTests
                 Entry(directory + 1 * 4, 0x00000083, size);      // lin 0x400000-0x7FFFFF -> 4MB ページ(物理 0)
                 Entry(directory + 2 * 4, 0xB001, size);          // lin 0x800000-: 読み取り専用 PDE -> PT 0xB000
                 large = directory + 1 * 4; largeLinear = 0x401234; missingDirectoryLinear = 0xC00000; readOnlyDirectoryLinear = 0x800000; missingDirectory = directory + 3 * 4;
-                env.PaeOn = false; env.Cr3Base = 0x9000;
+                env.Paging.Pae = false; env.Paging.Cr3Base = 0x9000;
             }
             else
             {
@@ -208,12 +206,12 @@ static class CoreTests
                 Entry(directory + 1 * 8, 0x00000083, size);      // lin 0x200000-0x3FFFFF -> 2MB ページ(物理 0)
                 Entry(directory + 2 * 8, 0xB001, size);          // lin 0x400000-: 読み取り専用 PDE -> PT 0xB000
                 large = directory + 1 * 8; largeLinear = 0x201234; missingDirectoryLinear = 0x600000; readOnlyDirectoryLinear = 0x400000; missingDirectory = directory + 3 * 8;
-                env.PaeOn = true; env.Cr3Base = 0xC000;
+                env.Paging.Pae = true; env.Paging.Cr3Base = 0xC000;
             }
             Entry(table + 2 * size, 0x5003, size);               // lin 0x2000 -> 0x5000(R/W)
             Entry(table + 3 * size, 0x6001, size);               // lin 0x3000 -> 0x6000(読み取り専用)
             Entry(readOnlyDirectory + 0 * size, 0x7003, size);   // 読み取り専用 PDE の下の R/W PTE -> 0x7000
-            env.PagingOn = true; env.WpOn = false; env.FlushTlb();
+            env.Paging.Enabled = true; env.Paging.WriteProtect = false; env.Paging.Flush();
             var label = pae ? "PAE" : "legacy";
 
             void Write(uint linear, byte value) => SetMemOrRegData((true, linear), value.ToTypeData())(env, cpu, null);
@@ -226,17 +224,17 @@ static class CoreTests
             Equal((byte)0xAB, EnvGetMemoryData8(env, 0x2005), $"{label} 4K read");
             Equal(0x20u, Raw(directory) & 0x60, $"{label} read sets Accessed on the directory entry only");
             Equal(0x20u, Raw(table + 2 * size) & 0x60, $"{label} read sets Accessed but not Dirty on the page entry");
-            Equal(0x80000002u, env.TlbTagR[2], $"{label} read fills the read TLB");
-            Equal(0u, env.TlbTagW[2], $"{label} read leaves the write TLB empty");
+            Equal(0x80000002u, env.Paging.TagR[2], $"{label} read fills the read TLB");
+            Equal(0u, env.Paging.TagW[2], $"{label} read leaves the write TLB empty");
             Write(0x2006, 0xCD);
             Equal((byte)0xCD, env.OneMegaMemory_[0x5006], $"{label} 4K write lands in the mapped page");
             Equal(0x60u, Raw(table + 2 * size) & 0x60, $"{label} write sets Dirty on the page entry");
             Equal(0x20u, Raw(directory) & 0x60, $"{label} write leaves the directory entry without Dirty");
-            Equal(0x80000002u, env.TlbTagW[2], $"{label} write fills the write TLB");
+            Equal(0x80000002u, env.Paging.TagW[2], $"{label} write fills the write TLB");
             Write(0x3000, 0x11);
             Equal((byte)0x11, env.OneMegaMemory_[0x6000], $"{label} ring0 writes a read-only page while CR0.WP=0");
             Equal(0x60u, Raw(table + 3 * size) & 0x60, $"{label} WP=0 write marks the read-only page dirty");
-            env.WpOn = true; env.FlushTlb();
+            env.Paging.WriteProtect = true; env.Paging.Flush();
             Equal((0x3001u, 3u), Fault(() => Write(0x3001, 0x22)), $"{label} WP=1 write to a read-only page faults with protection+write");
             Equal((byte)0x11, EnvGetMemoryData8(env, 0x3000), $"{label} read-only page still readable");
             Equal((readOnlyDirectoryLinear, 3u), Fault(() => Write(readOnlyDirectoryLinear, 0x33)), $"{label} read-only PDE overrides a R/W PTE");
@@ -246,13 +244,13 @@ static class CoreTests
             Equal((0x4000u, 2u), Fault(() => Write(0x4000, 0x44)), $"{label} not-present page entry on write");
             Equal((missingDirectoryLinear, 0u), Fault(() => EnvGetMemoryData8(env, missingDirectoryLinear)), $"{label} not-present directory entry");
             Equal(0u, Raw(missingDirectory), $"{label} missing directory entry untouched");
-            env.WpOn = false; env.FlushTlb();
+            env.Paging.WriteProtect = false; env.Paging.Flush();
             Equal((byte)0xCD, EnvGetMemoryData8(env, largeLinear), $"{label} large page read");
             Equal(0x20u, Raw(large) & 0x60, $"{label} large page read sets Accessed only");
             Write(largeLinear + 1, 0x55);
             Equal((byte)0x55, env.OneMegaMemory_[0x1235], $"{label} large page write");
             Equal(0x60u, Raw(large) & 0x60, $"{label} large page write sets Dirty");
-            env.WpOn = true; env.FlushTlb();
+            env.Paging.WriteProtect = true; env.Paging.Flush();
             Entry(large, 0x00000081 | 0x60, size); // 読み取り専用の大ページ
             Equal((largeLinear, 3u), Fault(() => Write(largeLinear, 0x66)), $"{label} read-only large page faults on write with WP=1");
             if (pae)
@@ -488,14 +486,14 @@ static class CoreTests
         MapPages(paged);
         var pagedCpu = Start();
         CPU._cr0.setter(pagedCpu)(0x80000001); CPU._cr3.setter(pagedCpu)(0x9000);
-        EnvSyncPaging(paged, pagedCpu);
+        paged.Paging.Sync(pagedCpu);
         var pagedExecutor = new InstructionExecutor(true);
         paged.Translations.Enabled = true;
         paged.Translations.Chain = false;
         for (var step = 0; step < 60; step++) Equal(true, pagedExecutor.Step(paged, pagedCpu).IsSuccess, $"paged step {step}");
         Equal(true, pagedExecutor.UsedTranslation && pagedCpu.eip == 0x100, "paged loop runs as a block");
         BitConverter.GetBytes(0u).CopyTo(paged.OneMegaMemory_, 0xA004); // 線形 0x1000-0x1FFF を不在に
-        paged.FlushTlb();
+        paged.Paging.Flush();
         var eaxBefore = pagedCpu.eax;
         var faulted = false;
         try { pagedExecutor.Step(paged, pagedCpu); }
@@ -689,7 +687,7 @@ static class CoreTests
                 (cpu, _) => Equal(code.Contains((byte)0xF3) ? 0u : 3u, cpu.ecx, $"REP INS/OUTS count {Convert.ToHexString(code)}"));
         }
         for (var type = 1; type < 3; type++)
-            Check(Store(type), CreateCpu(0x12345678, 0x1000), env => { MapPages(env); BitConverter.GetBytes(3u).CopyTo(env.OneMegaMemory_, 0xA004); env.WatchLo = 0; env.WatchHi = 1; }, (_, env) => Equal(true, env.WatchTriggered, "watch at physical zero"), diagnostics: true);
+            Check(Store(type), CreateCpu(0x12345678, 0x1000), env => { MapPages(env); BitConverter.GetBytes(3u).CopyTo(env.OneMegaMemory_, 0xA004); env.Diagnostics = new() { WatchLo = 0, WatchHi = 1 }; }, (_, env) => Equal(true, env.Diagnostics.WatchTriggered, "watch at physical zero"), diagnostics: true);
         Reset(SlowEnv, [0xD9, 0xE8, 0xDD, 0x1B]);
         var cpu = CreateCpu(right: 0xfff03000);
         Equal(true, SlowStep(SlowEnv, cpu, null).IsSuccess, "FLD1");
@@ -726,9 +724,7 @@ static class CoreTests
                 Check(code.ToArray(), CreateCpu(0x87654321), env =>
                 {
                     if (address == 0x1FFF) MapPages(env);
-                    env.WriteLog = logWrites ? [] : null;
-                    env.WLogLo = 0; env.WLogHi = 0x10000;
-                    env.WatchLo = 0x5FFF; env.WatchHi = 0x6000;
+                    env.Diagnostics = new() { WriteLog = logWrites ? [] : null, WriteLogLo = 0, WriteLogHi = 0x10000, WatchLo = 0x5FFF, WatchHi = 0x6000 };
                 }, diagnostics: true);
             }
         }

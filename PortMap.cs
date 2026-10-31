@@ -41,9 +41,9 @@ static class PortMap
         Port("PIT gate/speaker", 0x61, read: (env, p) => env.Pit.Read(p), write: (env, p, v) => env.Pit.Write(p, v)),
         Port("debug console", 0x402, write: (_, _, v) => Console.Error.Write((char)v)),
         Port("PIC master command", 0x20, read: (env, _) => env.PicMaster.Isr, write: (env, _, v) => env.PicMaster.WriteCommand(v)),
-        Port("PIC master data", 0x21, read: (env, _) => env.PicMaster.Mask, write: (env, _, v) => env.PicMaster.WriteData(v, env.PicLog)),
+        Port("PIC master data", 0x21, read: (env, _) => env.PicMaster.Mask, write: (env, _, v) => env.PicMaster.WriteData(v)),
         Port("PIC slave command", 0xA0, read: (env, _) => env.PicSlave.Isr, write: (env, _, v) => env.PicSlave.WriteCommand(v)),
-        Port("PIC slave data", 0xA1, read: (env, _) => env.PicSlave.Mask, write: (env, _, v) => env.PicSlave.WriteData(v, env.PicLog)),
+        Port("PIC slave data", 0xA1, read: (env, _) => env.PicSlave.Mask, write: (env, _, v) => env.PicSlave.WriteData(v)),
         Port("ACPI SMI command", 0xB2, write: (env, p, v) => { env.Acpi.Write(p, v); env.IoPort[p] = v; }),
         // PIIX4 リセット制御: bit2 でシステムリセット(bit1 でフル/ハードリセットの区別、どちらも再起動)。
         Port("PIIX4 reset control", 0xCF9, write: (env, p, v) => { if ((v & 0x04) != 0) env.ResetRequested = true; env.IoPort[p] = v; }),

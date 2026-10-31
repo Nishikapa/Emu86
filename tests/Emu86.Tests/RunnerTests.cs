@@ -170,7 +170,7 @@ static class RunnerTests
         using var environment = new EmuEnvironment(memory: new byte[0x10000]);
         var invalidStack = new CPU { eip = 0x100, esp = 0x8000 };
         CPU._cr0.setter(invalidStack)(0x80010001);
-        EnvSyncPaging(environment, invalidStack);
+        environment.Paging.Sync(invalidStack);
         using var output = new StringWriter();
         var diagnostics = new RunDiagnostics(RunOptions.Parse(["--breakeip", "100"]).Diagnostics, environment, invalidStack, output, null, 0);
         Equal(true, diagnostics.BeforeInstruction(0), "unmapped stack still stops");
@@ -235,8 +235,8 @@ static class RunnerTests
         using var right = new EmuEnvironment(new byte[65536], ata: new AtaDevice(null));
         _ = new RunDiagnostics(RunOptions.Parse(["--atalog", "--pcilog", "--piclog"]).Diagnostics, left, new CPU(), TextWriter.Null, null, 0);
         _ = new RunDiagnostics(RunOptions.Parse([]).Diagnostics, right, new CPU(), TextWriter.Null, null, 0);
-        Equal(true, left.Ata.Log && left.Pci.Log && left.PicLog, "diagnostic enabled on left");
-        Equal(false, right.Ata.Log || right.Pci.Log || right.PicLog, "no global diagnostic leakage");
+        Equal(true, left.Ata.Log && left.Pci.Log && left.PicMaster.Log && left.PicSlave.Log, "diagnostic enabled on left");
+        Equal(false, right.Ata.Log || right.Pci.Log || right.PicMaster.Log || right.PicSlave.Log, "no global diagnostic leakage");
     }
 
     // 中断要求はタイマ周期(1 万命令)の境界で受け付けられ、その時点の CPU のコピーが公開される。
