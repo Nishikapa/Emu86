@@ -20,9 +20,9 @@ internal static class EmulationRunner
         error ??= Console.Error;
         env.Paging.Sync(cpu);
         var diagnostics = new RunDiagnostics(options.Diagnostics, env, cpu, output, trace, count);
-        var executor = new InstructionExecutor(useFast: !options.Slow);
+        var executor = new InstructionExecutor(useTranslation: !options.Slow);
         // 命令ごとに CPU を見る診断(全命令トレース・ブレークポイント・監視点)があるときは、ブロックをまとめて実行できない。
-        // 翻訳キャッシュは --slow 以外では常に使う(1 命令のブロックが高速コアの役)。基本ブロックと連結は、--no-translate と
+        // 翻訳キャッシュは --slow 以外では常に使う(IR の対象外の命令だけ通常コア)。基本ブロックと連結は、--no-translate と
         // 命令ごとに CPU を見る診断では切る(1 命令ずつ: Step = 1 命令)。
         env.Translations.Enabled = !options.Slow;
         var blocks = options.Translate && !options.Diagnostics.PerInstruction;
@@ -32,9 +32,8 @@ internal static class EmulationRunner
         env.Translations.Transfers = env.Translations.Enabled && trace != null && options.Diagnostics.Trace ? [] : null;
         var swatch = System.Diagnostics.Stopwatch.StartNew();
         long lastReport = count;
-        long fastCount = 0;
-        // 翻訳ブロックの外で実行した命令の先頭 2 バイト別の回数(高速コア / 通常コア)。翻訳が切れる理由の調査用([outside] に上位を出す)。
-        Dictionary<ushort, long> outsideFast = [], outsideReference = [];
+        // 翻訳ブロックの外(通常コア)で実行した命令の先頭 2 バイト別の回数。IR に無い命令の調査用([outside] に上位を出す)。
+        Dictionary<ushort, long> outsideReference = [];
         long translatedCount = 0;
         long haltSkipped = 0, halts = 0;
         if (env.NextIrq == 0) env.NextIrq = count + IrqPeriod;
@@ -115,11 +114,10 @@ internal static class EmulationRunner
             var completed = true;
             try
             {
-                // まず高速コアで 1 命令実行し、未対応の命令だけモナド版へフォールバックする。
+                // 翻訳キャッシュ(IR)で実行し、IR の対象外の命令だけ通常コアで実行する。
                 var result = executor.Step(env, cpu);
-                if (executor.UsedFastPath) fastCount += executor.Executed;
                 if (executor.UsedTranslation) translatedCount += executor.Executed;
-                else if (env.Translations.Enabled && result.IsSuccess) CountOutside(executor.UsedFastPath ? outsideFast : outsideReference, env, cpu.cs_base + executor.LastEip);
+                else if (env.Translations.Enabled && result.IsSuccess) CountOutside(outsideReference, env, cpu.cs_base + executor.LastEip);
                 if (result.IsSuccess)
                     cpu = result.cpu;
                 else
@@ -205,11 +203,11 @@ internal static class EmulationRunner
         if (halts > 0)
             error.WriteLine($"[halt] {halts:N0} waits skipped {haltSkipped:N0} instructions of idle time ({100.0 * haltSkipped / Math.Max(1, count):F1}% of the count)");
         if (!options.Slow && count > 0)
-            output.WriteLine($"fast-path coverage: {fastCount:N0}/{count:N0} ({100.0 * fastCount / count:F2}%)");
+            output.WriteLine($"fast-path coverage: {translatedCount:N0}/{count:N0} ({100.0 * translatedCount / count:F2}%)");
         if (env.Translations.Enabled && count > 0)
             error.WriteLine($"[translation] {env.Translations.Translated:N0} sites lowered ({env.Translations.Blocks:N0} as blocks), {env.Translations.Compiled:N0} compiled; {translatedCount:N0}/{count:N0} instructions ({100.0 * translatedCount / count:F2}%: {env.Translations.Interpreted:N0} interpreted, {env.Translations.Executed:N0} compiled); {env.Translations.Runs:N0} block runs ({(env.Translations.Runs == 0 ? 0 : (double)translatedCount / env.Translations.Runs):F1} instructions each) in {env.Translations.Steps:N0} steps; {env.Translations.Invalidations:N0} page invalidations, {env.Translations.LowerMilliseconds:F0} ms lowering, {env.Translations.CompileMilliseconds:F0} ms compiling");
         if (env.Translations.Enabled && count > 0)
-            error.WriteLine($"[outside] fast core {outsideFast.Values.Sum():N0}: {Top(outsideFast)}; reference core {outsideReference.Values.Sum():N0}: {Top(outsideReference)}");
+            error.WriteLine($"[outside] reference core {outsideReference.Values.Sum():N0}: {Top(outsideReference)}");
         diagnostics.ReportStop(count);
         control?.Stopped(cpu, count);
         return count;

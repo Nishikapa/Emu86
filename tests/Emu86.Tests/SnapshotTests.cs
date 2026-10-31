@@ -39,6 +39,7 @@ static class SnapshotTests
         {
             var executor = new InstructionExecutor(fast);
             var env = Environment();
+            if (fast) Ir.SingleStep(env); // IR で 1 命令ずつ(コードを直接書き換えるたびに InvalidateAll)
             var cpu = Cpu();
             byte[] invalid = [0x66, 0x67, 0x64, 0xF0, 0x0F, 0xFF];
             invalid.CopyTo(env.Ram, 0x100);
@@ -48,6 +49,7 @@ static class SnapshotTests
             Equal(false, cpu.lock_prefix, "LOCK cleanup");
             byte[] move = [0xB8, 0x78, 0x56, 0x34, 0x12];
             move.CopyTo(env.Ram, 0x100);
+            env.Translations.InvalidateAll();
             Equal(true, executor.Step(env, cpu).IsSuccess, "instruction after unsupported opcode");
             Equal(0x12345678u, cpu.eax, "no leaked operand prefix");
 
@@ -55,6 +57,7 @@ static class SnapshotTests
             Paging(env, cpu);
             env.Ram[0x100] = 0x66;
             env.Ram[0x101] = 0x50;
+            env.Translations.InvalidateAll();
             initial = CpuState(cpu);
             Throws<PageFaultException>(() => executor.Step(env, cpu), "PUSH fault");
             Equal(initial, CpuState(cpu), "PUSH rollback");
@@ -66,6 +69,7 @@ static class SnapshotTests
             Equal((ushort)0x4321, BitConverter.ToUInt16(env.Ram, 0x5000), "PUSH value after retry");
 
             env = Environment(); cpu = Cpu(); Paging(env, cpu);
+            if (fast) Ir.SingleStep(env);
             Page(env, 1, 0x5000); Page(env, 3, 0x6000);
             env.Ram[0x100] = 0xF3; env.Ram[0x101] = 0xA4;
             env.Ram[0x6000] = 0x11; env.Ram[0x6001] = 0x22;

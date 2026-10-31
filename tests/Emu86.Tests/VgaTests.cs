@@ -21,7 +21,7 @@ static class VgaTests
         EnvOutPort(env, 0x3C0, (byte)value);
     }
 
-    // CPU の通常のメモリアクセス経路(両コア)で 0xB8000 への書き込みが VRAM へ向かうことを確認する。
+    // CPU の通常のメモリアクセス経路(通常コアと IR)で 0xB8000 への書き込みが VRAM へ向かうことを確認する。
     static void MemoryWindow()
     {
         foreach (var fast in new[] { false, true })
@@ -32,6 +32,7 @@ static class VgaTests
                            0x66, 0xC7, 0x05, 0x02, 0x80, 0x0B, 0x00, 0x1F, 0x42, // mov word [0xB8002], 0x421F
                            0xA0, 0x00, 0x80, 0x0B, 0x00];                     // mov al, [0xB8000]
             code.CopyTo(env.Ram, 0x100);
+            if (fast) Ir.SingleStep(env);
             var executor = new InstructionExecutor(fast);
             for (var step = 0; step < 3; step++) Equal(true, executor.Step(env, cpu).IsSuccess, $"vga memory step {step} fast={fast}");
             Equal((byte)0x41, env.Vga.Vram[0], "text character in plane 0");

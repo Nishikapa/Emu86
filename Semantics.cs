@@ -1,6 +1,5 @@
 using System.Linq.Expressions;
 using static Emu86.Conversions;
-using static Emu86.FastCore;
 using static Emu86.Operands;
 using static Emu86.Alu;
 using static Emu86.Mmu;
@@ -380,7 +379,8 @@ public sealed record Block(IReadOnlyList<Stmt> Statements) : Stmt
 {
     public override void Run(EmuEnvironment env, CPU cpu)
     {
-        foreach (var statement in Statements) statement.Run(env, cpu);
+        // インターフェース経由の foreach は列挙子を割り当てるので添字で回す(解釈器の 1 命令ごとに通る)。
+        for (var index = 0; index < Statements.Count; index++) Statements[index].Run(env, cpu);
     }
 }
 
@@ -432,7 +432,7 @@ public static class Semantics
         return Unit.unit;
     };
 
-    // dst <- dst op src。CMP(kind 7)は書き戻さない(高速コアと同じ)。
+    // dst <- dst op src。CMP(kind 7)は書き戻さない(通常コアと同じ: 書き戻すとページの Dirty ビットが立つ)。
     static Emit<Unit> Binary(int kind, Place dst, Emit<Expr> src, int type, int length) =>
         from left in Read(dst, type)
         from right in src
@@ -923,19 +923,19 @@ public static class Semantics
         _ => throw new ArgumentOutOfRangeException(nameof(expr)),
     };
 
-    /// 両バックエンドが共有する基本操作(高速コアと同じ演算規則とメモリ経路) ///////////////////////////////
+    /// 両バックエンドが共有する基本操作(通常コアと同じ演算規則とメモリ経路) ///////////////////////////////
     public static uint ReadRegister(CPU cpu, int reg, int type) => type switch
     {
-        0 => FReg8(cpu, reg),
-        1 => FReg16(cpu, reg),
+        0 => ReadRegister8(cpu, reg),
+        1 => ReadRegister16(cpu, reg),
         _ => ReadRegister32(cpu, reg),
     };
 
     public static void WriteRegister(CPU cpu, int reg, int type, uint value)
     {
-        if (type == 0) FReg8Set(cpu, reg, (byte)value);
-        else if (type == 1) FReg16Set(cpu, reg, (ushort)value);
-        else FReg32Set(cpu, reg, value);
+        if (type == 0) WriteRegister8(cpu, reg, (byte)value);
+        else if (type == 1) WriteRegister16(cpu, reg, (ushort)value);
+        else WriteRegister32(cpu, reg, value);
     }
 
     public static uint AluWithFlags(CPU cpu, int type, uint left, uint right, int kind) => CalculateAlu(cpu, type, left, right, kind);
@@ -979,17 +979,19 @@ public static class Semantics
     {
         if (!env.Paging.Enabled) return;
         var size = Bytes(type);
+        // ページをまたぐときは次のページの先頭を検査する(フォルトの線形アドレスは、1 バイトずつ書く通常コアと同じく、そのページの先頭)。
+        var next = (address & ~0xFFFu) + 0x1000;
         var crosses = (address & 0xFFF) > 0x1000 - (uint)size;
         if (readsFirst)
         {
             EnvTranslate(env, address, false);
-            if (crosses) EnvTranslate(env, address + (uint)size - 1, false);
+            if (crosses) EnvTranslate(env, next, false);
         }
         EnvTranslate(env, address, true);
-        if (crosses) EnvTranslate(env, address + (uint)size - 1, true);
+        if (crosses) EnvTranslate(env, next, true);
     }
 
-    // PUSH: 書き込み先を検査して書いてから SP/ESP を減らす(高速コアは先に減らす。フォルト時に SP を変えないための順序)。
+    // PUSH: 書き込み先を検査して書いてから SP/ESP を減らす(通常コアの Push は先に減らして実行器が戻す。フォルト時に SP を変えないための順序)。
     public static void Push(EmuEnvironment env, CPU cpu, int type, uint value)
     {
         var size = Bytes(type);
@@ -1000,7 +1002,14 @@ public static class Semantics
         if (cpu.stack32) cpu.esp = pointer; else cpu.sp = (ushort)pointer;
     }
 
-    public static uint Pop(EmuEnvironment env, CPU cpu, int type) => FPop(env, cpu, type);
+    // POP: スタックトップから読んでから SP/ESP を増やす(読み取りのフォルトでは何も変えない)。
+    public static uint Pop(EmuEnvironment env, CPU cpu, int type)
+    {
+        var size = Bytes(type);
+        var value = EnvReadN(env, cpu.ss_base + (cpu.stack32 ? cpu.esp : cpu.sp), size);
+        if (cpu.stack32) cpu.esp = (uint)(cpu.esp + size); else cpu.sp = (ushort)(cpu.sp + size);
+        return value;
+    }
 
     public static uint Extend(uint value, int fromType, bool signed, int toType)
     {

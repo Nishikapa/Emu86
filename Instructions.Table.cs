@@ -230,7 +230,7 @@ static partial class Instructions
     {
         get
         {
-            var executor = new InstructionExecutor(useFast: false);
+            var executor = new InstructionExecutor(useTranslation: false);
             return (env, cpu, opcodes) => executor.Step(env, cpu);
         }
     }

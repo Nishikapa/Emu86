@@ -180,8 +180,15 @@ static public class Mmu
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     static void EnvWriteValue(EmuEnvironment env, uint addr, uint value, int size)
     {
-        if ((addr & 0xFFF) > 0x1000 - size || env.Diagnostics is { WriteLog: not null })
+        var crosses = (addr & 0xFFF) > 0x1000 - size;
+        if (crosses || env.Diagnostics is { WriteLog: not null })
         {
+            // ページをまたぐ書き込みは両方のページを先に検査する(2 つ目が不在なら、実機と同じく一部だけ書かれた状態を残さずにフォルト。IR の Probe と同じ)。
+            if (crosses && env.Paging.Enabled)
+            {
+                EnvTranslate(env, addr, write: true);
+                EnvTranslate(env, (addr & ~0xFFFu) + 0x1000, write: true);
+            }
             for (var byteIndex = 0; byteIndex < size; byteIndex++)
                 EnvWriteByte(env, addr + (uint)byteIndex, (byte)(value >> (8 * byteIndex)));
             return;
@@ -585,7 +592,7 @@ static public class StringOps
 
     static uint StrDst(CPU cpu) => cpu.es_base + (StrA32(cpu) ? cpu.edi : cpu.di);
 
-    // 1 要素分の命令的な形(高速コアと IR が使う)。source は源(DS:SI)の基底(セグメントオーバーライド適用済み)、先(ES:DI)は固定。
+    // 1 要素分の命令的な形(IR の StringStmt が使う)。source は源(DS:SI)の基底(セグメントオーバーライド適用済み)、先(ES:DI)は固定。
     // 書き込み先の検査は EnvWriteN に任せる(読み取りが先なので、フォルト時に状態は変わっていない)。
     static internal void Element(EmuEnvironment env, CPU c, int op, int size, bool a32, uint source)
     {

@@ -95,7 +95,7 @@ internal sealed class RunOptions
             Word("max").Select(_ => long.MaxValue).Or(Integer), (o, v) => o.Limit = v),
         Of("Run", "--snapshot-interval", "count", "Save a snapshot every count instructions (default 100000000, 0 = only at the end)",
             Integer, (o, v) => o.SnapshotInterval = v == 0 ? long.MaxValue : v),
-        Flag("Run", "--slow", "Run every instruction on the LINQ core instead of the fast core", o => o.Slow = true),
+        Flag("Run", "--slow", "Run every instruction on the LINQ core (no IR, no translation cache)", o => o.Slow = true),
         Flag("Run", "--noirq", "Do not deliver hardware interrupts", o => o.NoIrq = true),
         Flag("Run", "--no-translate", "Run one instruction per step through the IR instead of translating hot basic blocks and chaining them (the default is 40-50% faster; per-instruction diagnostics also run one instruction per step; see docs/adr/0002 and 0003)", o => o.Translate = false),
         Of("Run", "--compile-after", "count", $"Compile a translated block to a delegate after count executions (default {TranslationCache.CompileAfter})",

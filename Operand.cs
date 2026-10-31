@@ -34,11 +34,12 @@ static public partial class Operands
         select Unit.unit;
 
     // dst <- dst op src。kind は Calc と同じ(0=ADD 1=OR 2=ADC 3=SBB 4=AND 5=SUB 6=XOR 7=CMP)。
+    // CMP(kind 7)はフラグだけで、書き戻さない(メモリ先に書き戻すとページの Dirty ビットが立ってしまう。IR と同じ)。
     static public State<Unit> Binary(Operand dst, Operand src, int kind) =>
         from left in dst.Read
         from right in src.Read
         from result in Calc(left, right, kind)
-        from _ in dst.Write(result)
+        from _ in kind == 7 ? States.Pass : dst.Write(result)
         select Unit.unit;
 
     // left & right のフラグ(CF=OF=0、ZF/SF/PF)だけ更新し、結果は捨てる。TEST。

@@ -65,7 +65,7 @@ public sealed class TranslatedBlock(Block[] instructions, uint[] offsets, bool s
 }
 
 // 翻訳キャッシュ。ブロックの先頭物理アドレス(とコードセグメントの D ビット)をキーにした直結表(256K 項、1 項 16 バイト)。
-//   1. 最初の実行で、その 1 命令だけを IR に下ろして解釈実行する(docs/adr/0003 段階 3: 高速コアの代わり)
+//   1. SingleAfter 回目(既定 2)の実行で、その 1 命令だけを IR に下ろして解釈実行する(docs/adr/0003 段階 3。1 回目は通常コア)
 //   2. BlockAfter 回実行されたら先頭から複数命令のブロックに下ろし直す(BlockLimit = 1 の「1 命令ずつ」の設定では行わない)
 //   3. CompileAfter 回実行されたら Expression.Compile でデリゲートにする(1 ブロックあたり 1ms 前後)
 //   IR の対象外で始まる位置は「翻訳不可」と記録して再デコードを避ける(通常コアへ)。
@@ -124,7 +124,7 @@ public sealed class TranslationCache
     public TranslationCache(int ramSize) => codePages = new byte[(ramSize + 0xFFF) >> 12];
 
     // 翻訳済みブロックがあれば予算の範囲で実行して true(executed = 完了した命令数、lastEip = 最後の命令の先頭)。
-    // 未翻訳・対象外なら false(呼び出し側が高速コアへ)。先頭の物理アドレスへの変換はフェッチと同じ経路なので、
+    // 未翻訳・対象外なら false(呼び出し側が通常コアへ)。先頭の物理アドレスへの変換はフェッチと同じ経路なので、
     // 不在ページなら同じ #PF が出る。
     // ブロックの連結(docs/adr/0002 段階 6): ブロックが分岐で終わり、予算が残り、分岐先も翻訳済みなら、ランナーへ戻らずに
     // 続けて実行する。止まるのは、予算・世代の変化(自己書き換え)・STI(保留中の割り込みの配送点)・翻訳済みでない分岐先。
