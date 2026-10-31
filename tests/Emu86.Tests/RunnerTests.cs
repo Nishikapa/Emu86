@@ -124,7 +124,7 @@ static class RunnerTests
         using var env = new EmuEnvironment(memory: new byte[0x10000]);
         var cpu = new CPU { eip = 0x100, code32 = true, stack32 = true, esp = 0x8000, eflags = 2 };
         byte[] code = [0x40, 0x83, 0xC3, 0x03, 0xEB, 0xFA];
-        code.CopyTo(env.OneMegaMemory_, 0x100);
+        code.CopyTo(env.Ram, 0x100);
         setup?.Invoke(cpu, env);
         using var output = new StringWriter();
         using var trace = new StringWriter();
@@ -158,10 +158,10 @@ static class RunnerTests
         {
             cpu.code32 = false; cpu.stack32 = false; cpu.eflags = 0x202;
             env.PicMasterMask = 0;
-            BitConverter.GetBytes(0x500u).CopyTo(env.OneMegaMemory_, 8 * 4);
-            env.OneMegaMemory_[0x500] = 0xCF;
+            BitConverter.GetBytes(0x500u).CopyTo(env.Ram, 8 * 4);
+            env.Ram[0x500] = 0xCF;
         });
-        Compare(["--limit", "99"], (cpu, env) => { env.OneMegaMemory_[0x100] = 0x0F; env.OneMegaMemory_[0x101] = 0xFF; });
+        Compare(["--limit", "99"], (cpu, env) => { env.Ram[0x100] = 0x0F; env.Ram[0x101] = 0xFF; });
         Compare(["--limit", "99", "--pftrap", "--upflog"], (cpu, env) =>
         {
             CPU._cr0.setter(cpu)(0x80010001);
@@ -190,7 +190,7 @@ static class RunnerTests
         var memory = new byte[2 * 1024 * 1024];
         using (var env = new EmuEnvironment(memory, [1, 2, 3]))
         {
-            Equal(true, ReferenceEquals(memory, env.OneMegaMemory_), "RAM injected without copying");
+            Equal(true, ReferenceEquals(memory, env.Ram), "RAM injected without copying");
             Equal("1,2,3", string.Join(',', memory.Skip(0xFFFFD).Take(3)), "BIOS placement");
             Equal(1024, env.Cmos[0x17] | env.Cmos[0x18] << 8, "CMOS follows injected RAM");
             Equal(true, env.Ata == null, "constructor does not discover disk");
@@ -246,7 +246,7 @@ static class RunnerTests
         using var env = new EmuEnvironment(memory: new byte[0x10000]);
         var cpu = new CPU { eip = 0x100, code32 = true, stack32 = true, esp = 0x8000, eflags = 2 };
         byte[] code = [0x40, 0xEB, 0xFD]; // inc eax; jmp $-3
-        code.CopyTo(env.OneMegaMemory_, 0x100);
+        code.CopyTo(env.Ram, 0x100);
         var control = new EmulationControl();
         var changes = new List<(bool paused, bool stopped, long count)>();
         using var paused = new ManualResetEventSlim();
@@ -269,7 +269,7 @@ static class RunnerTests
         Equal(12500u, control.Snapshot().eax, "final CPU published");
         Equal("True,False,10000;False,False,10000;False,True,25000", string.Join(";", changes.Select(change => $"{change.paused},{change.stopped},{change.count}")), "state change sequence");
         using var cancelled = new EmuEnvironment(memory: new byte[0x10000]);
-        code.CopyTo(cancelled.OneMegaMemory_, 0x100);
+        code.CopyTo(cancelled.Ram, 0x100);
         var stop = new CancellationTokenSource();
         var cancelControl = new EmulationControl();
         cancelControl.Pause();
@@ -290,7 +290,7 @@ static class RunnerTests
     static void GuestReaders()
     {
         using var env = new EmuEnvironment(memory: new byte[0x10000]);
-        var memory = env.OneMegaMemory_;
+        var memory = env.Ram;
         void Dword(uint address, uint value) => BitConverter.GetBytes(value).CopyTo(memory, address);
         Dword(0x1000, 0x2000); Dword(0x1004, 0xAAAA1111); // フレーム 1: 次 0x2000、戻り番地
         Dword(0x2000, 0); Dword(0x2004, 0xBBBB2222);      // フレーム 2: 終端
@@ -391,14 +391,14 @@ static class RunnerTests
             Equal(true, error.ToString().Contains("--limit"), "CLI identifies bad argument");
             Equal(false, File.Exists("snapshot.snap"), "invalid CLI does not create snapshot");
             using var env = new EmuEnvironment();
-            env.OneMegaMemory_[0x100] = 0x40;
+            env.Ram[0x100] = 0x40;
             SnapshotStore.Save("resume.snap", 10, new CPU { eip = 0x100, code32 = true, stack32 = true, esp = 0x8000 }, env);
             var resumeResult = Run("--resume", "--snapshot", "resume.snap", "--limit", "11", "--notrace");
             Equal(0, resumeResult, "CLI resume success: " + error);
             // ゲストのリセット要求で環境を作り直し、リセットベクタから続行して上限で終わる。
             using var resetEnv = new EmuEnvironment();
             byte[] reset = [0xB0, 0xFE, 0xE6, 0x64, 0xEB, 0xFE];
-            reset.CopyTo(resetEnv.OneMegaMemory_, 0x100);
+            reset.CopyTo(resetEnv.Ram, 0x100);
             SnapshotStore.Save("reset.snap", 20, new CPU { eip = 0x100, code32 = true, stack32 = true, esp = 0x8000 }, resetEnv);
             Equal(0, Run("--resume", "--snapshot", "reset.snap", "--limit", "20100", "--notrace", "--noirq"), "CLI reset loop exit code: " + error);
             Equal(true, error.ToString().Contains("[system] reset at instruction"), "CLI reports the reset");

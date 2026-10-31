@@ -59,7 +59,7 @@ public static class VgaBiosStub
     // ROM を 0xC0000 へ置き、IVT 10h をハンドラへ向ける(INT 19h のたびに呼んでも同じ結果)。
     public static void Install(EmuEnvironment env)
     {
-        var ram = env.OneMegaMemory_;
+        var ram = env.Ram;
         if (ram.Length < RomBase + RomSize) return;
         Rom.CopyTo(ram, (int)RomBase);
         env.Translations.InvalidateAll(); // RAM への直接書き込み
@@ -68,9 +68,9 @@ public static class VgaBiosStub
     }
 
     public static bool IsInstalled(EmuEnvironment env) =>
-        env.OneMegaMemory_.Length >= RomBase + RomSize &&
-        BitConverter.ToUInt32(env.OneMegaMemory_, 0x40) == (0xC000u << 16 | ServiceOffset) &&
-        env.OneMegaMemory_[RomBase + ServiceOffset] == 0x0F && env.OneMegaMemory_[RomBase + ServiceOffset + 1] == 0x0B;
+        env.Ram.Length >= RomBase + RomSize &&
+        BitConverter.ToUInt32(env.Ram, 0x40) == (0xC000u << 16 | ServiceOffset) &&
+        env.Ram[RomBase + ServiceOffset] == 0x0F && env.Ram[RomBase + ServiceOffset + 1] == 0x0B;
 
     // C000:0060 の UD2 ならサービスを実行して EIP を進め true を返す。それ以外は false(通常の #UD 処理へ)。
     public static bool TryService(EmuEnvironment env, CPU cpu)
@@ -83,7 +83,7 @@ public static class VgaBiosStub
 
     // INT 10h のサービス: AH → State(CPU のレジスタは Accessor、画面は環境経由)。AL/BL で分かれる機能は入れ子の表。
     // 表にない機能は何もしない。
-    static readonly State<byte[]> Ram = GetDataFromEnvCpu((env, _) => env.OneMegaMemory_);
+    static readonly State<byte[]> Ram = GetDataFromEnvCpu((env, _) => env.Ram);
     static readonly State<VgaDevice> Vga = GetDataFromEnvCpu((env, _) => env.Vga);
     static State<Unit> Dispatch(Accessor<CPU, byte> key, Dictionary<byte, State<Unit>> table) => (env, cpu, ope) =>
         table.TryGetValue(key.getter(cpu), out var service) ? service(env, cpu, ope) : (true, Unit.unit, cpu, string.Empty);
@@ -173,7 +173,7 @@ public static class VgaBiosStub
     public static void SetMode(EmuEnvironment env, int requested)
     {
         var vga = env.Vga;
-        var ram = env.OneMegaMemory_;
+        var ram = env.Ram;
         var clear = (requested & 0x80) == 0;
         var mode = requested & 0x7F;
         var (misc, seq, crtc, gc, attr) = mode switch
@@ -214,7 +214,7 @@ public static class VgaBiosStub
 
     static void SetCursor(EmuEnvironment env, int row, int column)
     {
-        var ram = env.OneMegaMemory_;
+        var ram = env.Ram;
         ram[0x450] = (byte)column; ram[0x451] = (byte)row;
         var position = row * Columns(ram) + column;
         env.Vga.Crtc[0x0E] = (byte)(position >> 8);
@@ -225,7 +225,7 @@ public static class VgaBiosStub
     static void Teletype(EmuEnvironment env, byte character)
     {
         var vga = env.Vga;
-        var ram = env.OneMegaMemory_;
+        var ram = env.Ram;
         if (vga.GraphicsMode) return;
         var columns = Columns(ram);
         var rows = Rows(ram);
@@ -252,7 +252,7 @@ public static class VgaBiosStub
     static void Scroll(EmuEnvironment env, bool up, int lines, byte attribute, int top, int left, int bottom, int right)
     {
         var vga = env.Vga;
-        var ram = env.OneMegaMemory_;
+        var ram = env.Ram;
         if (vga.GraphicsMode) return;
         var columns = Columns(ram);
         bottom = Math.Min(bottom, Rows(ram) - 1); right = Math.Min(right, columns - 1);

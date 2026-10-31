@@ -158,7 +158,7 @@ public sealed class BootAutomation
 
     static void ClearBiosKeyBuffer(EmuEnvironment env)
     {
-        var ram = env.OneMegaMemory_;
+        var ram = env.Ram;
         var start = BitConverter.ToUInt16(ram, 0x480);
         if (start == 0) start = 0x1E;
         ram[0x41A] = (byte)start; ram[0x41B] = (byte)(start >> 8);

@@ -13,7 +13,7 @@ static class CompletionTests
     }
 
     static void Write32(EmuEnvironment env, int address, uint value) =>
-        BitConverter.GetBytes(value).CopyTo(env.OneMegaMemory_, address);
+        BitConverter.GetBytes(value).CopyTo(env.Ram, address);
 
     static CPU Prepare(EmuEnvironment env)
     {
@@ -31,8 +31,8 @@ static class CompletionTests
         Write32(env, 0x1004 + 14 * 8, 0x00008E00);
         byte[] fault = [0xA1, 0x00, 0x80, 0x00, 0x00];
         byte[] handler = [0x40, 0xEB, 0xFD];
-        fault.CopyTo(env.OneMegaMemory_, 0x100);
-        handler.CopyTo(env.OneMegaMemory_, 0x400);
+        fault.CopyTo(env.Ram, 0x100);
+        handler.CopyTo(env.Ram, 0x400);
         return cpu;
     }
 
@@ -123,16 +123,16 @@ static class CompletionTests
         using var env = new EmuEnvironment(memory: new byte[0x10000]);
         byte[] idle = [0xFB, 0xF4, 0xEB, 0xFD];                                        // sti ; hlt ; jmp hlt
         byte[] handler = [0xFE, 0x06, 0x00, 0x05, 0xB0, 0x20, 0xE6, 0x20, 0xCF];        // inc byte [0x500] ; mov al,20h ; out 20h,al ; iret
-        idle.CopyTo(env.OneMegaMemory_, 0x100); handler.CopyTo(env.OneMegaMemory_, 0x200);
-        BitConverter.GetBytes(0x00000200u).CopyTo(env.OneMegaMemory_, 8 * 4);          // IVT 8(タイマ)-> 0000:0200
+        idle.CopyTo(env.Ram, 0x100); handler.CopyTo(env.Ram, 0x200);
+        BitConverter.GetBytes(0x00000200u).CopyTo(env.Ram, 8 * 4);          // IVT 8(タイマ)-> 0000:0200
         var cpu = new CPU { eip = 0x100, esp = 0x8000, eflags = 2 };
         using var error = new StringWriter();
         var count = EmulationRunner.Run(RunOptions.Parse(["--limit", "45000", "--notrace"]), env, cpu, 0, null, TextWriter.Null, error);
         Equal(45000L, count, "the idle loop reaches the limit in virtual time");
-        Equal(4, (int)env.OneMegaMemory_[0x500], "the timer woke the idle loop at 10000, 20000, 30000 and 40000");
+        Equal(4, (int)env.Ram[0x500], "the timer woke the idle loop at 10000, 20000, 30000 and 40000");
         Equal(true, error.ToString().Contains("[halt]"), "skipped idle time is reported");
         using var busy = new EmuEnvironment(memory: new byte[0x10000]);
-        new byte[] { 0xFA, 0xF4, 0xEB, 0xFD }.CopyTo(busy.OneMegaMemory_, 0x100);     // cli ; hlt ; jmp hlt
+        new byte[] { 0xFA, 0xF4, 0xEB, 0xFD }.CopyTo(busy.Ram, 0x100);     // cli ; hlt ; jmp hlt
         var busyCpu = new CPU { eip = 0x100, esp = 0x8000, eflags = 2 };
         using var busyError = new StringWriter();
         Equal(5000L, EmulationRunner.Run(RunOptions.Parse(["--limit", "5000", "--notrace"]), busy, busyCpu, 0, null, TextWriter.Null, busyError), "HLT with IF=0 just proceeds");

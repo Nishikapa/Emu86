@@ -35,8 +35,8 @@ static class CoreTests
 
     static void Reset(EmuEnvironment env, byte[] code)
     {
-        Array.Clear(env.OneMegaMemory_);
-        code.CopyTo(env.OneMegaMemory_, 0);
+        Array.Clear(env.Ram);
+        code.CopyTo(env.Ram, 0);
         env.Paging.Enabled = false;
         env.Paging.Pae = false;
         env.Paging.WriteProtect = false;
@@ -72,7 +72,7 @@ static class CoreTests
         Equal(true, slowResult.IsSuccess, "slow success");
         Equal(true, FastStep(FastEnv, fastCpu), "fast success");
         Equal(Convert.ToHexString(CpuBytes(slowCpu)), Convert.ToHexString(CpuBytes(fastCpu)), $"CPU {Convert.ToHexString(code)}");
-        Equal(true, SlowEnv.OneMegaMemory_.AsSpan().SequenceEqual(FastEnv.OneMegaMemory_), $"memory {Convert.ToHexString(code)}");
+        Equal(true, SlowEnv.Ram.AsSpan().SequenceEqual(FastEnv.Ram), $"memory {Convert.ToHexString(code)}");
         if (diagnostics)
         {
             Equal(SlowEnv.Diagnostics?.WatchTriggered, FastEnv.Diagnostics?.WatchTriggered, "watchpoint");
@@ -81,7 +81,7 @@ static class CoreTests
         expected?.Invoke(slowCpu, SlowEnv);
         expected?.Invoke(fastCpu, FastEnv);
         Writer.Write(CpuBytes(slowCpu));
-        Writer.Write(SHA256.HashData(SlowEnv.OneMegaMemory_));
+        Writer.Write(SHA256.HashData(SlowEnv.Ram));
         cases++;
     }
 
@@ -121,10 +121,10 @@ static class CoreTests
 
     static void MapPages(EmuEnvironment env, bool secondPresent = true)
     {
-        BitConverter.GetBytes(0xA003u).CopyTo(env.OneMegaMemory_, 0x9000);
-        BitConverter.GetBytes(0x0003u).CopyTo(env.OneMegaMemory_, 0xA000);
-        BitConverter.GetBytes(0x5003u).CopyTo(env.OneMegaMemory_, 0xA004);
-        if (secondPresent) BitConverter.GetBytes(0x7003u).CopyTo(env.OneMegaMemory_, 0xA008);
+        BitConverter.GetBytes(0xA003u).CopyTo(env.Ram, 0x9000);
+        BitConverter.GetBytes(0x0003u).CopyTo(env.Ram, 0xA000);
+        BitConverter.GetBytes(0x5003u).CopyTo(env.Ram, 0xA004);
+        if (secondPresent) BitConverter.GetBytes(0x7003u).CopyTo(env.Ram, 0xA008);
         env.Paging.Cr3Base = 0x9000;
         env.Paging.Enabled = true;
         env.Paging.WriteProtect = true;
@@ -138,7 +138,7 @@ static class CoreTests
         {
             foreach (var address in new uint[] { 0x3000, 0x3fff, 0xffff, 0x10000 })
                 Check(Store(type), CreateCpu(0x87654321, address));
-            Check(Store(type), CreateCpu(0x87654321, 0x1fff), env => MapPages(env), (_, env) => Equal((byte)0x21, env.OneMegaMemory_[0x5fff], "paged write"));
+            Check(Store(type), CreateCpu(0x87654321, 0x1fff), env => MapPages(env), (_, env) => Equal((byte)0x21, env.Ram[0x5fff], "paged write"));
             if (extended)
             {
                 foreach (var address in new uint[] { 0xfff03000, 0xffffffff })
@@ -167,7 +167,7 @@ static class CoreTests
                 {
                     Equal(0x2000u, fault.Linear, "page fault address");
                     Equal(2u, fault.ErrorCode, "page fault code");
-                    Equal((byte)0x21, env.OneMegaMemory_[0x5fff], "partial write preserved");
+                    Equal((byte)0x21, env.Ram[0x5fff], "partial write preserved");
                     cases++;
                 }
             }
@@ -183,10 +183,10 @@ static class CoreTests
         {
             var env = SlowEnv;
             Reset(env, []);
-            env.OneMegaMemory_[0x5005] = 0xAB; env.OneMegaMemory_[0x1234] = 0xCD; env.OneMegaMemory_[0x7000] = 0xEF;
+            env.Ram[0x5005] = 0xAB; env.Ram[0x1234] = 0xCD; env.Ram[0x7000] = 0xEF;
             var cpu = CreateCpu();
-            void Entry(int address, uint value, int size) { BitConverter.GetBytes(value).CopyTo(env.OneMegaMemory_, address); if (size == 8) BitConverter.GetBytes(0u).CopyTo(env.OneMegaMemory_, address + 4); }
-            uint Raw(int address) => BitConverter.ToUInt32(env.OneMegaMemory_, address);
+            void Entry(int address, uint value, int size) { BitConverter.GetBytes(value).CopyTo(env.Ram, address); if (size == 8) BitConverter.GetBytes(0u).CopyTo(env.Ram, address + 4); }
+            uint Raw(int address) => BitConverter.ToUInt32(env.Ram, address);
             int directory, table, readOnlyDirectory, large, missingDirectory, size;
             uint largeLinear, missingDirectoryLinear, readOnlyDirectoryLinear;
             if (!pae)
@@ -227,12 +227,12 @@ static class CoreTests
             Equal(0x80000002u, env.Paging.TagR[2], $"{label} read fills the read TLB");
             Equal(0u, env.Paging.TagW[2], $"{label} read leaves the write TLB empty");
             Write(0x2006, 0xCD);
-            Equal((byte)0xCD, env.OneMegaMemory_[0x5006], $"{label} 4K write lands in the mapped page");
+            Equal((byte)0xCD, env.Ram[0x5006], $"{label} 4K write lands in the mapped page");
             Equal(0x60u, Raw(table + 2 * size) & 0x60, $"{label} write sets Dirty on the page entry");
             Equal(0x20u, Raw(directory) & 0x60, $"{label} write leaves the directory entry without Dirty");
             Equal(0x80000002u, env.Paging.TagW[2], $"{label} write fills the write TLB");
             Write(0x3000, 0x11);
-            Equal((byte)0x11, env.OneMegaMemory_[0x6000], $"{label} ring0 writes a read-only page while CR0.WP=0");
+            Equal((byte)0x11, env.Ram[0x6000], $"{label} ring0 writes a read-only page while CR0.WP=0");
             Equal(0x60u, Raw(table + 3 * size) & 0x60, $"{label} WP=0 write marks the read-only page dirty");
             env.Paging.WriteProtect = true; env.Paging.Flush();
             Equal((0x3001u, 3u), Fault(() => Write(0x3001, 0x22)), $"{label} WP=1 write to a read-only page faults with protection+write");
@@ -248,7 +248,7 @@ static class CoreTests
             Equal((byte)0xCD, EnvGetMemoryData8(env, largeLinear), $"{label} large page read");
             Equal(0x20u, Raw(large) & 0x60, $"{label} large page read sets Accessed only");
             Write(largeLinear + 1, 0x55);
-            Equal((byte)0x55, env.OneMegaMemory_[0x1235], $"{label} large page write");
+            Equal((byte)0x55, env.Ram[0x1235], $"{label} large page write");
             Equal(0x60u, Raw(large) & 0x60, $"{label} large page write sets Dirty");
             env.Paging.WriteProtect = true; env.Paging.Flush();
             Entry(large, 0x00000081 | 0x60, size); // 読み取り専用の大ページ
@@ -311,9 +311,9 @@ static class CoreTests
         static void Prepare(EmuEnvironment env, byte[] code)
         {
             Reset(env, code);
-            for (var offset = 0; offset < 32; offset++) env.OneMegaMemory_[0x3000 + offset] = (byte)(0x80 + offset);
+            for (var offset = 0; offset < 32; offset++) env.Ram[0x3000 + offset] = (byte)(0x80 + offset);
         }
-        static string Memory(EmuEnvironment env) => Convert.ToHexString(SHA256.HashData(env.OneMegaMemory_));
+        static string Memory(EmuEnvironment env) => Convert.ToHexString(SHA256.HashData(env.Ram));
         Prepare(reference, [0x01, 0xD8]);
         var add = Semantics.Lower(DecodeInstruction(reference, new CPU { code32 = true }));
         Equal(true, add.Statements.Count == 2
@@ -388,8 +388,8 @@ static class CoreTests
         static byte[] Loop(uint data) => [0x01, 0xD8, 0xA3, (byte)data, (byte)(data >> 8), 0x00, 0x00, 0x43, 0x81, 0xFB, 0x64, 0x00, 0x00, 0x00, 0x75, 0xF0];
         static CPU Start() => new() { code32 = true, stack32 = true, eip = 0x100, esp = 0x8000, eflags = 2 };
         static string Hex(CPU cpu) => Convert.ToHexString(CpuBytes(cpu));
-        Loop(0x3000).CopyTo(env.OneMegaMemory_, 0x100);
-        Loop(0x3000).CopyTo(mirror.OneMegaMemory_, 0x100);
+        Loop(0x3000).CopyTo(env.Ram, 0x100);
+        Loop(0x3000).CopyTo(mirror.Ram, 0x100);
         var fast = new InstructionExecutor(true);
         env.Translations.Enabled = true;
         env.Translations.Chain = false; // まず 1 ブロックずつ見る(連結は後で)
@@ -418,7 +418,7 @@ static class CoreTests
         Equal(1L, env.Translations.Translated, "one block lowered");
         Equal(true, blockSteps >= 70, "most iterations ran as blocks");
         Equal(0x100u, cpu.eip, "block ends after the taken branch");
-        Equal(true, env.OneMegaMemory_.AsSpan().SequenceEqual(mirror.OneMegaMemory_), "memory after the loop");
+        Equal(true, env.Ram.AsSpan().SequenceEqual(mirror.Ram), "memory after the loop");
         // 予算 3: ブロックの 3 命令目で止まり、次の Step は途中(別のブロックの先頭)から続く。
         fast.Budget = 3;
         count = Advance(count, "budget");
@@ -427,8 +427,8 @@ static class CoreTests
         while (cpu.eip != 0x100) count = Advance(count, "resume");
         // 自己書き換え(別の場所から): ループ先頭の ADD を SUB に書き換える。
         byte[] patch = [0xC6, 0x05, 0x00, 0x01, 0x00, 0x00, 0x29]; // mov byte [0x100], 0x29
-        patch.CopyTo(env.OneMegaMemory_, 0x200);
-        patch.CopyTo(mirror.OneMegaMemory_, 0x200);
+        patch.CopyTo(env.Ram, 0x200);
+        patch.CopyTo(mirror.Ram, 0x200);
         cpu.eip = 0x200; expected.eip = 0x200;
         count = Advance(count, "patch");
         Equal(1L, env.Translations.Invalidations, "code page invalidated by the write");
@@ -440,8 +440,8 @@ static class CoreTests
         // 自己書き換え(ブロック内から): 先頭の命令が次の命令のオペコードを AL で書き換え(INC ECX と DEC ECX が交互)、
         // 世代の変化でブロックがそこで止まり、次の Step が書き換え後の命令を実行する。
         byte[] self = [0x88, 0x05, 0x06, 0x03, 0x00, 0x00, 0x40, 0x34, 0x08, 0xEB, 0xF5]; // mov [0x306], al ; inc eax ; xor al, 8 ; jmp
-        self.CopyTo(env.OneMegaMemory_, 0x300);
-        self.CopyTo(mirror.OneMegaMemory_, 0x300);
+        self.CopyTo(env.Ram, 0x300);
+        self.CopyTo(mirror.Ram, 0x300);
         cpu.eip = 0x300; expected.eip = 0x300; cpu.eax = 0x41; expected.eax = 0x41; cpu.ecx = 0; expected.ecx = 0;
         var invalidationsBefore = env.Translations.Invalidations;
         for (var iteration = 0; iteration < 40; iteration++)
@@ -452,8 +452,8 @@ static class CoreTests
         // cli ; inc eax ; sti ; inc eax ; inc eax ; jmp 0x400 -> 先頭からのブロックは 3 命令で止まり、残りは次のブロック。
         // 予算が十分でも STI で止まり、次の Step は残りのブロックから分岐先のブロックへ連結して、また STI で止まる。
         byte[] sti = [0xFA, 0x40, 0xFB, 0x40, 0x40, 0xEB, 0xF9];
-        sti.CopyTo(env.OneMegaMemory_, 0x400);
-        sti.CopyTo(mirror.OneMegaMemory_, 0x400);
+        sti.CopyTo(env.Ram, 0x400);
+        sti.CopyTo(mirror.Ram, 0x400);
         cpu.eip = 0x400; expected.eip = 0x400;
         for (var iteration = 0; iteration < 12; iteration++)
             while (true) { count = Advance(count, "sti"); if (cpu.eip == 0x400) break; }
@@ -464,7 +464,7 @@ static class CoreTests
         count = Advance(count, "after sti");
         Equal((true, 6, 0x403u), (fast.UsedTranslation, fast.Executed, cpu.eip), "the rest chains into the next block and stops at its STI");
         // 連結: ループ(5 命令 × 100 回)は予算の範囲で 1 回の Step で回り切り、ループを抜けた先の HLT(IR 対象外)で止まる。
-        env.OneMegaMemory_[0x110] = 0xF4; mirror.OneMegaMemory_[0x110] = 0xF4;
+        env.Ram[0x110] = 0xF4; mirror.Ram[0x110] = 0xF4;
         // 自己書き換えのテストが同じページのループのブロックも捨てているので、連結せずに翻訳し直してから連結する。
         env.Translations.Chain = false;
         cpu.eip = 0x100; expected.eip = 0x100; cpu.ebx = 0; expected.ebx = 0;
@@ -482,7 +482,7 @@ static class CoreTests
         // ページング有効で、データページを翻訳後に外す: ブロック 2 命令目の MOV [data] が #PF を投げ、
         // 完了数は 1(ADD)、CPU は MOV の先頭の状態。
         using var paged = new EmuEnvironment(memory: new byte[0x10000]);
-        Loop(0x1800).CopyTo(paged.OneMegaMemory_, 0x100);
+        Loop(0x1800).CopyTo(paged.Ram, 0x100);
         MapPages(paged);
         var pagedCpu = Start();
         CPU._cr0.setter(pagedCpu)(0x80000001); CPU._cr3.setter(pagedCpu)(0x9000);
@@ -492,7 +492,7 @@ static class CoreTests
         paged.Translations.Chain = false;
         for (var step = 0; step < 60; step++) Equal(true, pagedExecutor.Step(paged, pagedCpu).IsSuccess, $"paged step {step}");
         Equal(true, pagedExecutor.UsedTranslation && pagedCpu.eip == 0x100, "paged loop runs as a block");
-        BitConverter.GetBytes(0u).CopyTo(paged.OneMegaMemory_, 0xA004); // 線形 0x1000-0x1FFF を不在に
+        BitConverter.GetBytes(0u).CopyTo(paged.Ram, 0xA004); // 線形 0x1000-0x1FFF を不在に
         paged.Paging.Flush();
         var eaxBefore = pagedCpu.eax;
         var faulted = false;
@@ -504,8 +504,8 @@ static class CoreTests
         cases++;
         // 実行器を通した 1 命令あたりの時間(5 命令のループ): 翻訳ブロック(コンパイル済み段階)と高速コアのみ。
         using var timing = new EmuEnvironment(memory: new byte[0x10000]);
-        Loop(0x3000).CopyTo(timing.OneMegaMemory_, 0x100);
-        timing.OneMegaMemory_[0x110] = 0xF4; // ループを抜けた先は IR 対象外(連結がそこで止まる)
+        Loop(0x3000).CopyTo(timing.Ram, 0x100);
+        timing.Ram[0x110] = 0xF4; // ループを抜けた先は IR 対象外(連結がそこで止まる)
         double PerInstruction(bool translate)
         {
             timing.Translations.Enabled = translate;
@@ -556,7 +556,7 @@ static class CoreTests
         foreach (var code in codes)
         {
             Reset(SlowEnv, code);
-            var memory = SlowEnv.OneMegaMemory_;
+            var memory = SlowEnv.Ram;
             BitConverter.GetBytes(1.5f).CopyTo(memory, 0x3000);
             BitConverter.GetBytes(2.25).CopyTo(memory, 0x3008);
             BitConverter.GetBytes((short)-7).CopyTo(memory, 0x3010);
@@ -586,8 +586,8 @@ static class CoreTests
         var env = SlowEnv;
         void Descriptor(int selector, uint lo, uint hi)
         {
-            BitConverter.GetBytes(lo).CopyTo(env.OneMegaMemory_, 0x500 + selector);
-            BitConverter.GetBytes(hi).CopyTo(env.OneMegaMemory_, 0x504 + selector);
+            BitConverter.GetBytes(lo).CopyTo(env.Ram, 0x500 + selector);
+            BitConverter.GetBytes(hi).CopyTo(env.Ram, 0x504 + selector);
         }
         (bool zf, uint eax) Run(byte[] code, ushort selector)
         {
@@ -635,7 +635,7 @@ static class CoreTests
         (uint eip, uint eax, uint esp) Run(byte[] code)
         {
             Reset(env, code);
-            BitConverter.GetBytes(0x1234u).CopyTo(env.OneMegaMemory_, 0x8000);
+            BitConverter.GetBytes(0x1234u).CopyTo(env.Ram, 0x8000);
             var cpu = CreateCpu(0x11111111, 0x22222222);
             Equal(true, SlowStep(env, cpu, null).IsSuccess, $"rep-prefixed {Convert.ToHexString(code)} executes");
             cases++;
@@ -664,7 +664,7 @@ static class CoreTests
     static void Integration()
     {
         foreach (var code in new byte[][] { [0xF3, 0xA5], [0x66, 0xF3, 0xAB], [0xF3, 0xAA], [0xA6], [0xA7], [0xAE], [0xAF], [0xAD], [0x50], [0x66, 0x50], [0x58], [0x66, 0x58] })
-            Check(code, CreateCpu(0x87654321), env => Array.Fill(env.OneMegaMemory_, (byte)0x5a, 0x3000, 16));
+            Check(code, CreateCpu(0x87654321), env => Array.Fill(env.Ram, (byte)0x5a, 0x3000, 16));
         // 文字列命令のセグメントオーバーライド: 源(DS:SI)だけが差し替わり、先(ES:DI)は固定。REP の前後どちらの位置でも効く。
         foreach (var code in new byte[][] { [0x2E, 0xA4], [0x64, 0xF3, 0xA5], [0xF3, 0x65, 0xA4], [0x26, 0xAC], [0x36, 0xF3, 0xA6], [0x2E, 0x6E], [0x64, 0xF3, 0x6F], [0x26, 0xAA], [0x64, 0xAE] })
         {
@@ -673,8 +673,8 @@ static class CoreTests
             segmented.edx = 0x300;
             Check(code, segmented, env =>
             {
-                for (var offset = 0; offset < 0x800; offset++) env.OneMegaMemory_[0x3000 + offset] = (byte)(offset * 3 + 1);
-                for (var offset = 0; offset < 16; offset++) env.OneMegaMemory_[0x4000 + offset] = 0x5a;
+                for (var offset = 0; offset < 0x800; offset++) env.Ram[0x3000 + offset] = (byte)(offset * 3 + 1);
+                for (var offset = 0; offset < 16; offset++) env.Ram[0x4000 + offset] = 0x5a;
             });
         }
         // INS/OUTS(単発と REP、8/16/32 ビット、DF): ポート 0x300.. は素通しの IoPort 配列なので両コアで同じ値を読む。
@@ -683,16 +683,16 @@ static class CoreTests
         {
             var io = CreateCpu(0x87654321, flags: 0x202 | direction);
             io.edx = 0x300; io.edi = 0x3008; io.esi = 0x3008;
-            Check(code, io, env => { Array.Fill(env.OneMegaMemory_, (byte)0x5a, 0x3000, 16); for (var i = 0; i < 4; i++) env.IoPort[0x300 + i] = (byte)(0x11 * (i + 1)); },
+            Check(code, io, env => { Array.Fill(env.Ram, (byte)0x5a, 0x3000, 16); for (var i = 0; i < 4; i++) env.IoPort[0x300 + i] = (byte)(0x11 * (i + 1)); },
                 (cpu, _) => Equal(code.Contains((byte)0xF3) ? 0u : 3u, cpu.ecx, $"REP INS/OUTS count {Convert.ToHexString(code)}"));
         }
         for (var type = 1; type < 3; type++)
-            Check(Store(type), CreateCpu(0x12345678, 0x1000), env => { MapPages(env); BitConverter.GetBytes(3u).CopyTo(env.OneMegaMemory_, 0xA004); env.Diagnostics = new() { WatchLo = 0, WatchHi = 1 }; }, (_, env) => Equal(true, env.Diagnostics.WatchTriggered, "watch at physical zero"), diagnostics: true);
+            Check(Store(type), CreateCpu(0x12345678, 0x1000), env => { MapPages(env); BitConverter.GetBytes(3u).CopyTo(env.Ram, 0xA004); env.Diagnostics = new() { WatchLo = 0, WatchHi = 1 }; }, (_, env) => Equal(true, env.Diagnostics.WatchTriggered, "watch at physical zero"), diagnostics: true);
         Reset(SlowEnv, [0xD9, 0xE8, 0xDD, 0x1B]);
         var cpu = CreateCpu(right: 0xfff03000);
         Equal(true, SlowStep(SlowEnv, cpu, null).IsSuccess, "FLD1");
         Equal(true, SlowStep(SlowEnv, cpu, null).IsSuccess, "FSTP");
-        Equal(1.0, BitConverter.ToDouble(SlowEnv.OneMegaMemory_, 0x3000), "FPU alias store");
+        Equal(1.0, BitConverter.ToDouble(SlowEnv.Ram, 0x3000), "FPU alias store");
         cases++;
     }
 
