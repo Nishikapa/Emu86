@@ -26,5 +26,5 @@ ADR やコードコメントで使う語の定義。「現状」は 2026-10-12 �
 | **時分割 SMP** | 1 ホストスレッドで n vCPU を量子ごとに切り替える方式。決定論を保つ | 選択肢 A |
 | **並列 SMP** | vCPU ごとに 1 ホストスレッド。決定論を失う | 選択肢 B |
 | **HAL** | Windows の Hardware Abstraction Layer。halacpi.dll(ACPI 単一 CPU、PIC)/ halaacpi.dll(ACPI 単一 CPU、APIC)/ halmacpi.dll(ACPI マルチプロセッサ、APIC) | XP イメージは halacpi.dll |
-| **高速コア / モナド版** | 同一意味論を持つ 2 つの命令実行器。高速コアが未対応ならモナド版へフォールバック | `FastStep` / `Program.Execute2` |
+| **高速コア / モナド版** | 同一意味論を持つ 2 つの命令実行器。高速コアが未対応ならモナド版へフォールバック | `FastStep` / `Instructions.Execute2` |
 | **スナップショット** | CPU・RAM・デバイス・ディスク差分の保存形式。現在 v10 | `SnapshotStore` |

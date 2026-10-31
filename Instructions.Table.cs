@@ -7,7 +7,8 @@ using static Emu86.Decoder;
 
 namespace Emu86;
 
-static partial class Program
+// オペコード表と実行の入口: 1 バイト/2 バイト(0F xx)の表を引いて命令の State を呼ぶ。命令本体は Instructions.*.cs。
+static partial class Instructions
 {
     static (byte ope, int len, State<Unit> state)[] OneByteStates =>
     [

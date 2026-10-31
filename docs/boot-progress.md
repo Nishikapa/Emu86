@@ -222,9 +222,9 @@ PCI 実装後も root マウントは同じ panic(空の "tried:" リスト)。d
 - `Environment.cs`: メモリ/ページング(MMU・TLB・#PF)、ModRM、スタック、LoadSReg、
   ポート I/O(CMOS/PIT/PIC/ATA/debugcon)、割り込み配送。
 - `FastCore.cs`: 命令的高速コア(方針 B)。未対応命令はモナド版へフォールバック。
-- `Program.cs`: 命令ハンドラ本体(モナド版)。
-- `Program.OpcodeTable.cs`: ディスパッチテーブル、プレフィックス処理。
-- `Program.Runner.cs`: 実行ループ、タイマ IRQ 注入、#PF 配送、各種デバッグトラップ。
+- `Instructions.*.cs`: 命令ハンドラ本体(モナド版、種類ごとのファイル)。
+- `Instructions.Table.cs`: ディスパッチテーブル、プレフィックス処理。
+- `Program.cs` / `EmulationRunner.cs`: 起動処理と実行ループ、タイマ IRQ 注入、#PF 配送、各種デバッグトラップ。
 - `Program.Snapshot.cs`: スナップショット保存/復元。
 - `Disk.cs`: VHD/VHDX/AVHDX(COW オーバーレイ)+ ATA PIO デバイス。
 

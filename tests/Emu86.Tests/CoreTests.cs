@@ -8,7 +8,7 @@ using static Emu86.Decoder;
 
 static class CoreTests
 {
-    static readonly State<Unit> SlowStep = Emu86.Program.Execute2;
+    static readonly State<Unit> SlowStep = Instructions.Execute2;
     static readonly EmuEnvironment SlowEnv = CreateEnvironment();
     static readonly EmuEnvironment FastEnv = CreateEnvironment();
     static readonly MemoryStream Results = new();
