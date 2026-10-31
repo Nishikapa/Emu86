@@ -24,9 +24,9 @@ internal sealed class RomBuilder(int size)
         return this;
     }
 
-    public RomBuilder Db(params byte[] bytes)
+    public RomBuilder Db(params ReadOnlySpan<byte> bytes)
     {
-        bytes.CopyTo(image, position);
+        bytes.CopyTo(image.AsSpan(position));
         position += bytes.Length;
         return this;
     }

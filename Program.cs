@@ -114,8 +114,8 @@ static partial class Program
         from _2 in JmpTo(ret)
         from cs in Pop(type)
         from _3 in StackAdjust(n)
-        from _4 in When(2 == type, ReturnToOuterStack((ushort)cs.Value()))
-        from _5 in LoadSReg(1, (ushort)cs.Value())
+        from _4 in When(2 == type, ReturnToOuterStack((ushort)cs.Value))
+        from _5 in LoadSReg(1, (ushort)cs.Value)
         select unit;
 
     // 引数を捨てない RET/RETF(表の初期化順に依存しないよう、フィールドではなくその場で作る)。
@@ -302,35 +302,21 @@ static partial class Program
     static State<Unit> Cpuid_0FA2 =>
         from _1 in SetLog("Cpuid_0FA2")
         from leaf in GetRegData32(0) // EAX
-        from _2 in SetCpu(cpu =>
-        {
-            uint a, b, c, d;
-            switch (leaf)
-            {
-                case 0: // 最大リーフ + ベンダ文字列 "GenuineIntel"
-                    a = 1;
-                    b = 0x756e6547; // "Genu"
-                    d = 0x49656e69; // "ineI"
-                    c = 0x6c65746e; // "ntel"
-                    break;
-                case 1: // バージョン情報と機能フラグ
-                    a = 0x00000600; // family 6
-                    b = 0;
-                    c = 0;          // 拡張機能なし
-                    // エミュレートできる機能のみ立てる:
-                    //   FPU(0x1) PSE(0x8) TSC(0x10) MSR(0x20) PAE(0x40) CX8(0x100) CMOV(0x8000)
-                    // 686-pae カーネルはここで PAE を確認して CR4.PAE を設定する。
-                    // APIC/SEP/FXSR/MMX 等は未実装のため伏せる。
-                    d = 0x00008179;
-                    break;
-                default:
-                    a = b = c = d = 0;
-                    break;
-            }
-            cpu.eax = a; cpu.ebx = b; cpu.ecx = c; cpu.edx = d;
-            return cpu;
-        })
+        let result = CpuidLeaf(leaf)
+        from _2 in SetCpu(cpu => { (cpu.eax, cpu.ebx, cpu.ecx, cpu.edx) = result; return cpu; })
         select unit;
+
+    // CPUID の応答 (EAX, EBX, ECX, EDX)。
+    //   リーフ 0: 最大リーフ + ベンダ文字列 "GenuineIntel"(EBX="Genu" EDX="ineI" ECX="ntel")。
+    //   リーフ 1: family 6、拡張機能なし。EDX はエミュレートできる機能のみ:
+    //             FPU(0x1) PSE(0x8) TSC(0x10) MSR(0x20) PAE(0x40) CX8(0x100) CMOV(0x8000)。
+    //             686-pae カーネルはここで PAE を確認して CR4.PAE を設定する。APIC/SEP/FXSR/MMX 等は未実装のため伏せる。
+    static (uint eax, uint ebx, uint ecx, uint edx) CpuidLeaf(uint leaf) => leaf switch
+    {
+        0 => (1, 0x756e6547, 0x6c65746e, 0x49656e69),
+        1 => (0x00000600, 0, 0, 0x00008179),
+        _ => (0, 0, 0, 0),
+    };
 
     // RDTSC (0F 31): EDX:EAX <- タイムスタンプカウンタ。実行済み命令数を代用する
     // (Runner が毎命令 env.Tsc を更新する)。
@@ -365,7 +351,7 @@ static partial class Program
         from dst in rm.Read
         from old in acc.Read
         from _f in Calc(old, dst, 7) // CMP acc, r/m のフラグ
-        from _2 in old.Value() == dst.Value() ? Move(rm, Reg(m.reg, type)) : acc.Write(dst)
+        from _2 in old.Value == dst.Value ? Move(rm, Reg(m.reg, type)) : acc.Write(dst)
         select unit;
 
     // XADD r/m, r (0F C0/C1): temp = r/m + reg(フラグは ADD)、reg <- r/m 旧値、r/m <- temp。
@@ -451,7 +437,7 @@ static partial class Program
         from m in ModRegRm()
         from src in GetMemOrRegData(m.mod, m.rm, true)
         from dst in GetRegData(m.reg, src.data.type)
-        from _2 in ImulInto(m.reg, src.data.type, dst.Signed(), src.data.Signed())
+        from _2 in ImulInto(m.reg, src.data.type, dst.Signed, src.data.Signed)
         select unit;
 
     // SHLD/SHRD r/m, r, (imm8 | CL): ダブル精度シフト。
@@ -468,7 +454,7 @@ static partial class Program
         from cnt in useCl ? GetRegData(1, 0).Select(d => (int)d.db) : GetMemoryDataIp8.Select(b => (int)b)
         let count = cnt & 0x1F
         // count==0 は結果・フラグとも不変
-        from _2 in Unless(count == 0, ApplyDoubleShift(addr, dst.type, DoubleShift(dst.Value(), src.Value(), count, Bits(dst.type), left)))
+        from _2 in Unless(count == 0, ApplyDoubleShift(addr, dst.type, DoubleShift(dst.Value, src.Value, count, Bits(dst.type), left)))
         select unit;
 
     static State<Unit> ApplyDoubleShift(
@@ -518,7 +504,7 @@ static partial class Program
         from addr0 in GetMemOrRegAddr(m.mod, m.rm)
         from type in OperandType(true)
         from bitData in GetRegData(m.reg, type)
-        let bitRaw = bitData.Signed()
+        let bitRaw = bitData.Signed
         let addr = addr0.isMem
             ? (true, (uint)(addr0.addr + (bitRaw >> (type == 1 ? 4 : 5)) * (type == 1 ? 2 : 4)))
             : addr0
@@ -676,20 +662,18 @@ static partial class Program
 
     // NOT r/m : ビット反転（フラグ変化なし）。
     static State<Unit> Group3_Not(MemAddr addr, Data data) =>
-        SetMemOrRegData(addr, data.MapType(b => (byte)~b, w => (ushort)~w, d => ~d));
+        SetMemOrRegData(addr, (~data.Value).ToTypeData(data.type));
 
     // NEG r/m : 0 - r/m。フラグは SUB と同じ。
     static State<Unit> Group3_Neg(MemAddr addr, Data data) =>
-        from _f in data.type == 0 ? update_eflags_sub((byte)0, data.db)
-                 : data.type == 1 ? update_eflags_sub((ushort)0, data.dw)
-                 : update_eflags_sub(0u, data.dd) // 注: byte/ushort の (byte)0/(ushort)0 はオーバーロード解決を明示するため残す
-        from _w in SetMemOrRegData(addr, data.MapType(b => (byte)(0 - b), w => (ushort)(0 - w), d => 0u - d))
+        from _f in update_eflags_sub(data.type, 0, data.Value)
+        from _w in SetMemOrRegData(addr, (0u - data.Value).ToTypeData(data.type))
         select unit;
 
     // MUL r/m : 符号なし乗算。AL*r/m8->AX, AX*r/m16->DX:AX, EAX*r/m32->EDX:EAX。上位が 0 でなければ CF=OF=1。
     static State<Unit> Group3_Mul(Data data) =>
         from acc in GetRegData(0, data.type)
-        let product = (ulong)acc.Value() * data.Value()
+        let product = (ulong)acc.Value * data.Value
         let upper = product >> Bits(data.type)
         from _1 in SetWide(data.type, product)
         from _2 in SetCpu((_cf, upper != 0), (_of, upper != 0))
@@ -698,7 +682,7 @@ static partial class Program
     // IMUL r/m : 符号付き乗算。積が下位の幅に収まらなければ CF=OF=1。
     static State<Unit> Group3_Imul(Data data) =>
         from acc in GetRegData(0, data.type)
-        let result = SignedMultiply(data.type, acc.Signed(), data.Signed())
+        let result = SignedMultiply(data.type, acc.Signed, data.Signed)
         from _1 in SetWide(data.type, (ulong)result.product)
         from _2 in SetCpu((_cf, result.overflow), (_of, result.overflow))
         select unit;
@@ -713,7 +697,7 @@ static partial class Program
         from src in GetMemOrRegData(m.mod, m.rm, true)
         let type = src.data.type              // w=true なので 1(16bit) か 2(32bit)
         from imm in imm8 ? Imm8SignExtended(type) : GetMemoryDataIp_(type)
-        from _2 in ImulInto(m.reg, type, src.data.Signed(), imm.Signed())
+        from _2 in ImulInto(m.reg, type, src.data.Signed, imm.Signed)
         select unit;
 
     // DIV r/m : 符号なし除算。商と剰余を AL/AH, AX/DX, EAX/EDX へ。
@@ -775,13 +759,13 @@ static partial class Program
     // INC r/m: type に応じて +1 し、フラグ(CF以外)を更新して書き戻す。
     static State<Unit> IncData(MemAddr addr, Data data) =>
         from _f in update_eflags_inc(data)
-        from _w in SetMemOrRegData(addr, (data.Value() + 1).ToTypeData(data.type))
+        from _w in SetMemOrRegData(addr, (data.Value + 1).ToTypeData(data.type))
         select unit;
 
     // DEC r/m: type に応じて -1 し、フラグ(CF以外)を更新して書き戻す。
     static State<Unit> DecData(MemAddr addr, Data data) =>
         from _f in update_eflags_dec(data)
-        from _w in SetMemOrRegData(addr, (data.Value() - 1).ToTypeData(data.type))
+        from _w in SetMemOrRegData(addr, (data.Value - 1).ToTypeData(data.type))
         select unit;
 
     // Group4 (0xFE): reg=0 INC r/m8, reg=1 DEC r/m8
@@ -990,7 +974,7 @@ static partial class Program
     static State<Unit> Popa_61 =>
         from _1 in SetLog("Popa_61")
         from type in OperandType(true)
-        from _2 in Enumerable.Range(0, 8).Reverse()
+        from _2 in Enumerable.Sequence(7, 0, -1) // DI(7) から AX(0) へ
             .Select(reg => reg == 4 ? Pop(type).Ignore() : Move(Reg(reg, type), Stack(type)))
             .Sequence()
             .Ignore()
@@ -1032,7 +1016,7 @@ static partial class Program
 
     static State<Unit> PopSregInto(int reg, int type) =>
         from value in Pop(type)
-        from _ in LoadSReg(reg, (ushort)value.Value())
+        from _ in LoadSReg(reg, (ushort)value.Value)
         select unit;
 
     // PUSH Sreg (06/0E/16/1E): opcode>>3 が ES/CS/SS/DS の順のセグメント番号になる。
@@ -1302,7 +1286,7 @@ static partial class Program
         from type in width
         from address in port
         from acc in GetRegData(0, type)
-        from _2 in Effect((env, _) => EnvOutPortN(env, address, Bits(type) / 8, acc.Value()))
+        from _2 in Effect((env, _) => EnvOutPortN(env, address, Bits(type) / 8, acc.Value))
         select unit;
 
     static State<int> ByteOrWord => Opecodes.Select(opecode => opecode[0] & 0x01);

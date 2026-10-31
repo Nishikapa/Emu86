@@ -64,13 +64,11 @@ static public class CpuStates
 // 命令ストリーム(CS:EIP)からの読み取り: オペコード・即値・ModRM(EIP を進める State)。
 static public partial class Fetch
 {
-    static internal readonly int[] arrLen = [1, 2, 4];
-
     static public State<(Data data, MemAddr input)> GetMemoryDataIp(bool w) =>
         from cpu in GetCpu
         let addr = GetCodeAddr(cpu)
         from data in GetMemOrRegData(addr, w)
-        from _ in IpInc(arrLen[data.type])
+        from _ in IpInc(Bytes(data.type))
         select (data, (addr.isMem, addr.addr));
 
     static public State<Data> GetMemoryDataIp_(int type) => MemoryDataIpByType[type];
@@ -169,7 +167,7 @@ static public class AluStates
     {
         if (d1.type != d2.type)
             throw new Exception();
-        return GetDataFromCpu(cpu => CalculateAlu(cpu, d1.type, d1.Value(), d2.Value(), kind).ToTypeData(d1.type));
+        return GetDataFromCpu(cpu => CalculateAlu(cpu, d1.type, d1.Value, d2.Value, kind).ToTypeData(d1.type));
     }
 
     // Group2 を実行し、フラグを更新して結果を type タプルで返す。
@@ -177,7 +175,7 @@ static public class AluStates
         Data data, int count, int kind) =>
         from cf0 in _cf.Get()
         let cnt = count & 0x1F   // 80386 はシフト量を 5bit にマスクする
-        let res = ComputeShift(data.Value(), cnt, kind, Bits(data.type), cf0)
+        let res = ComputeShift(data.Value, cnt, kind, Bits(data.type), cf0)
         // count==0 のときはフラグを変更しない。シフト系(kind>=4)は ZF/SF も更新する。
         from _f in Unless(cnt == 0, kind >= 4
             ? SetCpu((_cf, res.cf), (_of, res.of), (_zf, res.result == 0), (_sf, (res.result & Msb(data.type)) != 0), (_pf, Par(res.result)))
@@ -199,20 +197,12 @@ static public class AluStates
     static public State<Unit> update_eflags(Data data) =>
         SetCpu(cpu =>
         {
-            SetLogicFlags(cpu, data.type, data.Value());
+            SetLogicFlags(cpu, data.type, data.Value);
             return cpu;
         });
 
-    static public State<Unit> update_eflags_sub(byte left, byte right) =>
-        UpdateSubtractionFlags(0, left, right);
-
-    static public State<Unit> update_eflags_sub(uint left, uint right) =>
-        UpdateSubtractionFlags(2, left, right);
-
-    static public State<Unit> update_eflags_sub(ushort left, ushort right) =>
-        UpdateSubtractionFlags(1, left, right);
-
-    static State<Unit> UpdateSubtractionFlags(int type, uint left, uint right) =>
+    // 減算 left - right(type の幅)のフラグ。CMP/NEG/CMPS/SCAS。
+    static public State<Unit> update_eflags_sub(int type, uint left, uint right) =>
         SetCpu(cpu =>
         {
             SetSubtractionFlags(cpu, type, left, right);
@@ -226,7 +216,7 @@ static public class AluStates
     static State<Unit> update_eflags_incdec(Data data, int delta) =>
         SetCpu(cpu =>
         {
-            SetIncDecFlags(cpu, data.type, data.Value(), delta);
+            SetIncDecFlags(cpu, data.type, data.Value, delta);
             return cpu;
         });
 }
@@ -276,7 +266,7 @@ public partial class CPU
 
     // FastStep(高速コア)が直接書き込むため、セッターは公開している。
     public uint eip { get; set; }
-    public ushort ip { get { return (ushort)(this.eip & 0xFFFF); } private set { this.eip = (this.eip & 0xFFFF0000) + value; } }
+    public ushort ip { get => (ushort)(this.eip & 0xFFFF); private set => this.eip = (this.eip & 0xFFFF0000) + value; }
 
     // プロテクトモードで32ビットコードセグメント(D=1)を実行中かどうか。
     // CSがプロテクトモードでロードされたときにセットされる。
@@ -323,8 +313,8 @@ public partial class CPU
     static public readonly Accessor<CPU, ushort> _sp = new(c => c.sp, c => v => { c.sp = v; return c; });
     static public readonly Accessor<CPU, ushort> _bp = new(c => c.bp, c => v => { c.bp = v; return c; });
 
-    public ushort bp { get { return (ushort)(this.ebp & 0xFFFF); } set { this.ebp = (this.ebp & 0xFFFF0000) + value; } }
-    public ushort sp { get { return (ushort)(this.esp & 0xFFFF); } set { this.esp = (this.esp & 0xFFFF0000) + value; } }
+    public ushort bp { get => (ushort)(this.ebp & 0xFFFF); set => this.ebp = (this.ebp & 0xFFFF0000) + value; }
+    public ushort sp { get => (ushort)(this.esp & 0xFFFF); set => this.esp = (this.esp & 0xFFFF0000) + value; }
 
     static public readonly Accessor<CPU, uint> _esp = new(c => c.esp, c => v => { c.esp = v; return c; });
     static public readonly Accessor<CPU, uint> _ebp = new(c => c.ebp, c => v => { c.ebp = v; return c; });
@@ -334,8 +324,7 @@ public partial class CPU
 
     // EFLAGS。bit1 は実 CPU では常に 1(PUSHF/トラップフレーム経由で見える。難読化コードが
     // フラグ値を演算に使うことがあるため、読み書きの両方で強制する)。
-    uint eflags_ = 2;
-    public uint eflags { get => eflags_ | 2; set => eflags_ = value | 2; }
+    public uint eflags { get => field | 2; set => field = value | 2; } = 2;
 
     private const uint CF = 1;
     private const uint PF = 4;
@@ -390,16 +379,16 @@ public partial class CPU
     static public readonly Accessor<CPU, bool> _operand_size_prefix = new(c => c.operand_size_prefix, c => v => { c.operand_size_prefix = v; return c; });
     static public readonly Accessor<CPU, bool> _address_size_prefix = new(c => c.address_size_prefix, c => v => { c.address_size_prefix = v; return c; });
 
-    public bool cf { get { return GetEflags(CF); } set { UpdateEflags(CF, value); } }
-    public bool pf { get { return GetEflags(PF); } set { UpdateEflags(PF, value); } }
-    public bool af { get { return GetEflags(AF); } set { UpdateEflags(AF, value); } }
-    public bool zf { get { return GetEflags(ZF); } set { UpdateEflags(ZF, value); } }
-    public bool sf { get { return GetEflags(SF); } set { UpdateEflags(SF, value); } }
-    public bool tf { get { return GetEflags(TF); } set { UpdateEflags(TF, value); } }
-    public bool jf { get { return GetEflags(JF); } set { UpdateEflags(JF, value); } }
-    public bool df { get { return GetEflags(DF); } set { UpdateEflags(DF, value); } }
-    public bool of { get { return GetEflags(OF); } set { UpdateEflags(OF, value); } }
-    public bool nt { get { return GetEflags(NT); } set { UpdateEflags(NT, value); } }
+    public bool cf { get => GetEflags(CF); set => UpdateEflags(CF, value); }
+    public bool pf { get => GetEflags(PF); set => UpdateEflags(PF, value); }
+    public bool af { get => GetEflags(AF); set => UpdateEflags(AF, value); }
+    public bool zf { get => GetEflags(ZF); set => UpdateEflags(ZF, value); }
+    public bool sf { get => GetEflags(SF); set => UpdateEflags(SF, value); }
+    public bool tf { get => GetEflags(TF); set => UpdateEflags(TF, value); }
+    public bool jf { get => GetEflags(JF); set => UpdateEflags(JF, value); }
+    public bool df { get => GetEflags(DF); set => UpdateEflags(DF, value); }
+    public bool of { get => GetEflags(OF); set => UpdateEflags(OF, value); }
+    public bool nt { get => GetEflags(NT); set => UpdateEflags(NT, value); }
 
     static public readonly Accessor<CPU, bool> _cf = new(c => c.cf, c => v => { c.cf = v; return c; });
     static public readonly Accessor<CPU, bool> _pf = new(c => c.pf, c => v => { c.pf = v; return c; });
@@ -417,30 +406,30 @@ public partial class CPU
     static public readonly Accessor<CPU, byte> _cl = new(c => c.cl, c => v => { c.cl = v; return c; });
     static public readonly Accessor<CPU, byte> _dl = new(c => c.dl, c => v => { c.dl = v; return c; });
 
-    public byte al { get { return (byte)(this.eax & 0xFF); } set { this.eax = (this.eax & 0xFFFFFF00) + value; } }
-    public byte bl { get { return (byte)(this.ebx & 0xFF); } set { this.ebx = (this.ebx & 0xFFFFFF00) + value; } }
-    public byte cl { get { return (byte)(this.ecx & 0xFF); } set { this.ecx = (this.ecx & 0xFFFFFF00) + value; } }
-    public byte dl { get { return (byte)(this.edx & 0xFF); } set { this.edx = (this.edx & 0xFFFFFF00) + value; } }
+    public byte al { get => (byte)(this.eax & 0xFF); set => this.eax = (this.eax & 0xFFFFFF00) + value; }
+    public byte bl { get => (byte)(this.ebx & 0xFF); set => this.ebx = (this.ebx & 0xFFFFFF00) + value; }
+    public byte cl { get => (byte)(this.ecx & 0xFF); set => this.ecx = (this.ecx & 0xFFFFFF00) + value; }
+    public byte dl { get => (byte)(this.edx & 0xFF); set => this.edx = (this.edx & 0xFFFFFF00) + value; }
 
     static public readonly Accessor<CPU, byte> _ah = new(c => c.ah, c => v => { c.ah = v; return c; });
     static public readonly Accessor<CPU, byte> _bh = new(c => c.bh, c => v => { c.bh = v; return c; });
     static public readonly Accessor<CPU, byte> _ch = new(c => c.ch, c => v => { c.ch = v; return c; });
     static public readonly Accessor<CPU, byte> _dh = new(c => c.dh, c => v => { c.dh = v; return c; });
 
-    public byte ah { get { return (byte)((this.eax >> 8) & 0xFF); } set { this.eax = (this.eax & 0xFFFF00FF) + ((uint)value << 8); } }
-    public byte bh { get { return (byte)((this.ebx >> 8) & 0xFF); } set { this.ebx = (this.ebx & 0xFFFF00FF) + ((uint)value << 8); } }
-    public byte ch { get { return (byte)((this.ecx >> 8) & 0xFF); } set { this.ecx = (this.ecx & 0xFFFF00FF) + ((uint)value << 8); } }
-    public byte dh { get { return (byte)((this.edx >> 8) & 0xFF); } set { this.edx = (this.edx & 0xFFFF00FF) + ((uint)value << 8); } }
+    public byte ah { get => (byte)((this.eax >> 8) & 0xFF); set => this.eax = (this.eax & 0xFFFF00FF) + ((uint)value << 8); }
+    public byte bh { get => (byte)((this.ebx >> 8) & 0xFF); set => this.ebx = (this.ebx & 0xFFFF00FF) + ((uint)value << 8); }
+    public byte ch { get => (byte)((this.ecx >> 8) & 0xFF); set => this.ecx = (this.ecx & 0xFFFF00FF) + ((uint)value << 8); }
+    public byte dh { get => (byte)((this.edx >> 8) & 0xFF); set => this.edx = (this.edx & 0xFFFF00FF) + ((uint)value << 8); }
 
     static public readonly Accessor<CPU, ushort> _ax = new(c => c.ax, c => v => { c.ax = v; return c; });
     static public readonly Accessor<CPU, ushort> _bx = new(c => c.bx, c => v => { c.bx = v; return c; });
     static public readonly Accessor<CPU, ushort> _cx = new(c => c.cx, c => v => { c.cx = v; return c; });
     static public readonly Accessor<CPU, ushort> _dx = new(c => c.dx, c => v => { c.dx = v; return c; });
 
-    public ushort ax { get { return (ushort)(this.eax & 0xFFFF); } set { this.eax = (this.eax & 0xFFFF0000) + value; } }
-    public ushort bx { get { return (ushort)(this.ebx & 0xFFFF); } set { this.ebx = (this.ebx & 0xFFFF0000) + value; } }
-    public ushort cx { get { return (ushort)(this.ecx & 0xFFFF); } set { this.ecx = (this.ecx & 0xFFFF0000) + value; } }
-    public ushort dx { get { return (ushort)(this.edx & 0xFFFF); } set { this.edx = (this.edx & 0xFFFF0000) + value; } }
+    public ushort ax { get => (ushort)(this.eax & 0xFFFF); set => this.eax = (this.eax & 0xFFFF0000) + value; }
+    public ushort bx { get => (ushort)(this.ebx & 0xFFFF); set => this.ebx = (this.ebx & 0xFFFF0000) + value; }
+    public ushort cx { get => (ushort)(this.ecx & 0xFFFF); set => this.ecx = (this.ecx & 0xFFFF0000) + value; }
+    public ushort dx { get => (ushort)(this.edx & 0xFFFF); set => this.edx = (this.edx & 0xFFFF0000) + value; }
 
     static public readonly Accessor<CPU, uint> _eax = new(c => c.eax, c => v => { c.eax = v; return c; });
     static public readonly Accessor<CPU, uint> _ebx = new(c => c.ebx, c => v => { c.ebx = v; return c; });
@@ -455,8 +444,8 @@ public partial class CPU
     static public readonly Accessor<CPU, ushort> _si = new(c => c.si, c => v => { c.si = v; return c; });
     static public readonly Accessor<CPU, ushort> _di = new(c => c.di, c => v => { c.di = v; return c; });
 
-    public ushort si { get { return (ushort)(this.esi & 0xFFFF); } set { this.esi = (this.esi & 0xFFFF0000) + value; } }
-    public ushort di { get { return (ushort)(this.edi & 0xFFFF); } set { this.edi = (this.edi & 0xFFFF0000) + value; } }
+    public ushort si { get => (ushort)(this.esi & 0xFFFF); set => this.esi = (this.esi & 0xFFFF0000) + value; }
+    public ushort di { get => (ushort)(this.edi & 0xFFFF); set => this.edi = (this.edi & 0xFFFF0000) + value; }
 
     static public readonly Accessor<CPU, uint> _esi = new(c => c.esi, c => v => { c.esi = v; return c; });
     static public readonly Accessor<CPU, uint> _edi = new(c => c.edi, c => v => { c.edi = v; return c; });

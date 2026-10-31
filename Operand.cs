@@ -45,7 +45,7 @@ static public partial class Operands
     static public State<Unit> Test(Operand left, Operand right) =>
         from a in left.Read
         from b in right.Read
-        from _ in update_eflags((a.Value() & b.Value()).ToTypeData(a.type))
+        from _ in update_eflags((a.Value & b.Value).ToTypeData(a.type))
         select Unit.unit;
 
     // x <-> y

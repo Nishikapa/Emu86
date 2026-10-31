@@ -144,7 +144,7 @@ public sealed class BootAutomation
 
     // ハイライト(背景色付き)されている最初の行の文字列。無ければ空。
     static string HighlightedLine(EmuEnvironment env) =>
-        ScreenLines(env).Where(line => line.highlighted).Select(line => line.text.Trim()).FirstOrDefault() ?? "";
+        ScreenLines(env).FirstOrDefault(line => line.highlighted).text?.Trim() ?? "";
 
     // 画面の空でない行を出力する(自動操作の経過確認用)。選択行には印を付ける。
     static void DumpScreen(EmuEnvironment env, TextWriter output)

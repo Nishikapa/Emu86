@@ -104,7 +104,7 @@ public sealed class NamedPipeSerialHost : ISerialHost
     readonly string name;
     readonly ConcurrentQueue<byte> incoming = new();
     readonly List<byte> outgoing = new();
-    readonly object gate = new();
+    readonly Lock gate = new();
     readonly CancellationTokenSource cancel = new();
     readonly SemaphoreSlim pending = new(0);
     NamedPipeServerStream pipe;

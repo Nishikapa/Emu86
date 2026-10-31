@@ -689,9 +689,9 @@ public static class Semantics
 
     public static uint MoffsAddress(CPU cpu, uint offset, Prefix prefixes) => (OverrideBase(prefixes, cpu) ?? cpu.ds_base) + offset;
 
-    public static uint Load(EmuEnvironment env, uint address, int type) => EnvReadN(env, address, type == 0 ? 1 : type == 1 ? 2 : 4);
+    public static uint Load(EmuEnvironment env, uint address, int type) => EnvReadN(env, address, Bytes(type));
 
-    public static void Store(EmuEnvironment env, uint address, int type, uint value) => EnvWriteN(env, address, type == 0 ? 1 : type == 1 ? 2 : 4, value);
+    public static void Store(EmuEnvironment env, uint address, int type, uint value) => EnvWriteN(env, address, Bytes(type), value);
 
     // コンパイル済みコード向けの幅別の入口(幅の分岐を省く)。
     public static byte Load8(EmuEnvironment env, uint address) => EnvGetMemoryData8(env, address);
@@ -707,7 +707,7 @@ public static class Semantics
     public static void Probe(EmuEnvironment env, uint address, int type, bool readsFirst)
     {
         if (!env.PagingOn) return;
-        var size = type == 0 ? 1 : type == 1 ? 2 : 4;
+        var size = Bytes(type);
         var crosses = (address & 0xFFF) > 0x1000 - (uint)size;
         if (readsFirst)
         {
@@ -721,7 +721,7 @@ public static class Semantics
     // PUSH: 書き込み先を検査して書いてから SP/ESP を減らす(高速コアは先に減らす。フォルト時に SP を変えないための順序)。
     public static void Push(EmuEnvironment env, CPU cpu, int type, uint value)
     {
-        var size = type == 0 ? 1 : type == 1 ? 2 : 4;
+        var size = Bytes(type);
         var pointer = cpu.stack32 ? (uint)(cpu.esp - size) : (ushort)(cpu.sp - size);
         var address = cpu.ss_base + pointer;
         Probe(env, address, type, readsFirst: false);

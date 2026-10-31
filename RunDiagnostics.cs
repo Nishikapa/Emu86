@@ -33,7 +33,7 @@ internal sealed class RunDiagnostics
         this.cpu = cpu;
         this.output = output;
         this.trace = options.Trace ? trace : null;
-        if (env.Ata != null) env.Ata.Log = options.AtaLog;
+        env.Ata?.Log = options.AtaLog;
         env.Pci.Log = options.PciLog;
         env.Pci.Caller = () => WindowsDiagnostics.Caller(env, cpu);
         env.PicLog = options.PicLog;
@@ -150,7 +150,7 @@ internal sealed class RunDiagnostics
         }
         var step = new Step(cpu.cs, cpu.eip, count);
         if (breakpoints.Any(rule => rule(step))) return true;
-        if (env.Ata != null) env.Ata.LogReads = env.PagingOn;
+        env.Ata?.LogReads = env.PagingOn;
         env.Pci.Eip = cpu.eip;
         return false;
     }
