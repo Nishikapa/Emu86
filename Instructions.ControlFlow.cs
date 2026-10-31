@@ -23,13 +23,13 @@ static partial class Instructions
         select (offset, segment);
 
     // メモリの far ポインタ m16:16 / m16:32(offset の直後に selector)。
-    static State<(uint offset, ushort segment)> FarPointerMem(MemAddr addr, int type) =>
+    internal static State<(uint offset, ushort segment)> FarPointerMem(MemAddr addr, int type) =>
         from offset in type == 2 ? GetMemOrRegData32(addr) : GetMemOrRegData16(addr).Select(dw => (uint)dw)
         from segment in GetMemOrRegData16((addr.isMem, addr.addr + (uint)(type == 2 ? 4 : 2)))
         select (offset, segment);
 
     // CS:EIP を target へ切り替える。CS のロードは LoadSReg 経由(プロテクトモードでは GDT 記述子から基底/D ビットを反映)。
-    static State<Unit> FarTransfer((uint offset, ushort segment) target) =>
+    internal static State<Unit> FarTransfer((uint offset, ushort segment) target) =>
         from _1 in _eip.Set(target.offset)
         from _2 in LoadSReg(1, target.segment)
         select unit;
@@ -41,7 +41,7 @@ static partial class Instructions
         select unit;
 
     // CS と戻り番地をオペランドサイズ幅で push する(far CALL のリターンフレーム)。
-    static State<Unit> PushReturnFar(int type) =>
+    internal static State<Unit> PushReturnFar(int type) =>
         from cs in GetSRegData(1)
         from _1 in Push(((uint)cs).ToTypeData(type))
         from _2 in PushReturnNear(type)
@@ -109,12 +109,17 @@ static partial class Instructions
         from _1 in SetLog(name)
         from n in release
         from type in OperandType(true)
+        from _2 in FarReturnOf(type, n)
+        select unit;
+
+    // オペランドサイズと解放バイト数が決まった far 復帰(IR からも使う)。
+    internal static State<Unit> FarReturnOf(int type, ushort release) =>
         from ret in Pop(type)
-        from _2 in JmpTo(ret)
+        from _1 in JmpTo(ret)
         from cs in Pop(type)
-        from _3 in StackAdjust(n)
-        from _4 in When(2 == type, ReturnToOuterStack((ushort)cs.Value))
-        from _5 in LoadSReg(1, (ushort)cs.Value)
+        from _2 in StackAdjust(release)
+        from _3 in When(2 == type, ReturnToOuterStack((ushort)cs.Value))
+        from _4 in LoadSReg(1, (ushort)cs.Value)
         select unit;
 
     // 引数を捨てない RET/RETF(表の初期化順に依存しないよう、フィールドではなくその場で作る)。
@@ -129,13 +134,13 @@ static partial class Instructions
     static State<Unit> Retf_CA => FarReturn("Retf_CA", GetMemoryDataIp16);
 
     // far 間接 JMP: メモリから offset(16/32bit) と selector(16bit) を読み、CS:EIP を切り替える。
-    static State<Unit> JmpFar_rm(MemAddr addr, int type) =>
+    internal static State<Unit> JmpFar_rm(MemAddr addr, int type) =>
         from target in FarPointerMem(addr, type)
         from _ in FarTransfer(target)
         select unit;
 
     // far 間接 CALL: CS と IP/EIP をオペランドサイズ幅で push してから far ジャンプする。
-    static State<Unit> CallFar_rm(MemAddr addr, int type) =>
+    internal static State<Unit> CallFar_rm(MemAddr addr, int type) =>
         from _1 in PushReturnFar(type)
         from _2 in JmpFar_rm(addr, type)
         select unit;
@@ -150,8 +155,13 @@ static partial class Instructions
     static State<Unit> Int_CD =>
         from _1 in SetLog("Int_CD")
         from vector in GetMemoryDataIp8
+        from _2 in SoftwareInterrupt(vector)
+        select unit;
+
+    // INT n の配送: V86 モードでは IOPL と IDT ゲートの DPL を検査する(IR からも使う)。
+    internal static State<Unit> SoftwareInterrupt(int vector) =>
         from cpu in GetCpu
-        from _2 in cpu.vm ? InterruptFromV86(vector) : Interrupt(vector)
+        from _ in cpu.vm ? InterruptFromV86(vector) : Interrupt(vector)
         select unit;
 
     // INT3 (0xCC): ベクタ 3 へのブレークポイント割り込み。

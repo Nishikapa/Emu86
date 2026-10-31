@@ -23,6 +23,9 @@ namespace Emu86;
 // LOOP/LOOPE/LOOPNE/JCXZ、HLT、XLAT、BSWAP、CMOVcc、XADD、CMPXCHG、BT/BTS/BTR/BTC、BSF/BSR、SHLD/SHRD、AAA/AAS/DAA/DAS/AAM/AAD。
 // これらは「共通の基本操作(Alu/StringOps/Mmu)を呼ぶ文」で、状態を変える前にページを検査して、フォルト時の CPU が命令の先頭の
 // 状態のままになる規律(段階 3)を守る。
+// 段階 2 で通常コアから移した命令: セグメントレジスタのロード(MOV Sreg/POP Sreg/LES 系)、MOV r/m,Sreg、PUSH Sreg、IN/OUT、far JMP/CALL/RET、
+// INT n/INT3/INTO/IRET、ENTER、RDTSC、CPUID、FWAIT。記述子の検査や割り込みの配送は通常コアの State(Segments/Interrupts)を
+// そのまま 1 つの文(StateStmt)として実行し、フォルト時は文の前の CPU へ戻す(通常コアの実行器と同じ回復)。
 // メモリオペランドは実効アドレスの式で表し、読み書きは Environment の共通経路(ページフォルトは例外のまま)を呼ぶ。
 // 状態を変える前に読んだ値を後で使う命令(XCHG、CALL 間接)は Let で一時変数に束縛する(TempExpr)。
 
@@ -156,6 +159,12 @@ public sealed record BswapExpr(Expr Value) : Expr
 public sealed record XlatAddressExpr : Expr
 {
     public override uint Evaluate(EmuEnvironment env, CPU cpu) => Semantics.XlatAddress(cpu);
+}
+
+// セグメントレジスタのセレクタ(ES=0 CS=1 SS=2 DS=3 FS=4 GS=5)
+public sealed record SegmentExpr(int Sreg) : Expr
+{
+    public override uint Evaluate(EmuEnvironment env, CPU cpu) => Semantics.ReadSegment(cpu, Sreg);
 }
 
 // オペランドの置き場所: レジスタ番号か、アドレス式。
@@ -332,6 +341,39 @@ public sealed record AdjustStmt(int Kind, uint Immediate) : Stmt
 public sealed record StringStmt(int Op, int Size, bool Address32, Prefix Prefixes, int Repeat) : Stmt
 {
     public override void Run(EmuEnvironment env, CPU cpu) => Semantics.StringOp(env, cpu, Op, Size, Address32, (int)Prefixes, Repeat);
+}
+
+// 通常コアの State を 1 つ実行する(セグメントのロード、far 転送、割り込みの配送、ENTER)。State は EIP の前進を自分で行う。
+public sealed record StateStmt(State<Unit> State, string Name) : Stmt
+{
+    public override void Run(EmuEnvironment env, CPU cpu) => Semantics.RunState(env, cpu, State);
+}
+
+// 引数(アドレスやセレクタ)を評価してから、その値で組み立てた State を実行する。
+public sealed record ArgumentStateStmt(Expr Argument, Func<uint, State<Unit>> Build, string Name) : Stmt
+{
+    public override void Run(EmuEnvironment env, CPU cpu) => Semantics.RunState(env, cpu, Build(Argument.Evaluate(env, cpu)));
+}
+
+// IN acc, port / OUT port, acc(ブロックの終端、連結しない)
+public sealed record PortInStmt(int Type, Expr Port) : Stmt
+{
+    public override void Run(EmuEnvironment env, CPU cpu) => Semantics.PortIn(env, cpu, Type, Port.Evaluate(env, cpu));
+}
+
+public sealed record PortOutStmt(int Type, Expr Port, Expr Value) : Stmt
+{
+    public override void Run(EmuEnvironment env, CPU cpu) => Semantics.PortOut(env, Type, Port.Evaluate(env, cpu), Value.Evaluate(env, cpu));
+}
+
+public sealed record RdtscStmt : Stmt
+{
+    public override void Run(EmuEnvironment env, CPU cpu) => Semantics.Rdtsc(env, cpu);
+}
+
+public sealed record CpuidStmt : Stmt
+{
+    public override void Run(EmuEnvironment env, CPU cpu) => Semantics.Cpuid(cpu);
 }
 
 public sealed record Block(IReadOnlyList<Stmt> Statements) : Stmt
@@ -634,6 +676,40 @@ public static class Semantics
             0x0FBC or 0x0FBD => from source in Read(Rm(), typeW) from _1 in Statement(new BitScanStmt(reg, source, op == 0x0FBC, typeW)) from _2 in Advance(length) select Unit.unit,
             0x0FC0 or 0x0FC1 => Simple(new ExchangeAddStmt(Rm(), reg, type), length),
             >= 0x0FC8 and <= 0x0FCF => Move(Place.Register(op & 7), _ => new BswapExpr(new RegExpr(op & 7, 2)), 2, length),
+            // ---- docs/adr/0003 段階 2: 通常コアの State を呼ぶ文 ----
+            0x06 or 0x0E or 0x16 or 0x1E => PushValue(typeW, _ => new SegmentExpr(op >> 3), length),
+            0x07 or 0x17 or 0x1F => Statement(new StateStmt(Instructions.PopSregInto(op >> 3, typeW).Then(CpuStates.IpInc(length)), "POP Sreg")),
+            0x8C when reg <= 5 => Move(Rm(), _ => new SegmentExpr(reg), 1, length),
+            0x8E when reg <= 5 && reg != 1 => // MOV CS は通常コアに残す(ブロックの途中で CS を変えない)
+                from selector in Read(Rm(), typeW)
+                from _ in Statement(new ArgumentStateStmt(selector, value => Segments.LoadSReg(reg, (ushort)value).Then(CpuStates.IpInc(length)), "MOV Sreg"))
+                select Unit.unit,
+            0x9A => Statement(new StateStmt(CpuStates.IpInc(length).Then(Instructions.PushReturnFar(typeW)).Then(Instructions.FarTransfer((instruction.Immediate, (ushort)instruction.Immediate2))), "CALL far")),
+            0x9B => Advance(length),
+            0xC4 or 0xC5 when instruction.ModRm is { Mod: not 3 } =>
+                Statement(new ArgumentStateStmt(Rm().Address, address => Instructions.LoadFarPointer(reg, op == 0xC4 ? 0 : 3, (true, address), typeW).Then(CpuStates.IpInc(length)), "LES/LDS")),
+            0xC8 => Statement(new StateStmt(DataAccess.Enter((ushort)instruction.Immediate, (int)instruction.Immediate2).Then(CpuStates.IpInc(length)), "ENTER")),
+            0xCA => Statement(new StateStmt(Instructions.FarReturnOf(typeW, (ushort)instruction.Immediate), "RETF imm16")),
+            0xCB => Statement(new StateStmt(Instructions.FarReturnOf(typeW, 0), "RETF")),
+            0xCC => Statement(new StateStmt(CpuStates.IpInc(length).Then(Interrupts.Interrupt(3)), "INT3")),
+            0xCD => Statement(new StateStmt(CpuStates.IpInc(length).Then(Instructions.SoftwareInterrupt((int)instruction.Immediate)), "INT")),
+            0xCE => Statement(new IfStmt(0, new StateStmt(CpuStates.IpInc(length).Then(Interrupts.Interrupt(4)), "INTO"), new AdvanceStmt(length))),
+            0xCF => Statement(new StateStmt(Interrupts.Iret, "IRET")),
+            0xE4 or 0xE5 => Simple(new PortInStmt(op & 1, new ImmExpr(instruction.Immediate, 0)), length),
+            0xE6 or 0xE7 => Simple(new PortOutStmt(op & 1, new ImmExpr(instruction.Immediate, 0), new RegExpr(0, op & 1)), length),
+            0xEA => Statement(new StateStmt(Instructions.FarTransfer((instruction.Immediate, (ushort)instruction.Immediate2)), "JMP far")),
+            0xEC or 0xED => Simple(new PortInStmt(type, new RegExpr(2, 1)), length),
+            0xEE or 0xEF => Simple(new PortOutStmt(type, new RegExpr(2, 1), new RegExpr(0, type)), length),
+            0xFF when reg == 3 && instruction.ModRm is { Mod: not 3 } =>
+                Statement(new ArgumentStateStmt(Rm().Address, address => CpuStates.IpInc(length).Then(Instructions.CallFar_rm((true, address), typeW)), "CALL far m")),
+            0xFF when reg == 5 && instruction.ModRm is { Mod: not 3 } =>
+                Statement(new ArgumentStateStmt(Rm().Address, address => Instructions.JmpFar_rm((true, address), typeW), "JMP far m")),
+            0x0F31 => Simple(new RdtscStmt(), length),
+            0x0FA0 or 0x0FA8 => PushValue(typeW, _ => new SegmentExpr(op == 0x0FA0 ? 4 : 5), length),
+            0x0FA1 or 0x0FA9 => Statement(new StateStmt(Instructions.PopSregInto(op == 0x0FA1 ? 4 : 5, typeW).Then(CpuStates.IpInc(length)), "POP FS/GS")),
+            0x0FA2 => Simple(new CpuidStmt(), length),
+            0x0FB2 or 0x0FB4 or 0x0FB5 when instruction.ModRm is { Mod: not 3 } =>
+                Statement(new ArgumentStateStmt(Rm().Address, address => Instructions.LoadFarPointer(reg, op == 0x0FB2 ? 2 : op == 0x0FB4 ? 4 : 5, (true, address), typeW).Then(CpuStates.IpInc(length)), "LSS/LFS/LGS")),
             _ => null,
         };
         if (program == null) return null;
@@ -650,11 +726,19 @@ public static class Semantics
     public static bool EndsBlock(Instruction instruction) => instruction.Opcode switch
     {
         (>= 0x70 and <= 0x7F) or (>= 0xE0 and <= 0xE3) or 0xE8 or 0xE9 or 0xEB or 0xC2 or 0xC3 or (>= 0x0F80 and <= 0x0F8F) => true,
-        0xFF => instruction.ModRm is { Reg: 2 or 4 },
+        0x9A or 0xEA or 0xCA or 0xCB or 0xCC or 0xCD or 0xCE => true, // far 転送、INT
+        0x0F31 => true, // RDTSC: env.Tsc を読むのでブロックの最後に置く(UsesClock)
+        0xFF => instruction.ModRm is { Reg: 2 or 3 or 4 or 5 },
         _ => StopsChain(instruction),
     };
 
-    public static bool StopsChain(Instruction instruction) => instruction.Opcode is 0xFB or 0xF4 or 0x9D or (>= 0x6C and <= 0x6F);
+    // IRET は IF を立てうる。IN/OUT/INS/OUTS はデバイスが割り込み要求を立てうる。
+    public static bool StopsChain(Instruction instruction) =>
+        instruction.Opcode is 0xFB or 0xF4 or 0x9D or 0xCF or (>= 0x6C and <= 0x6F) or (>= 0xE4 and <= 0xE7) or (>= 0xEC and <= 0xEF);
+
+    // env.Tsc(命令数の時計)を読む命令: RDTSC と、PIT/RTC/PM タイマなど時刻を返しうるポート入出力。
+    public static bool UsesClock(Instruction instruction) =>
+        instruction.Opcode is 0x0F31 or (>= 0x6C and <= 0x6F) or (>= 0xE4 and <= 0xE7) or (>= 0xEC and <= 0xEF);
 
     /// 解釈器(各ノードの Evaluate/Run) ///////////////////////////////
     public static void Interpret(Stmt statement, EmuEnvironment env, CPU cpu) => statement.Run(env, cpu);
@@ -788,6 +872,12 @@ public static class Semantics
         DivideStmt divide => Call(nameof(Divide), s.Cpu, Const(divide.Type), CompileExpression(divide.Divisor, s), Const(divide.Signed)),
         AdjustStmt adjust => Call(nameof(AdjustDecimal), s.Cpu, Const(adjust.Kind), Const(adjust.Immediate)),
         StringStmt text => Call(nameof(StringOp), s.Env, s.Cpu, Const(text.Op), Const(text.Size), Const(text.Address32), Const((int)text.Prefixes), Const(text.Repeat)),
+        StateStmt state => Call(nameof(RunState), s.Env, s.Cpu, Expression.Constant(state.State)),
+        ArgumentStateStmt state => Call(nameof(RunState), s.Env, s.Cpu, Expression.Invoke(Expression.Constant(state.Build), CompileExpression(state.Argument, s))),
+        PortInStmt input => Call(nameof(PortIn), s.Env, s.Cpu, Const(input.Type), CompileExpression(input.Port, s)),
+        PortOutStmt output => Call(nameof(PortOut), s.Env, Const(output.Type), CompileExpression(output.Port, s), CompileExpression(output.Value, s)),
+        RdtscStmt => Call(nameof(Rdtsc), s.Env, s.Cpu),
+        CpuidStmt => Call(nameof(Cpuid), s.Cpu),
         Block { Statements.Count: 0 } => Expression.Empty(),
         Block block => Expression.Block(block.Statements.Select(inner => CompileStatement(inner, s))),
         _ => throw new ArgumentOutOfRangeException(nameof(statement)),
@@ -829,6 +919,7 @@ public static class Semantics
         FlagsExpr f => Expression.And(Eflags(s), Const(Mask(f.Type))),
         BswapExpr b => Call(nameof(Bswap), CompileExpression(b.Value, s)),
         XlatAddressExpr => Call(nameof(XlatAddress), s.Cpu),
+        SegmentExpr segment => Call(nameof(ReadSegment), s.Cpu, Const(segment.Sreg)),
         _ => throw new ArgumentOutOfRangeException(nameof(expr)),
     };
 
@@ -1154,6 +1245,40 @@ public static class Semantics
     public static void Divide(CPU cpu, int type, uint divisor, bool signed) => Emu86.Alu.Divide(cpu, type, divisor, signed);
 
     public static void AdjustDecimal(CPU cpu, int kind, uint immediate) => Emu86.Alu.AdjustDecimal(cpu, kind, immediate);
+
+    /// docs/adr/0003 段階 2 ///////////////////////////////
+    public static uint ReadSegment(CPU cpu, int sreg) => DataAccess.ArraySreg[sreg].getter(cpu);
+
+    // 通常コアの State を 1 つ実行する。失敗しない(where を含まない)State だけを渡す。
+    // フォルトは CPU を文の前の状態へ戻してから投げ直す(通常コアの実行器の回復と同じ。メモリへの書き込みは戻さないのも同じ)。
+    public static void RunState(EmuEnvironment env, CPU cpu, State<Unit> state)
+    {
+        var checkpoint = env.Translations.Checkpoint;
+        cpu.CopyTo(checkpoint);
+        try
+        {
+            var result = state(env, cpu, null);
+            if (!ReferenceEquals(result.cpu, cpu)) result.cpu.CopyTo(cpu);
+            if (!result.IsSuccess) throw new InvalidOperationException("a State used by the IR failed");
+        }
+        catch (CpuFaultException)
+        {
+            checkpoint.CopyTo(cpu);
+            throw;
+        }
+    }
+
+    public static void PortIn(EmuEnvironment env, CPU cpu, int type, uint port) => WriteRegister(cpu, 0, type, EnvInPortN(env, (int)port, Bytes(type)));
+
+    public static void PortOut(EmuEnvironment env, int type, uint port, uint value) => EnvOutPortN(env, (int)port, Bytes(type), value);
+
+    public static void Rdtsc(EmuEnvironment env, CPU cpu)
+    {
+        cpu.eax = (uint)env.Tsc;
+        cpu.edx = (uint)(env.Tsc >> 32);
+    }
+
+    public static void Cpuid(CPU cpu) => (cpu.eax, cpu.ebx, cpu.ecx, cpu.edx) = Instructions.CpuidLeaf(cpu.eax);
 
     // 文字列命令。repeat: 0 単発、1 REP/REPE、2 REPNE。CMPS/SCAS だけ ZF で打ち切る。
     public static void StringOp(EmuEnvironment env, CPU cpu, int op, int size, bool address32, int prefixes, int repeat)

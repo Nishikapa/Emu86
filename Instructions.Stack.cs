@@ -70,7 +70,7 @@ static partial class Instructions
         from _ in Push(((uint)selector).ToTypeData(type))
         select unit;
 
-    static State<Unit> PopSregInto(int reg, int type) =>
+    internal static State<Unit> PopSregInto(int reg, int type) =>
         from value in Pop(type)
         from _ in LoadSReg(reg, (ushort)value.Value)
         select unit;
