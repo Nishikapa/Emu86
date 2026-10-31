@@ -51,6 +51,11 @@ internal static class EmulationRunner
                 env.Com1.Pump();
                 env.Com2.Pump();
                 bootAutomation?.Step(env, count, output);
+                if (bootAutomation is { Completed: true, StopWhenCompleted: true })
+                {
+                    output.WriteLine($"automation completed at {cpu.cs:x4}:{cpu.eip:x8} (instr {count})");
+                    break;
+                }
                 control?.WaitIfPaused(cpu, count, stop);
                 if (stop.IsCancellationRequested)
                 {
@@ -199,6 +204,8 @@ internal static class EmulationRunner
         }
 
         if (count >= options.Limit) output.WriteLine("instruction limit reached");
+        // 自動操作が終わらないまま止まったときは、何を待っていたか分かるように画面を出す。
+        if (bootAutomation is { Completed: false }) { output.WriteLine($"[automation] not completed (status {bootAutomation.Status}); screen at stop:"); BootAutomation.DumpScreen(env, output); }
         saveSnapshot?.Invoke(count, cpu, env);
         if (halts > 0)
             error.WriteLine($"[halt] {halts:N0} waits skipped {haltSkipped:N0} instructions of idle time ({100.0 * haltSkipped / Math.Max(1, count):F1}% of the count)");

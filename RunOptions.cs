@@ -50,6 +50,8 @@ internal sealed class RunOptions
     public string Com1Pipe { get; private set; }
     public string Com2Pipe { get; private set; }
     public bool BootDebug { get; private set; }
+    // --type の手順(「プロンプト=>キー列」。順に打つ)。
+    public List<string> Type { get; } = [];
     public long Limit { get; private set; } = InstructionLimit;
     public long SnapshotInterval { get; private set; } = 100_000_000;
     public string SnapshotPath { get; private set; } = "snapshot.snap";
@@ -104,6 +106,7 @@ internal sealed class RunOptions
         Of("Run", "--com1", "name", @"Serve COM1 on \\.\pipe\name (WinDbg: com:pipe,port=\\.\pipe\name,resets=0,reconnect)", Value, (o, v) => o.Com1Pipe = v),
         Of("Run", "--com2", "name", @"Serve COM2 on \\.\pipe\name", Value, (o, v) => o.Com2Pipe = v),
         Flag("Run", "--boot-debug", "Drive NTLDR's F8 menu to boot Windows in Debugging Mode (COM2, 19200 bps)", o => o.BootDebug = true),
+        Of("Run", "--type", "[prompt=>]keys", "Type keys into the guest once the last screen line ends with prompt (repeatable, in order; \n is Enter); the run stops when the last prompt returns", Value, (o, v) => o.Type.Add(v)),
         Flag("Run", "--help", "Show this help and exit", o => o.Help = true),
         Of("Disk", "--disk", "path", "Base disk image (default: sample.vhd or sample.vhdx in the current directory)", Value, (o, v) => o.DiskPath = v),
         Of("Disk", "--overlay", "path", "Writable overlay for --disk (default: the base path with .avhdx)", Value, (o, v) => o.OverlayPath = v),
