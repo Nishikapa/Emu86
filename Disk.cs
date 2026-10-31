@@ -366,12 +366,9 @@ public partial class DiskImage : IDisposable
         file.Write(e);
     }
 
-    // ============ AVHDX の新規作成 ============
+    // ============ AVHDX の新規作成(形式の書き込みは DiskFormat.Write.cs) ============
 
     // この実装が作る AVHDX を識別する Creator 印。書き込みフォーマットを変えたら
-    // 版数を上げると、古い版で作られた overlay は自動的に作り直される。
-    const string OverlayCreator = "Emu86-avhdx-1";
-
     // overlayPath が無ければ、basePath を親とする差分 VHDX(AVHDX)を作成する。
     // 既存 overlay がこの実装の版と一致しなければ退避して作り直す
     // (開発途中の古い形式で書かれた overlay が壊れて読めない事故を防ぐ)。
@@ -436,139 +433,6 @@ public partial class DiskImage : IDisposable
         }
     }
 
-    // 差分 VHDX を生成する。構造: FileID / Header x2 / RegionTable x2 / Log(1MB) / Metadata(1MB) / BAT。
-    static void CreateAvhdx(string path, string parentPath, long virtualSize, int blockSize, Guid parentDataWriteGuid)
-    {
-        var layout = new VhdxBatLayout(virtualSize, blockSize, hasParent: true);
-        var batLength = layout.RegionLength;
-
-        var image = new byte[checked(0x300000 + batLength)];
-        var w = image.AsSpan();
-
-        // File Identifier(Creator にフォーマット版数を埋め、旧版 overlay を判別できるようにする)
-        "vhdxfile"u8.CopyTo(w);
-        System.Text.Encoding.Unicode.GetBytes(OverlayCreator).CopyTo(w[8..]);
-
-        // Header x2 (0x10000, 0x20000)
-        for (int i = 0; i < 2; i++)
-        {
-            var h = w.Slice(0x10000 + i * 0x10000, 4096);
-            "head"u8.CopyTo(h);
-            BinaryPrimitives.WriteUInt64LittleEndian(h[8..], (ulong)(i + 1)); // SequenceNumber
-            Guid.NewGuid().TryWriteBytes(h[0x10..]);                          // FileWriteGuid
-            Guid.NewGuid().TryWriteBytes(h[0x20..]);                          // DataWriteGuid
-            // LogGuid = 0 (クリーン)
-            BinaryPrimitives.WriteUInt16LittleEndian(h[0x42..], 1);           // Version
-            BinaryPrimitives.WriteUInt32LittleEndian(h[0x44..], 0x100000);    // LogLength
-            BinaryPrimitives.WriteUInt64LittleEndian(h[0x48..], 0x100000);    // LogOffset
-            BinaryPrimitives.WriteUInt32LittleEndian(h[4..], Crc32C(h));      // Checksum
-        }
-
-        // Region Table x2 (0x30000, 0x40000)
-        {
-            var rt = w.Slice(0x30000, 0x10000);
-            "regi"u8.CopyTo(rt);
-            BinaryPrimitives.WriteUInt32LittleEndian(rt[8..], 2);
-            var e0 = rt[16..];
-            BatRegionGuid.TryWriteBytes(e0);
-            BinaryPrimitives.WriteInt64LittleEndian(e0[16..], 0x300000);
-            BinaryPrimitives.WriteUInt32LittleEndian(e0[24..], (uint)batLength);
-            BinaryPrimitives.WriteUInt32LittleEndian(e0[28..], 1); // Required
-            var e1 = rt[48..];
-            MetaRegionGuid.TryWriteBytes(e1);
-            BinaryPrimitives.WriteInt64LittleEndian(e1[16..], 0x200000);
-            BinaryPrimitives.WriteUInt32LittleEndian(e1[24..], 0x100000);
-            BinaryPrimitives.WriteUInt32LittleEndian(e1[28..], 1);
-            BinaryPrimitives.WriteUInt32LittleEndian(rt[4..], Crc32C(rt));
-            rt.CopyTo(w.Slice(0x40000, 0x10000));
-        }
-
-        // Metadata (0x200000): テーブル + 実データ(領域先頭から 0x10000 以降)
-        {
-            const int metaBase = 0x200000;
-            "metadata"u8.CopyTo(w[metaBase..]);
-            var dataOff = 0x10000;
-            var entryIdx = 0;
-
-            // ローカル関数は Span をキャプチャできないため、image + 絶対オフセットで書く
-            void AddEntry(Guid id, byte[] data, uint flags)
-            {
-                var e = image.AsSpan(metaBase + 32 + entryIdx * 32, 32);
-                id.TryWriteBytes(e);
-                BinaryPrimitives.WriteUInt32LittleEndian(e[16..], (uint)dataOff);
-                BinaryPrimitives.WriteUInt32LittleEndian(e[20..], (uint)data.Length);
-                BinaryPrimitives.WriteUInt32LittleEndian(e[24..], flags);
-                data.CopyTo(image.AsSpan(metaBase + dataOff));
-                dataOff += (data.Length + 15) & ~15;
-                entryIdx++;
-            }
-
-            // File Parameters: BlockSize + HasParent(bit1)
-            var fp = new byte[8];
-            BinaryPrimitives.WriteUInt32LittleEndian(fp, (uint)blockSize);
-            BinaryPrimitives.WriteUInt32LittleEndian(fp.AsSpan(4), 2);
-            AddEntry(FileParamsGuid, fp, 0x04);
-
-            var vds = new byte[8];
-            BinaryPrimitives.WriteInt64LittleEndian(vds, virtualSize);
-            AddEntry(DiskSizeGuid, vds, 0x06);
-
-            var lss = new byte[4];
-            BinaryPrimitives.WriteUInt32LittleEndian(lss, SectorSize);
-            AddEntry(LogicalSectorGuid, lss, 0x06);
-
-            var pss = new byte[4];
-            BinaryPrimitives.WriteUInt32LittleEndian(pss, 4096);
-            AddEntry(PhysicalSectorGuid, pss, 0x06);
-
-            AddEntry(Page83Guid, Guid.NewGuid().ToByteArray(), 0x06);
-
-            AddEntry(ParentLocatorGuid, BuildParentLocator(parentPath, path, parentDataWriteGuid), 0x04);
-
-            BinaryPrimitives.WriteUInt16LittleEndian(w[(metaBase + 10)..], (ushort)entryIdx);
-        }
-
-        File.WriteAllBytes(path, image);
-    }
-
-    // ペアレントロケータ項目: parent_linkage / relative_path / absolute_win32_path
-    static byte[] BuildParentLocator(string parentPath, string childPath, Guid parentDataWriteGuid)
-    {
-        var childDir = Path.GetDirectoryName(Path.GetFullPath(childPath)) ?? ".";
-        var relative = Path.GetRelativePath(childDir, Path.GetFullPath(parentPath)).Replace(Path.DirectorySeparatorChar, '\\');
-        if (!relative.StartsWith('.') && !relative.Contains(':'))
-            relative = ".\\" + relative;
-        var kv = new (string key, string val)[]
-        {
-            ("parent_linkage", parentDataWriteGuid.ToString("B").ToUpperInvariant()),
-            ("relative_path", relative),
-            ("absolute_win32_path", Path.GetFullPath(parentPath)),
-        };
-
-        var headerLen = 20 + kv.Length * 12;
-        var total = headerLen + kv.Sum(x => (x.key.Length + x.val.Length) * 2);
-        var buf = new byte[total];
-        var s = buf.AsSpan();
-        VhdxParentLocatorType.TryWriteBytes(s);
-        BinaryPrimitives.WriteUInt16LittleEndian(s[18..], (ushort)kv.Length);
-        var off = headerLen;
-        for (int i = 0; i < kv.Length; i++)
-        {
-            var e = s[(20 + i * 12)..];
-            var kb = System.Text.Encoding.Unicode.GetBytes(kv[i].key);
-            var vb = System.Text.Encoding.Unicode.GetBytes(kv[i].val);
-            BinaryPrimitives.WriteUInt32LittleEndian(e, (uint)off);
-            kb.CopyTo(s[off..]);
-            off += kb.Length;
-            BinaryPrimitives.WriteUInt32LittleEndian(e[4..], (uint)off);
-            vb.CopyTo(s[off..]);
-            off += vb.Length;
-            BinaryPrimitives.WriteUInt16LittleEndian(e[8..], (ushort)kb.Length);
-            BinaryPrimitives.WriteUInt16LittleEndian(e[10..], (ushort)vb.Length);
-        }
-        return buf;
-    }
-
     // CRC-32C (Castagnoli)。VHDX のヘッダ/リージョンテーブルのチェックサムに使う。
     static readonly uint[] Crc32CTable = BuildCrc32CTable();
 
@@ -585,7 +449,7 @@ public partial class DiskImage : IDisposable
         return t;
     }
 
-    static uint Crc32C(ReadOnlySpan<byte> data)
+    internal static uint Crc32C(ReadOnlySpan<byte> data)
     {
         var crc = 0xFFFFFFFF;
         foreach (var b in data)
