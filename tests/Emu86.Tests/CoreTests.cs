@@ -335,6 +335,8 @@ static class CoreTests
             [0xFF, 0x2B], [0xFF, 0x1B], [0x66, 0xFF, 0x2B], [0x66, 0xFF, 0x1B], [0xCB], [0xCA, 0x08, 0x00], [0x66, 0xCB], [0x66, 0xCA, 0x04, 0x00],
             [0xCD, 0x21], [0xCC], [0xCE], [0xCF], [0x66, 0xCF], [0xC8, 0x10, 0x00, 0x00], [0xC8, 0x08, 0x00, 0x01], [0xC8, 0x04, 0x00, 0x02],
             [0x0F, 0x31], [0x0F, 0xA2], [0x9B],
+            // CMPXCHG8B(等しくない組。等しい組は下で別に)
+            [0x0F, 0xC7, 0x0B], [0xF0, 0x0F, 0xC7, 0x0B],
         ];
         uint[] values = [0, 1, 0x7F, 0x80, 0xFF, 0x7FFF, 0x8000, 0xFFFF, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF, 0x12345678, 0x3000];
         static void Prepare(EmuEnvironment env, byte[] code)
@@ -426,6 +428,30 @@ static class CoreTests
                 Prepare(compilerEnv, code);
                 run(compilerEnv, compiled);
                 Equal(Convert.ToHexString(CpuBytes(expected)), Convert.ToHexString(CpuBytes(compiled)), $"compiled {Convert.ToHexString(code)} {left:x} {right:x}");
+                cases++;
+            }
+        }
+        // CMPXCHG8B の等しい組: [ebx] = EDX:EAX にしてから実行すると ECX:EBX が書かれて ZF=1。
+        foreach (var code in new byte[][] { [0x0F, 0xC7, 0x0B], [0xF0, 0x0F, 0xC7, 0x0B] })
+        {
+            Prepare(reference, code);
+            var block = Semantics.Lower(DecodeInstruction(reference, new CPU { code32 = true }));
+            var run = Semantics.Compile(block);
+            foreach (var left in values)
+            {
+                CPU Start() { var start = CreateCpu(left, 0x3000); start.edx = ~left; return start; }
+                void Fill(EmuEnvironment env) { Prepare(env, code); BitConverter.GetBytes(left).CopyTo(env.Ram, 0x3000); BitConverter.GetBytes(~left).CopyTo(env.Ram, 0x3004); }
+                var expected = Start(); Fill(reference);
+                Equal(true, SlowStep(reference, expected, null).IsSuccess, "reference cmpxchg8b");
+                Equal((true, 3u, 0x3000u), (expected.zf, BitConverter.ToUInt32(reference.Ram, 0x3004), BitConverter.ToUInt32(reference.Ram, 0x3000)), $"cmpxchg8b equal writes ECX:EBX {left:x}");
+                var interpreted = Start(); Fill(interpreterEnv);
+                Semantics.Interpret(block, interpreterEnv, interpreted);
+                Equal(Convert.ToHexString(CpuBytes(expected)), Convert.ToHexString(CpuBytes(interpreted)), $"interpreter cmpxchg8b {left:x}");
+                Equal(Memory(reference), Memory(interpreterEnv), $"interpreter cmpxchg8b memory {left:x}");
+                var compiled = Start(); Fill(compilerEnv);
+                run(compilerEnv, compiled);
+                Equal(Convert.ToHexString(CpuBytes(expected)), Convert.ToHexString(CpuBytes(compiled)), $"compiled cmpxchg8b {left:x}");
+                Equal(Memory(reference), Memory(compilerEnv), $"compiled cmpxchg8b memory {left:x}");
                 cases++;
             }
         }
