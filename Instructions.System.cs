@@ -60,7 +60,7 @@ static partial class Instructions
     //   リーフ 1: family 6、拡張機能なし。EDX はエミュレートできる機能のみ:
     //             FPU(0x1) PSE(0x8) TSC(0x10) MSR(0x20) PAE(0x40) CX8(0x100) CMOV(0x8000)。
     //             686-pae カーネルはここで PAE を確認して CR4.PAE を設定する。APIC/SEP/FXSR/MMX 等は未実装のため伏せる。
-    static (uint eax, uint ebx, uint ecx, uint edx) CpuidLeaf(uint leaf) => leaf switch
+    internal static (uint eax, uint ebx, uint ecx, uint edx) CpuidLeaf(uint leaf) => leaf switch
     {
         0 => (1, 0x756e6547, 0x6c65746e, 0x49656e69),
         1 => (0x00000600, 0, 0, 0x00008179),

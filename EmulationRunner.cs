@@ -28,6 +28,8 @@ internal static class EmulationRunner
         var swatch = System.Diagnostics.Stopwatch.StartNew();
         long lastReport = count;
         long fastCount = 0;
+        // 翻訳ブロックの外で実行した命令の先頭 2 バイト別の回数(高速コア / 通常コア)。翻訳が切れる理由の調査用([outside] に上位を出す)。
+        Dictionary<ushort, long> outsideFast = [], outsideReference = [];
         long translatedCount = 0;
         long haltSkipped = 0, halts = 0;
         if (env.NextIrq == 0) env.NextIrq = count + IrqPeriod;
@@ -112,6 +114,7 @@ internal static class EmulationRunner
                 var result = executor.Step(env, cpu);
                 if (executor.UsedFastPath) fastCount += executor.Executed;
                 if (executor.UsedTranslation) translatedCount += executor.Executed;
+                else if (env.Translations.Enabled && result.IsSuccess) CountOutside(executor.UsedFastPath ? outsideFast : outsideReference, env, cpu.cs_base + executor.LastEip);
                 if (result.IsSuccess)
                     cpu = result.cpu;
                 else
@@ -200,8 +203,25 @@ internal static class EmulationRunner
             output.WriteLine($"fast-path coverage: {fastCount:N0}/{count:N0} ({100.0 * fastCount / count:F2}%)");
         if (env.Translations.Enabled && count > 0)
             error.WriteLine($"[translation] {env.Translations.Translated:N0} sites lowered, {env.Translations.Compiled:N0} compiled; {translatedCount:N0}/{count:N0} instructions ({100.0 * translatedCount / count:F2}%: {env.Translations.Interpreted:N0} interpreted, {env.Translations.Executed:N0} compiled); {env.Translations.Runs:N0} block runs ({(env.Translations.Runs == 0 ? 0 : (double)translatedCount / env.Translations.Runs):F1} instructions each) in {env.Translations.Steps:N0} steps; {env.Translations.Invalidations:N0} page invalidations, {env.Translations.CompileMilliseconds:F0} ms compiling");
+        if (env.Translations.Enabled && count > 0)
+            error.WriteLine($"[outside] fast core {outsideFast.Values.Sum():N0}: {Top(outsideFast)}; reference core {outsideReference.Values.Sum():N0}: {Top(outsideReference)}");
         diagnostics.ReportStop(count);
         control?.Stopped(cpu, count);
         return count;
     }
+
+    // 副作用なしに命令の先頭 2 バイトを読む: ページング中は TLB に載っている(直前にフェッチした)ページだけ、RAM を直接読む
+    // (共通経路で読むとページテーブルの Accessed ビットや VGA のラッチが変わり、1 命令ずつの実行と状態が食い違う)。
+    static void CountOutside(Dictionary<ushort, long> histogram, EmuEnvironment env, uint linear)
+    {
+        uint physical;
+        if (env.Paging.Enabled) { if (!env.Paging.TryLookup(linear, false, out physical)) return; }
+        else physical = Mmu.EnvAlias(linear);
+        if (physical + 1 >= (uint)env.Ram.Length) return;
+        var key = (ushort)(env.Ram[physical] | (env.Ram[physical + 1] << 8));
+        histogram[key] = histogram.GetValueOrDefault(key) + 1;
+    }
+
+    static string Top(Dictionary<ushort, long> histogram) =>
+        string.Join(", ", histogram.OrderByDescending(entry => entry.Value).Take(8).Select(entry => $"{entry.Key & 0xFF:x2} {entry.Key >> 8:x2}={entry.Value:N0}"));
 }

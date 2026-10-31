@@ -330,7 +330,7 @@ static public class DataAccess
         _esp, _ebp, _esi, _edi
     ];
 
-    static private readonly Accessor<CPU, ushort>[] ArraySreg =
+    static internal readonly Accessor<CPU, ushort>[] ArraySreg =
     [
         _es, _cs, _ss, _ds, _fs, _gs
     ];

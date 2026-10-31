@@ -189,7 +189,7 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | `InstructionExecutor.cs` | 両コアの実行・CPU 復元境界、命令ごとのデコード状態、REP の再開位置。 |
 | `Fault.cs` | CPU 例外の値 `Fault`（ベクタ・エラーコード・#PF の線形アドレス）と、命令の途中で投げる `CpuFaultException`（`PageFaultException`/`GeneralProtectionException`）。ランナーは #UD/#PF/#GP を同じ `Raise` で配送する。 |
 | `CodeParser.cs` | 命令バイト列の読み口 `CodeSource`（CS:(E)IP 相対、16 ビット IP の折り返し、必要なバイトだけを遅延フェッチ）と Parser モナド `Parser<T>`（`Select`/`SelectMany`/`Where`/`Or`/`Fold`）。静的クラス `Decoder`（`Instruction.cs` と partial）に、両コアが共有するプレフィックスの畳み込み（`Prefixes`）、ModRM/SIB/変位の構造（`ParseModRm`）、実効アドレスの計算（`EffectiveAddress`）。 |
-| `Semantics.cs` | 命令の意味論を第一級データ（式と文の `record`）で表す IR。LINQ クエリ（`Emit` モナド）で IR を組み立て、各ノードの `Evaluate`/`Run`（解釈器）と `System.Linq.Expressions` のコンパイラの 2 つが消費する。ALU・MOV・スタック（PUSH/POP・PUSHA/POPA・PUSHF/POPF）・分岐（Jcc/JMP/CALL/RET/LOOP/JCXZ）・シフト・乗除算・文字列命令と REP・ビット操作（BT 系・BSF/BSR・SHLD/SHRD・BSWAP）・BCD・フラグ命令・CMOVcc/SETcc・XADD/CMPXCHG・HLT が対象（`docs/adr/0002`、高速コアが持っていた命令は `docs/adr/0003` の段階 1 で移した）。対象外はセグメントレジスタのロード、I/O、far 転送、INT/IRET、システム命令。 |
+| `Semantics.cs` | 命令の意味論を第一級データ（式と文の `record`）で表す IR。LINQ クエリ（`Emit` モナド）で IR を組み立て、各ノードの `Evaluate`/`Run`（解釈器）と `System.Linq.Expressions` のコンパイラの 2 つが消費する。ALU・MOV・スタック（PUSH/POP・PUSHA/POPA・PUSHF/POPF）・分岐（Jcc/JMP/CALL/RET/LOOP/JCXZ）・シフト・乗除算・文字列命令と REP・ビット操作（BT 系・BSF/BSR・SHLD/SHRD・BSWAP）・BCD・フラグ命令・CMOVcc/SETcc・XADD/CMPXCHG・HLT・セグメントレジスタの MOV/PUSH/POP/LES 系・IN/OUT・far JMP/CALL/RET・INT/INTO/IRET・ENTER・RDTSC/CPUID が対象（`docs/adr/0002`、高速コアが持っていた命令は `docs/adr/0003` の段階 1 で、セグメント・I/O・far 転送・割り込みは段階 2 で移した。記述子の検査や割り込みの配送は通常コアの State をそのまま 1 つの文として実行する）。対象外は MOV CS、MOV CR/DR、記述子テーブル命令（0F 00/01）、CMPXCHG8B、MSR。 |
 | `TranslationCache.cs` | 基本ブロックの翻訳キャッシュ（既定で有効。`--no-translate` で 1 命令ずつの実行に戻せる。命令ごとに CPU を見る診断でも自動的に切れる）。分岐（Jcc/JMP/CALL/RET）か STI までの IR 命令列をブロックの先頭物理アドレスで引き、8 回実行で IR に下ろして解釈し、`--compile-after` 回でコンパイルする。分岐先のブロックも翻訳済みなら、ランナーが渡す予算（次の割り込み周期などまでの命令数）の範囲で連結して続け、翻訳済みページへの書き込み（自己書き換え）と STI で止まる。XP 起動 1 億命令の 98.7% がブロックで走って 4〜5 割速く、状態は 1 命令ずつの実行と一致。コンパイル済みコードは CPU のレジスタ・EFLAGS・セグメント基底を直接読み書きし、32 ビットの実効アドレスを式木にする。 |
 | `Instruction.cs` | オペコード属性表 `OpcodeTable`（ModRM の有無・即値の形・ニーモニック・オペランド書式）、命令全体のパーサ `Decoder.InstructionParser`（Parser モナドのクエリ合成）と `Instruction` レコード、逆アセンブラ `Disassembler`。実行には使わず、診断（レジスタダイアログの次命令表示）とデコードキャッシュの土台。 |
 | `InstructionDecoding.cs` / `Registers.cs` | 通常コアの ModRM 読み取り State（`Fetch` の partial。`CodeParser.cs` の共有デコーダを呼び、消費した分だけ EIP を進める）と、両コア共通の配列を作らないレジスタ参照。 |
@@ -262,7 +262,7 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 
 - 単一 CPU のみ。Local APIC / I/O APIC と MMIO は未実装で、`CPUID` でも APIC を報告しません（マルチ CPU 対応は `docs/adr/0001-multithreading-and-smp.md` で保留中）。
 - 命令定義 1 つから解釈実行とコンパイル済み経路を導出する IR と基本ブロックの翻訳キャッシュは既定で有効です（XP 起動で GUI に到達する 65 億命令まで、1 命令ずつの実行と状態がバイト一致したまま 4〜5 割速い。`--no-translate` で戻せる。`docs/adr/0002-instruction-semantics-ir.md`）。
-- 命令の意味は通常コア（`State` モナド、正）・高速コア・IR の 3 か所にあります。高速コアを IR に吸収して 2 系統にする作業は `docs/adr/0003-core-unification.md`（採用。段階 1「高速コアだけが持っていた命令を IR へ」は完了、以降は進行中）。
+- 命令の意味は通常コア（`State` モナド、正）・高速コア・IR の 3 か所にあります。高速コアを IR に吸収して 2 系統にする作業は `docs/adr/0003-core-unification.md`（採用。段階 1「高速コアだけが持っていた命令を IR へ」と段階 2「セグメント・I/O・far 転送・割り込みを IR へ」は完了、以降は進行中）。終了時の `[outside]` 行に、ブロックの外で実行した命令の先頭バイト別の上位を出します。
 - TSS によるハードウェアタスクスイッチ・タスクゲート（NMI、#DF）・コールゲート・LDT は未実装です（`LLDT`/`LTR` はセレクタを保持するだけ）。#PF 配送中の再フォルトはダブルフォルトとして停止します。
 - SSE/MMX、`SYSENTER`/`SYSEXIT`、`FXSAVE`/`FXRSTOR` は未実装で、`CPUID` でも報告しません。
 - `HLT` は、配送できる割り込みが無ければ次のイベント（タイマ周期・サービス周期・保存・上限）まで命令数（= ゲストの時刻）を進めます。IF=0 と `--noirq` のときは待てないので次の命令へ進みます。スキップした量は終了時に `[halt]` として標準エラー出力に出ます。`LOCK` プレフィックスは無視します。

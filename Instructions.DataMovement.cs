@@ -154,9 +154,14 @@ static partial class Instructions
         where 3 != m.mod
         from addr in GetMemOrRegAddr(m.mod, m.rm)
         from type in OperandType(true)
+        from _ in LoadFarPointer(m.reg, sreg, addr, type)
+        select unit;
+
+    // far ポインタを addr から読み、オフセットを reg、セレクタを sreg へ(IR からも使う)。
+    internal static State<Unit> LoadFarPointer(int reg, int sreg, MemAddr addr, int type) =>
         from pointer in FarPointerMem(addr, type)
-        from _3 in SetRegData(m.reg, pointer.offset.ToTypeData(type))
-        from _4 in LoadSReg(sreg, pointer.segment)
+        from _1 in SetRegData(reg, pointer.offset.ToTypeData(type))
+        from _2 in LoadSReg(sreg, pointer.segment)
         select unit;
 
     // XCHG r/m, r (0x86/0x87)

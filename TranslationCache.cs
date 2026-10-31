@@ -15,10 +15,13 @@ public delegate int BlockRun(EmuEnvironment env, CPU cpu, int budget, long gener
 //   世代: ブロック内の命令が翻訳済みページへ書いたら(自己書き換え)、そこで止める
 //   フォルト: IR の規律(書き込み先の事前検査、PUSH の順序)により、投げられた時点の CPU は失敗した命令の先頭の状態
 // という性質を保つので、割り込みの配送点・トレース・スナップショットは 1 命令ずつの実行と同じ境界に揃う。
-public sealed class TranslatedBlock(Block[] instructions, uint[] offsets, bool stopsChain)
+public sealed class TranslatedBlock(Block[] instructions, uint[] offsets, bool stopsChain, bool usesClock)
 {
     public readonly Block[] Instructions = instructions;
     public readonly uint[] Offsets = offsets;   // 各命令のブロック先頭からのオフセット
+    // 最後の命令が env.Tsc を読む(RDTSC、ポート入出力の時計: PIT/RTC/PM タイマ)。ランナーは Step 開始時の命令数を Tsc に置くだけなので、
+    // 実行前に「Step 開始時 + 完了済み + ブロック内の位置」を置いて 1 命令ずつの実行と同じ値にする。
+    public readonly bool UsesClock = usesClock;
     public readonly bool StopsChain = stopsChain; // 連結しない(STI/POPF: 保留中の割り込みを直後の Step 境界で配送する。HLT: ランナーが待機を見る。IN/OUT 系: デバイスが割り込みを立てうる)
     public BlockRun Compiled;
 
@@ -93,6 +96,7 @@ public sealed class TranslationCache
     public bool Chain = true;
     public long Generation;   // 無効化のたびに進む(実行中のブロックが自己書き換えを検出する)
     public readonly uint[] Temps = new uint[8]; // IR 解釈器の Let(一時変数)の置き場
+    public readonly CPU Checkpoint = new();     // 通常コアの State を呼ぶ文(StateStmt)がフォルト時に戻すための退避先
     public long Translated;   // IR に下ろしたブロック数
     public long Compiled;     // コンパイルしたブロック数
     public long Runs;         // ブロックを実行した回数(平均ブロック長 = 命令数 / Runs)
@@ -122,6 +126,7 @@ public sealed class TranslationCache
         executed = 0;
         lastEip = cpu.eip;
         Transfers?.Clear();
+        var clock = env.Tsc; // Step 開始時の命令数
         while (true)
         {
             // 先頭のフェッチ(キーの変換)やデコードでの #PF は、連結済みの分だけ完了している。
@@ -132,6 +137,7 @@ public sealed class TranslationCache
             var startEip = cpu.eip;
             var generation = Generation;
             Runs++;
+            if (block.UsesClock) env.Tsc = clock + (ulong)(executed + block.Instructions.Length - 1);
             int completed;
             try
             {
@@ -218,6 +224,7 @@ public sealed class TranslationCache
         var offset = 0u;
         var pageRemaining = 0x1000 - (physical & 0xFFF);
         var stopsChain = false;
+        var usesClock = false;
         while (instructions.Count < MaxBlock && offset + 15 <= pageRemaining)
         {
             var code = new CodeSource(env, cpu.cs_base, cpu.eip + offset, cpu.code32);
@@ -228,9 +235,9 @@ public sealed class TranslationCache
             instructions.Add(lowered);
             offsets.Add(offset);
             offset += (uint)length;
-            if (Semantics.EndsBlock(instruction)) { stopsChain = Semantics.StopsChain(instruction); break; }
+            if (Semantics.EndsBlock(instruction)) { stopsChain = Semantics.StopsChain(instruction); usesClock = Semantics.UsesClock(instruction); break; }
         }
-        return instructions.Count == 0 ? null : new TranslatedBlock([.. instructions], [.. offsets], stopsChain);
+        return instructions.Count == 0 ? null : new TranslatedBlock([.. instructions], [.. offsets], stopsChain, usesClock);
     }
 
     // 物理アドレスへの書き込み: そのページに翻訳済みブロックがあれば無効化する(書き込み経路から毎回呼ばれるので、無ければ即帰る)。
