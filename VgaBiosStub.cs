@@ -85,7 +85,6 @@ public static class VgaBiosStub
     // 表にない機能は何もしない。
     static readonly State<byte[]> Ram = GetDataFromEnvCpu((env, _) => env.OneMegaMemory_);
     static readonly State<VgaDevice> Vga = GetDataFromEnvCpu((env, _) => env.Vga);
-    static State<Unit> Screen(Action<EmuEnvironment, CPU> action) => SetCpu((env, cpu) => { action(env, cpu); return cpu; });
     static State<Unit> Dispatch(Accessor<CPU, byte> key, Dictionary<byte, State<Unit>> table) => (env, cpu, ope) =>
         table.TryGetValue(key.getter(cpu), out var service) ? service(env, cpu, ope) : (true, Unit.unit, cpu, string.Empty);
 
@@ -101,7 +100,7 @@ public static class VgaBiosStub
         from character in _al.Get()
         from attribute in _bl.Get()
         from count in _cx.Get()
-        from _ in When(!cell.vga.GraphicsMode, Screen((_, _) =>
+        from _ in When(!cell.vga.GraphicsMode, Effect((_, _) =>
         {
             for (var offset = 0; offset < count && cell.unit + offset < 0x4000; offset++)
             {
@@ -120,16 +119,16 @@ public static class VgaBiosStub
         from left in _cl.Get()
         from bottom in _dh.Get()
         from right in _dl.Get()
-        from _ in Screen((env, _) => Scroll(env, up, lines, attribute, top, left, bottom, right))
+        from _ in Effect((env, _) => Scroll(env, up, lines, attribute, top, left, bottom, right))
         select Unit.unit;
 
     static readonly Dictionary<byte, State<Unit>> Services = new()
     {
-        [0x00] = from mode in _al.Get() from _ in Screen((env, _) => SetMode(env, mode)) select Unit.unit,
+        [0x00] = from mode in _al.Get() from _ in Effect((env, _) => SetMode(env, mode)) select Unit.unit,
         [0x01] = from start in _ch.Get() from end in _cl.Get()
-                 from _ in Screen((env, _) => { env.Vga.Crtc[0x0A] = (byte)(start & 0x3F); env.Vga.Crtc[0x0B] = (byte)(end & 0x1F); env.Vga.Dirty = true; })
+                 from _ in Effect((env, _) => { env.Vga.Crtc[0x0A] = (byte)(start & 0x3F); env.Vga.Crtc[0x0B] = (byte)(end & 0x1F); env.Vga.Dirty = true; })
                  select Unit.unit,
-        [0x02] = from row in _dh.Get() from column in _dl.Get() from _ in Screen((env, _) => SetCursor(env, row, column)) select Unit.unit,
+        [0x02] = from row in _dh.Get() from column in _dl.Get() from _ in Effect((env, _) => SetCursor(env, row, column)) select Unit.unit,
         [0x03] = from ram in Ram from vga in Vga
                  from _1 in SetCpu((_dl, ram[0x450]), (_dh, ram[0x451]))
                  from _2 in _cx.Set((ushort)((vga.Crtc[0x0A] << 8) | vga.Crtc[0x0B]))
@@ -141,15 +140,15 @@ public static class VgaBiosStub
                  select Unit.unit,
         [0x09] = WriteCells(withAttribute: true),
         [0x0A] = WriteCells(withAttribute: false),
-        [0x0E] = from character in _al.Get() from _ in Screen((env, _) => Teletype(env, character)) select Unit.unit,
+        [0x0E] = from character in _al.Get() from _ in Effect((env, _) => Teletype(env, character)) select Unit.unit,
         [0x0F] = from ram in Ram from _ in SetCpu((_al, ram[0x449]), (_ah, ram[0x44A]), (_bh, (byte)0)) select Unit.unit,
         [0x10] = Dispatch(_al, new()
         {
             [0x00] = from index in _bl.Get() from value in _bh.Get()
-                     from _ in Screen((env, _) => { if (index < env.Vga.Attribute.Length) { env.Vga.Attribute[index] = value; env.Vga.Dirty = true; } })
+                     from _ in Effect((env, _) => { if (index < env.Vga.Attribute.Length) { env.Vga.Attribute[index] = value; env.Vga.Dirty = true; } })
                      select Unit.unit,
             [0x10] = from index in _bx.Get() from red in _dh.Get() from green in _ch.Get() from blue in _cl.Get()
-                     from _ in Screen((env, _) =>
+                     from _ in Effect((env, _) =>
                      {
                          var dac = (index & 0xFF) * 3;
                          env.Vga.Dac[dac] = (byte)(red & 0x3F); env.Vga.Dac[dac + 1] = (byte)(green & 0x3F); env.Vga.Dac[dac + 2] = (byte)(blue & 0x3F);

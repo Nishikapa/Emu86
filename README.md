@@ -141,9 +141,9 @@ static State<Unit> Mov_8C =>
 
 各 `from` 句が CPU 状態を次へ受け渡し、いずれかが失敗すると以降は短絡します。`State` のコンビネータ自体はロールバックせず、失敗した操作が返した CPU を伝えます。命令を実行する場合は `InstructionExecutor.Step`（通常コアのみなら `Program.Execute2`）を使用します。
 
-オペランドは `Operand`（読み出す `State<Data>` と書き戻す関数の組、`Reg`/`Rm`/`Const`）で表し、`Binary(dst, src, kind)` が「読む → 計算 → 書き戻す」を担います。`ADD r/m, r` と `ADD r, r/m` のように d ビットで向きが決まる命令は、`d ? Binary(reg, rm) : Binary(rm, reg)` の 1 行です。
+オペランドは `Operand`（読み出す `State<Data>` と書き戻す関数の組、`Reg`/`Rm`/`Const`/`Stack`）で表し、`Move`/`Binary(dst, src, kind)`/`Test`/`Swap` が「読む → 計算 → 書き戻す」を担います。`ADD r/m, r` と `ADD r, r/m` のように d ビットで向きが決まる命令は、`d ? Binary(reg, rm) : Binary(rm, reg)` の 1 行です。`Stack(type)` は読むと POP、書くと PUSH になるオペランドで、`PUSH r` は `Move(Stack(type), Reg(reg, type))`、`POP r/m` は `Move(Rm(addr, type), Stack(type))` です。オペコードの w ビットから決まるオペランド幅は `OperandTypeW`、分岐の相対オフセットは `Rel8`/`RelNear` の State で読みます。
 
-クエリ構文の `where` 句はガードです（`Where` が実装されており、述語が偽なら失敗になります）。`POP r/m` の `where 0 == m.reg` のように、ModRM の `reg` フィールドで有効性を判定する命令に使います。失敗を返す句は CPU を変更する句より前に置いてください。`Choice` や `Many0` は失敗した枝の変更を巻き戻さないためです。条件付きの実行は `When(cond, state)` / `Unless(cond, state)`（偽なら何もしない `Pass`）、アクセサ経由の読み書き更新は `_cf.Modify(cf => !cf)` のように `Modify` で書きます。
+クエリ構文の `where` 句はガードです（`Where` が実装されており、述語が偽なら失敗になります）。`POP r/m` の `where 0 == m.reg` のように、ModRM の `reg` フィールドで有効性を判定する命令に使います。失敗を返す句は CPU を変更する句より前に置いてください。`Choice` や `Many0` は失敗した枝の変更を巻き戻さないためです。条件付きの実行は `When(cond, state)` / `Unless(cond, state)`（偽なら何もしない `Pass`）、アクセサ経由の読み書き更新は `_cf.Modify(cf => !cf)` のように `Modify` で書きます。CPU を変えずに環境だけを変える操作（ポート出力・MSR・TLB のフラッシュ・画面）は `Effect((env, cpu) => ...)` です。
 
 `InstructionExecutor` は命令開始前の CPU を退避し、未対応命令・例外時にレジスタと FPU を復元してページング状態を同期します。フォルト（#PF/#GP）は命令の途中で `CpuFaultException` として投げられ、復元後にランナーへ伝わります。ランナーは未対応命令（#UD）も含めて `Fault` 値にまとめ、IDT が整っていれば `Raise` で命令開始時の状態から配送し、整っていなければ停止します。命令ごとのプレフィックスは `DecodeContext` に分離し、成功・失敗のどちらでも終了時に消去します。REP の途中でページフォルトが起きた場合は完了済みの反復の ECX・ESI・EDI・EAX・EFLAGS を保持し、命令先頭から残りの反復を再開します。メモリや I/O の既発生の副作用は取り消しません。割り込み配送にも同じ CPU 復元境界を適用します。
 
@@ -179,7 +179,7 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 |---------|------|
 | `GlobalUsings.cs` | `Data`/`MemAddr` 型エイリアスの定義。 |
 | `State.cs` | 静的クラス `States`。`State<V>` モナドの定義と LINQ コンビネータ（`Select`/`SelectMany`/`Where`/`When`/`Unless`/`While`/`Choice`/`Group`/`Sequence`/`Many0`、失敗する `Undefined` 等）。 |
-| `CPU.cs` | `CPU` 状態とレジスタアクセサ。静的クラス `CpuStates`（State で CPU を読み書きする基本操作: `SetCpu`/`GetCpu`、アクセサの `Get`/`Set`/`Modify`、ログ・結果）、`Fetch`（命令ストリームからオペコード・即値・ModRM を読んで EIP を進める State。`InstructionDecoding.cs` と partial）、`AluStates`（`Calc`/`Group2`/`Jcc` とフラグ更新の State）。 |
+| `CPU.cs` | `CPU` 状態とレジスタアクセサ。静的クラス `CpuStates`（State で CPU を読み書きする基本操作: `SetCpu`/`GetCpu`、環境への副作用 `Effect`、アクセサの `Get`/`Set`/`Modify`、ログ・結果）、`Fetch`（命令ストリームからオペコード・即値・ModRM を読んで EIP を進める State。w ビットの `WidthBit`/`OperandTypeW`、符号拡張 imm8 の `Imm8SignExtended`、分岐オフセットの `Rel8`/`RelNear`。`InstructionDecoding.cs` と partial）、`AluStates`（`Calc`/`Group2`/`Jcc` とフラグ更新の State）。 |
 | `Alu.cs` | 静的クラス `Alu`。通常コアと高速コアで共有する算術・論理演算、シフト・回転の計算（`ComputeShift`）、フラグ更新、条件分岐の判定。 |
 | `Fpu.cs` | 静的クラス `Fpu`。x87 FPU。ST スタック 8 本を double で保持し、80 ビット拡張実数と相互変換。命令は整数命令と同じく表（メモリ形式は (op, reg)、レジスタ形式は (op, reg, rm) か (op, reg)）で引き、各命令はオペランド Lens `Real`（ST(i) と f32/f64/int16/int32/int64/f80 のメモリ形式）に対する `Load`/`Store`/`Compute`/`Compare` の State で書く。四則演算は「x = ST0、y = もう一方」の式 1 つで D8/DA/DC/DE の全形式を表す。 |
 | `FastCore.cs` | 静的クラス `FastCore`。高速実行コア。プレフィックスと ModRM のデコードは `CodeParser.cs`、演算規則は `Alu.cs`、メモリアクセスは `Environment.cs` の共通処理を使用し、未対応命令は通常コアへ委譲。文字列命令は INS/OUTS を含めて REP ごと処理する。 |

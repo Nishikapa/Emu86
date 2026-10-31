@@ -150,16 +150,17 @@ internal sealed class RunOptions
 
     public static readonly string Usage = BuildUsage();
 
+    // グループごとに見出し行と、構文を揃えた説明行を並べる。
     static string BuildUsage()
     {
         var width = Table.Max(option => option.Syntax.Length) + 2;
-        var lines = new List<string> { "Usage: Emu86 [options]" };
-        foreach (var group in Table.GroupBy(option => option.Group))
-        {
-            lines.Add($"{group.Key}:");
-            lines.AddRange(group.Select(option => $"  {option.Syntax.PadRight(width)}{option.Description}"));
-        }
-        lines.Add("Counts/LBAs are decimal; addresses and range bounds are hexadecimal (optional 0x).");
+        var lines = Table
+            .GroupBy(option => option.Group)
+            .SelectMany(group => group
+                .Select(option => $"  {option.Syntax.PadRight(width)}{option.Description}")
+                .Prepend($"{group.Key}:"))
+            .Prepend("Usage: Emu86 [options]")
+            .Append("Counts/LBAs are decimal; addresses and range bounds are hexadecimal (optional 0x).");
         return string.Join(Environment.NewLine, lines);
     }
 }

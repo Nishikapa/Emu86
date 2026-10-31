@@ -72,7 +72,7 @@ internal static class IrqDelivery
     static State<Unit> Deliver(int line) =>
         from vector in GetDataFromEnvCpu((env, cpu) => Vector(env, line))
         from _1 in Interrupt(vector)
-        from _2 in SetCpu((env, cpu) => { Acknowledge(env, line); return cpu; })
+        from _2 in Effect((env, _) => Acknowledge(env, line))
         select Unit.unit;
 
     // 配送後: in-service を立て(スレーブ経由はカスケードも)、レベル要求でない源は取り下げる。

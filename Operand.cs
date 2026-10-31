@@ -23,6 +23,10 @@ static public partial class Operands
     static public Operand Const(Data data) =>
         new(data.ToState(), _ => throw new InvalidOperationException("constant operand is read-only"));
 
+    // スタックトップ: 読むと POP、書くと PUSH。PUSH r は Move(Stack(type), Reg(...))、POP r は Move(Reg(...), Stack(type))。
+    static public Operand Stack(int type) =>
+        new(Pop(type), Push);
+
     // dst <- src
     static public State<Unit> Move(Operand dst, Operand src) =>
         from value in src.Read
@@ -35,6 +39,13 @@ static public partial class Operands
         from right in src.Read
         from result in Calc(left, right, kind)
         from _ in dst.Write(result)
+        select Unit.unit;
+
+    // left & right のフラグ(CF=OF=0、ZF/SF/PF)だけ更新し、結果は捨てる。TEST。
+    static public State<Unit> Test(Operand left, Operand right) =>
+        from a in left.Read
+        from b in right.Read
+        from _ in update_eflags((a.Value() & b.Value()).ToTypeData(a.type))
         select Unit.unit;
 
     // x <-> y

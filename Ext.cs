@@ -23,6 +23,9 @@ static public class Conversions
 
     // Data の実値を uint として取り出す / uint を type の幅に丸めて Data にする。
     static public uint Value(this Data d) => d.type == 0 ? d.db : d.type == 1 ? d.dw : d.dd;
+
+    // Data の実値を符号付きで取り出す(IMUL、BT 系のビット番号)。
+    static public int Signed(this Data d) => d.type == 0 ? (sbyte)d.db : d.type == 1 ? (short)d.dw : (int)d.dd;
     static public Data ToTypeData(this uint v, int type) =>
         type == 0 ? ((byte)v).ToTypeData() : type == 1 ? ((ushort)v).ToTypeData() : v.ToTypeData();
 
