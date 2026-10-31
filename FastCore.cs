@@ -8,7 +8,7 @@ using static Emu86.Decoder;
 namespace Emu86;
 
 // 方針B: 命令的な高速実行コア。
-// モナド版(Program.Execute2)と 1 命令単位で完全に同じ状態遷移を行う「速い写像」であり、
+// モナド版(Instructions.Execute2)と 1 命令単位で完全に同じ状態遷移を行う「速い写像」であり、
 // 意味論の正は常にモナド版に置く(分岐トレースのバイト一致で回帰検証する)。
 // 未対応の命令は CPU を一切変更せずに false を返し、呼び出し側がモナド版へフォールバックする。
 static public class FastCore

@@ -157,7 +157,7 @@ static State<Unit> Mov_8C =>
 
 ### 実行ループとタイマー割り込み
 
-`Main`（`Program.Runner.cs`）は引数解析・起動環境の組み立て・再開処理を担当し、`--window` では `VgaWindow`（Windows Forms）を UI スレッドで開いてエミュレーションを別スレッドで走らせます。`EmulationRunner` が命令実行、タイマー IRQ0・キーボード IRQ1・シリアル IRQ3/IRQ4・マウス IRQ12・ATA IRQ14 の配送、ホストから注入されたスキャンコード・マウスパケット・受信バイトの 8042/UART への受け渡し、NTLDR メニューの自動操作（`BootAutomation`）、中断・再開（`EmulationControl`）、ゲストのリセット要求と停止要求の確認、定期保存を制御します。ハードウェア割り込みは `IrqDelivery` が IF・PIC のマスク・in-service 状態（プロテクトモードでは IDT の準備も）を確認し、優先順（タイマー、キーボード、COM1、COM2、マウス、ATA）に 1 命令につき 1 本を選びます。選ばれた線の配送（リアルモードは IVT、プロテクトモードは IDT 経由）と in-service の設定・要求の取り下げは `State` として `InstructionExecutor` で実行し、配送中のページフォルトでは配送前の CPU に戻します。トレース・監視点・停止診断は `RunDiagnostics`、Windows 固有の IRP・デバッグ文字列・EBP チェーンの解釈は `WindowsDiagnostics` に分離しています。
+`Main`（`Program.cs`）は引数解析・起動環境の組み立て・再開処理を担当し、`--window` では `VgaWindow`（Windows Forms）を UI スレッドで開いてエミュレーションを別スレッドで走らせます。`EmulationRunner` が命令実行、タイマー IRQ0・キーボード IRQ1・シリアル IRQ3/IRQ4・マウス IRQ12・ATA IRQ14 の配送、ホストから注入されたスキャンコード・マウスパケット・受信バイトの 8042/UART への受け渡し、NTLDR メニューの自動操作（`BootAutomation`）、中断・再開（`EmulationControl`）、ゲストのリセット要求と停止要求の確認、定期保存を制御します。ハードウェア割り込みは `IrqDelivery` が IF・PIC のマスク・in-service 状態（プロテクトモードでは IDT の準備も）を確認し、優先順（タイマー、キーボード、COM1、COM2、マウス、ATA）に 1 命令につき 1 本を選びます。選ばれた線の配送（リアルモードは IVT、プロテクトモードは IDT 経由）と in-service の設定・要求の取り下げは `State` として `InstructionExecutor` で実行し、配送中のページフォルトでは配送前の CPU に戻します。トレース・監視点・停止診断は `RunDiagnostics`、Windows 固有の IRP・デバッグ文字列・EBP チェーンの解釈は `WindowsDiagnostics` に分離しています。
 
 実行は `InstructionLimit`（既定 5 億命令、`--limit max` で上限なし）に達するか、配送できない未対応命令・例外に遭遇するか、表示ウィンドウが閉じられるまで続きます。実行中は一定間隔（`SnapshotInterval`）ごとに `SnapshotStore` が状態を `snapshot.snap` へ保存し、`--resume` で続きを再開できます。
 
@@ -190,7 +190,7 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | `TranslationCache.cs` | 基本ブロックの翻訳キャッシュ（既定で有効。`--no-translate` で 1 命令ずつの実行に戻せる。命令ごとに CPU を見る診断でも自動的に切れる）。分岐（Jcc/JMP/CALL/RET）か STI までの IR 命令列をブロックの先頭物理アドレスで引き、8 回実行で IR に下ろして解釈し、`--compile-after` 回でコンパイルする。分岐先のブロックも翻訳済みなら、ランナーが渡す予算（次の割り込み周期などまでの命令数）の範囲で連結して続け、翻訳済みページへの書き込み（自己書き換え）と STI で止まる。XP 起動 1 億命令の 98.7% がブロックで走って 4〜5 割速く、状態は 1 命令ずつの実行と一致。コンパイル済みコードは CPU のレジスタ・EFLAGS・セグメント基底を直接読み書きし、32 ビットの実効アドレスを式木にする。 |
 | `Instruction.cs` | オペコード属性表 `OpcodeTable`（ModRM の有無・即値の形・ニーモニック・オペランド書式）、命令全体のパーサ `Decoder.InstructionParser`（Parser モナドのクエリ合成）と `Instruction` レコード、逆アセンブラ `Disassembler`。実行には使わず、診断（レジスタダイアログの次命令表示）とデコードキャッシュの土台。 |
 | `InstructionDecoding.cs` / `Registers.cs` | 通常コアの ModRM 読み取り State（`Fetch` の partial。`CodeParser.cs` の共有デコーダを呼び、消費した分だけ EIP を進める）と、両コア共通の配列を作らないレジスタ参照。 |
-| `Program.Runner.cs` / `RunOptions.cs` | CLI の起動処理、オプションの表（名前・引数・説明・値のパーサ・適用）、ウィンドウ付き実行と別スレッドでの実行ループ、ゲストリセット時の環境再生成、セクタダンプ。解析と `--help` の一覧は同じ表から作る。 |
+| `Program.cs` / `RunOptions.cs` | CLI の起動処理、オプションの表（名前・引数・説明・値のパーサ・適用）、ウィンドウ付き実行と別スレッドでの実行ループ、ゲストリセット時の環境再生成、セクタダンプ。解析と `--help` の一覧は同じ表から作る。 |
 | `ArgumentParsing.cs` | 引数列のパーサコンビネータ（`ArgParser<T>`: `Select`/`SelectMany`/`Choice`/`Many`/`Optional`/`Require` と `Value`/`Decimal`/`Hex`）と `CommandOption`。 |
 | `EmulationRunner.cs` | 命令実行ループ、例外配送、デバイスのポンプ、定期保存の呼び出し。 |
 | `IrqDelivery.cs` | ハードウェア割り込みの選択（優先順・IF・PIC のマスクと in-service・IDT の準備）と、配送・in-service 設定・要求取り下げの `State`。 |
@@ -214,7 +214,7 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | `Operand.cs` / `Registers.cs` | 静的クラス `Operands`。オペランド Lens `Operand`（読み出す State と書き戻す関数）と `Reg`/`Rm`/`Const`、その上の `Move`/`Binary`/`Swap`。d ビットで向きが決まる命令はオペランドを入れ替えるだけで書く。 |
 | `VgaWindow.cs` / `RegisterDialog.cs` | Windows Forms の表示ウィンドウ（描画、キー入力とマウス捕捉、中断・再開ボタン）とレジスタ表示ダイアログ。 |
 | `Ext.cs` | 静的クラス `Conversions`。型変換ユーティリティ（`ToTypeData`、`Data` の拡張メンバー `Value`/`Signed`、`Bytes`/`Bits`/`Mask`/`Msb`）。 |
-| `Program.cs` / `Program.*.cs` | 命令の実装とオペコードテーブル。起動処理は `Program.Runner.cs`。 |
+| `Instructions.*.cs` | 静的クラス `Instructions`（partial）。モナド版の命令の実装を種類ごとのファイルに分ける: `ControlFlow`（ジャンプ・コール・リターン・LOOP・INT/IRET）、`Arithmetic`（ALU グループ・シフト・乗除算・INC/DEC・ビット操作・BCD・CMPXCHG/XADD）、`DataMovement`（MOV の各形・LEA・XCHG・CMOVcc・SETcc・MOVZX/MOVSX・far ポインタのロード）、`Stack`（PUSH/POP・PUSHA/POPA・ENTER/LEAVE・PUSHF/POPF）、`Flags`、`String`（文字列命令と REP の繰り返し）、`System`（CR/DR の MOV・CPUID・RDTSC・MSR・記述子テーブル・VERR/VERW/LAR/LSL・INVLPG・HLT）、`Io`（IN/OUT）。`Instructions.Table.cs` はオペコード表（1 バイト、0F xx）とディスパッチ、プレフィックス処理、実行の入口（`Execute`/`ExecuteDecoded`/`Execute2`）。 |
 | `Disk.cs` | `DiskImage`（VHD/VHDX/AVHDX/生イメージの CoW ディスクバックエンド。セクタの所在は「自分 → 親 → ゼロ」の `Locate` チェーンで解決）と `AtaDevice`（ATA PIO デバイス、IRQ14。コマンドは「番号 → 動作」の表で、表にないものは abort）。ヘッダの読み取りは `DiskFormat.cs` のレイアウトを当てはめるだけ。 |
 | `DiskFormat.cs` | バイト列のパーサコンビネータ `Field<T>`（`U32`/`U64BE`/`Uuid`/`Utf16`、構造体の先頭からの位置 `At`、繰り返し `Count`、識別子 `Magic`）と、それで書いた VHD/VHDX の読み取り側の形式（フッタ、動的ヘッダとロケータ、リージョン表、メタデータ表と各項目、ペアレントロケータ）。 |
 | `VhdxBatLayout.cs` | VHDX のペイロード・ビットマップの位置、BAT の必要エントリ数・領域サイズ。 |

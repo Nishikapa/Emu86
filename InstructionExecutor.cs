@@ -47,7 +47,7 @@ public struct DecodeContext
 public sealed class InstructionExecutor(bool useFast = true)
 {
     readonly CPU checkpoint = new();
-    readonly State<Unit> decoded = Program.ExecuteDecoded;
+    readonly State<Unit> decoded = Instructions.ExecuteDecoded;
     public bool UsedFastPath { get; private set; }
     // 翻訳キャッシュ(IR のブロック)で実行した(UsedFastPath も真)。
     public bool UsedTranslation { get; private set; }
