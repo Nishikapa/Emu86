@@ -193,6 +193,34 @@ static class DecodeTests
         }
     }
 
+    // 命令的な Decode が Parser モナドの InstructionParser と全オペコード(1 バイト・0F xx)× ModRM 4 形 × プレフィックス 6 組で同じ結果になる。
+    static void FastDecoder()
+    {
+        using var env = new EmuEnvironment(memory: new byte[0x10000]);
+        byte[][] prefixSets = [[], [0x66], [0x67], [0x66, 0x67], [0xF3], [0xF2, 0x66, 0x2E]];
+        byte[] modrms = [0x00, 0x45, 0x84, 0xC3];
+        var compared = 0;
+        foreach (var code32 in new[] { false, true })
+        foreach (var prefixes in prefixSets)
+        foreach (var modrm in modrms)
+        for (var opcode = 0; opcode < 512; opcode++)
+        {
+            var bytes = new List<byte>(prefixes);
+            if (opcode >= 256) bytes.Add(0x0F);
+            bytes.Add((byte)opcode);
+            bytes.Add(modrm);
+            bytes.AddRange([0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]);
+            Array.Clear(env.Ram, 0x100, 32);
+            bytes.ToArray().CopyTo(env.Ram, 0x100);
+            var source = new CodeSource(env, 0, 0x100, code32);
+            var expected = InstructionParser(0x100, code32)(source, 0);
+            var actual = Decode(source, 0x100, code32);
+            Equal((expected.ok, expected.value, expected.next), actual, $"decode {Convert.ToHexString(bytes.ToArray())} code32={code32}");
+            compared++;
+        }
+        Equal(2 * 6 * 4 * 512, compared, "all encodings compared");
+    }
+
     static void Allocations()
     {
         using var env = new EmuEnvironment(memory: new byte[0x10000]);
@@ -393,5 +421,6 @@ static class DecodeTests
         ("lengths", Lengths),
         ("disassembly", Disassembly),
         ("allocations", Allocations),
+        ("fast-decoder", FastDecoder),
     ];
 }

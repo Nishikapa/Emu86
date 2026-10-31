@@ -22,7 +22,12 @@ internal static class EmulationRunner
         var diagnostics = new RunDiagnostics(options.Diagnostics, env, cpu, output, trace, count);
         var executor = new InstructionExecutor(useFast: !options.Slow);
         // 命令ごとに CPU を見る診断(全命令トレース・ブレークポイント・監視点)があるときは、ブロックをまとめて実行できない。
-        env.Translations.Enabled = options.Translate && !options.Slow && !options.Diagnostics.PerInstruction;
+        // 翻訳キャッシュは --slow 以外では常に使う(1 命令のブロックが高速コアの役)。基本ブロックと連結は、--no-translate と
+        // 命令ごとに CPU を見る診断では切る(1 命令ずつ: Step = 1 命令)。
+        env.Translations.Enabled = !options.Slow;
+        var blocks = options.Translate && !options.Diagnostics.PerInstruction;
+        env.Translations.BlockLimit = blocks ? 64 : 1;
+        env.Translations.Chain = blocks;
         // 連結したブロックの途中の制御転送をトレース行にするため、トレースが有効なときは記録してもらう。
         env.Translations.Transfers = env.Translations.Enabled && trace != null && options.Diagnostics.Trace ? [] : null;
         var swatch = System.Diagnostics.Stopwatch.StartNew();
@@ -202,7 +207,7 @@ internal static class EmulationRunner
         if (!options.Slow && count > 0)
             output.WriteLine($"fast-path coverage: {fastCount:N0}/{count:N0} ({100.0 * fastCount / count:F2}%)");
         if (env.Translations.Enabled && count > 0)
-            error.WriteLine($"[translation] {env.Translations.Translated:N0} sites lowered, {env.Translations.Compiled:N0} compiled; {translatedCount:N0}/{count:N0} instructions ({100.0 * translatedCount / count:F2}%: {env.Translations.Interpreted:N0} interpreted, {env.Translations.Executed:N0} compiled); {env.Translations.Runs:N0} block runs ({(env.Translations.Runs == 0 ? 0 : (double)translatedCount / env.Translations.Runs):F1} instructions each) in {env.Translations.Steps:N0} steps; {env.Translations.Invalidations:N0} page invalidations, {env.Translations.CompileMilliseconds:F0} ms compiling");
+            error.WriteLine($"[translation] {env.Translations.Translated:N0} sites lowered ({env.Translations.Blocks:N0} as blocks), {env.Translations.Compiled:N0} compiled; {translatedCount:N0}/{count:N0} instructions ({100.0 * translatedCount / count:F2}%: {env.Translations.Interpreted:N0} interpreted, {env.Translations.Executed:N0} compiled); {env.Translations.Runs:N0} block runs ({(env.Translations.Runs == 0 ? 0 : (double)translatedCount / env.Translations.Runs):F1} instructions each) in {env.Translations.Steps:N0} steps; {env.Translations.Invalidations:N0} page invalidations, {env.Translations.LowerMilliseconds:F0} ms lowering, {env.Translations.CompileMilliseconds:F0} ms compiling");
         if (env.Translations.Enabled && count > 0)
             error.WriteLine($"[outside] fast core {outsideFast.Values.Sum():N0}: {Top(outsideFast)}; reference core {outsideReference.Values.Sum():N0}: {Top(outsideReference)}");
         diagnostics.ReportStop(count);

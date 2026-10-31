@@ -486,7 +486,7 @@ static class CoreTests
             largest = Math.Max(largest, fast.Executed);
         }
         Equal(5, largest, "the loop body runs as one block of five instructions");
-        Equal(1L, env.Translations.Translated, "one block lowered");
+        Equal(1L, env.Translations.Blocks, "one multi-instruction block lowered (every site is first lowered as a single instruction)");
         Equal(true, blockSteps >= 70, "most iterations ran as blocks");
         Equal(0x100u, cpu.eip, "block ends after the taken branch");
         Equal(true, env.Ram.AsSpan().SequenceEqual(mirror.Ram), "memory after the loop");
@@ -534,7 +534,8 @@ static class CoreTests
         env.Translations.Chain = true;
         count = Advance(count, "after sti");
         Equal((true, 6, 0x403u), (fast.UsedTranslation, fast.Executed, cpu.eip), "the rest chains into the next block and stops at its STI");
-        // 連結: ループ(5 命令 × 100 回)は予算の範囲で 1 回の Step で回り切り、ループを抜けた先の HLT(IR 対象外)で止まる。
+        // 連結: ループ(5 命令 × 100 回)は予算の範囲で 1 回の Step で回り切り、ループを抜けた先の HLT(初めて実行される番地なので
+        // まだ下ろされていない)の手前で止まる。
         env.Ram[0x110] = 0xF4; mirror.Ram[0x110] = 0xF4;
         // 自己書き換えのテストが同じページのループのブロックも捨てているので、連結せずに翻訳し直してから連結する。
         env.Translations.Chain = false;
@@ -576,10 +577,12 @@ static class CoreTests
         // 実行器を通した 1 命令あたりの時間(5 命令のループ): 翻訳ブロック(コンパイル済み段階)と高速コアのみ。
         using var timing = new EmuEnvironment(memory: new byte[0x10000]);
         Loop(0x3000).CopyTo(timing.Ram, 0x100);
-        timing.Ram[0x110] = 0xF4; // ループを抜けた先は IR 対象外(連結がそこで止まる)
-        double PerInstruction(bool translate)
+        timing.Ram[0x110] = 0xF4; // ループを抜けた先の HLT で連結が止まる
+        double PerInstruction(bool translate, int blockLimit = 64)
         {
             timing.Translations.Enabled = translate;
+            timing.Translations.BlockLimit = blockLimit;
+            timing.Translations.Chain = blockLimit > 1;
             timing.Translations.InvalidateAll();
             var executor = new InstructionExecutor(true) { Budget = 1000 };
             var state = Start();
@@ -587,14 +590,34 @@ static class CoreTests
             void Run(long target)
             {
                 executed = 0;
-                while (executed < target) { executor.Step(timing, state); executed += executor.Executed; if (state.eip == 0x110) state.eip = 0x100; }
+                // ループを抜けた先の HLT は、高速コアでは次の Step、翻訳では連結の最後に実行される(eip 0x111、Halted)。どちらでも先頭へ戻す。
+                while (executed < target) { executor.Step(timing, state); executed += executor.Executed; if (state.eip is 0x110 or 0x111) { state.eip = 0x100; state.Halted = false; } }
             }
             Run(500_000);
             var watch = System.Diagnostics.Stopwatch.StartNew();
             Run(5_000_000);
             return watch.Elapsed.TotalMilliseconds * 1_000_000.0 / executed;
         }
-        Console.WriteLine($"executor ns/instruction over a 5-instruction loop: fast core {PerInstruction(false):F1}, translated block {PerInstruction(true):F1}");
+        Console.WriteLine($"executor ns/instruction over a 5-instruction loop: fast core {PerInstruction(false):F1}, translated block {PerInstruction(true):F1}, one instruction per step {PerInstruction(true, 1):F1}");
+        // デコードと IR への下ろしの費用(ADD eax, ebx / MOV [ebx+8], eax / Jcc を順に)。
+        byte[] sample = [0x01, 0xD8, 0x89, 0x43, 0x08, 0x75, 0x10];
+        sample.CopyTo(timing.Ram, 0x200);
+        double LowerCost(bool lower)
+        {
+            var decodeCpu = new CPU { code32 = true, eip = 0x200 };
+            const int rounds = 100_000;
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            for (var round = 0; round < rounds; round++)
+                for (var offset = 0; offset < 3; offset++)
+                {
+                    decodeCpu.eip = offset == 0 ? 0x200u : offset == 1 ? 0x202u : 0x205u;
+                    var instruction = DecodeInstruction(timing, decodeCpu);
+                    if (lower) Semantics.Lower(instruction);
+                }
+            return watch.Elapsed.TotalMilliseconds * 1_000_000.0 / (rounds * 3);
+        }
+        var decodeOnly = LowerCost(false);
+        Console.WriteLine($"decode + lower ns/instruction: decode {decodeOnly:F0}, lower {LowerCost(true) - decodeOnly:F0}");
     }
 
     // FPU: 全エンコーディング(メモリ形式は [ebx]、レジスタ形式は ST(1) など)を 3 通りの初期状態(フラグ・丸めモード)で

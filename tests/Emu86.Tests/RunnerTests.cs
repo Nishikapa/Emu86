@@ -121,6 +121,14 @@ static class RunnerTests
         var options = RunOptions.Parse(plainGolden ? [.. args, "--no-translate"] : args);
         var count = EmulationRunner.Run(options, env, cpu, start, trace, output, TextWriter.Null,
             (savedCount, savedCpu, savedEnv) => snapshots.Add(savedCount));
+        // 期待値を採り直すとき: EMU86_GOLDEN_RECORD に(絶対パスの)ファイルを指定すると、照合せずに実測値を 1 行の JSON で追記する。
+        // 既定の翻訳と --no-translate の 2 回分が並ぶ。差分を確認してから runner-golden.json を更新する(自動更新はしない)。
+        if (Environment.GetEnvironmentVariable("EMU86_GOLDEN_RECORD") is { Length: > 0 } recordPath)
+        {
+            File.AppendAllText(recordPath, System.Text.Json.JsonSerializer.Serialize(new GoldenCase(args, start, count, StateHash(cpu, env), HashText(output.ToString()), HashText(trace.ToString()))) + Environment.NewLine);
+            goldenIndex++;
+            return;
+        }
         var expected = GoldenCases[goldenIndex++];
         Equal(string.Join(" ", expected.Args), string.Join(" ", args), "golden arguments");
         Equal(expected.Start, start, "golden starting count");
