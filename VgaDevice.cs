@@ -276,6 +276,18 @@ public sealed class VgaDevice
     int StartAddress => (Crtc[0x0C] << 8) | Crtc[0x0D];
     int Pitch => Crtc[0x13] * 2;
 
+    // テキストモードのセル(文字と属性)を画面上の行・桁で読む。CRTC の開始アドレス(ハードウェアスクロール: Linux の vgacon は
+    // 行送りで開始アドレスを進める)と行ピッチを反映するので、描画(Render)と自動操作(BootAutomation)が同じ画面を見る。
+    // CRTC が未設定(レジスタが 0)なら 80×25・ピッチ 80 とみなす(テストが VRAM を直接書く場合)。
+    public int TextColumns => Crtc[1] == 0 ? 80 : Columns;
+    public int TextRows => Crtc[1] == 0 ? 25 : Math.Max(1, ScanLines / Math.Max(1, CharHeight * ((Crtc[9] & 0x80) != 0 ? 2 : 1)));
+    public (byte Character, byte Attribute) TextCell(int row, int column)
+    {
+        var pitch = Pitch == 0 ? TextColumns : Pitch;
+        var unit = (StartAddress + row * pitch + column) & (PlaneSize - 1);
+        return (Vram[unit], Vram[PlaneSize + unit]);
+    }
+
     // 表示解像度(ピクセル)。テキストは 8 ドット幅のセル、256 色モードは水平 2 倍、
     // 走査線はキャラクタ高さ(グラフィックでは行の繰り返し数)と倍走査で割る。
     public (int Width, int Height) Resolution()

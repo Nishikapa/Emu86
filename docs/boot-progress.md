@@ -507,3 +507,23 @@ rm sample.avhdx; ./bin/Release/net10.0/Emu86.exe --notrace --entrylog 7c90e47c 7
 - 気づき: 画面のプレーン 2(フォント)に 692 バイトの断片が書かれており、`HasLoadedFont` が真になって壊れたフォントで描いていた
   (VRAM の文字自体は正しい)。本物の VGA ではプレーン 2 に BIOS がフォントを置くので、スタブのモード設定で代替フォントを
   プレーン 2 に書き込むのが本来の形(未対応。いまは `--screen`/ウィンドウが代替フォントで描く)。
+
+### Debian: initramfs のシェルから先へ(2026-10-31)
+- `--type "プロンプト=>キー列"` を追加(`BootAutomation`)。画面の最後の行がプロンプトで終わるのを待ってキー列を打ち(文字 → セット 1 の
+  スキャンコード、`\n` は Enter)、最後のプロンプトが戻ったら画面を出力して止まる。完了しないまま止まったときも画面を出す。
+- 直した: 画面の読み取り(`BootAutomation.ScreenLines`)が VRAM の先頭から 80×25 を読んでいたが、Linux の vgacon は行送りで CRTC の
+  開始アドレスを進める(ハードウェアスクロール)ので、数行出力するとプロンプトが見えない領域へ移り「ハング」に見えていた。
+  `VgaDevice.TextCell`(開始アドレスとピッチを反映。描画と同じ)で読むようにした。
+- initramfs のシェルで分かったこと(200 億命令のスナップショットから再開して `--type` で調査):
+  - `cat /proc/modules` は空。udev がモジュールを 1 つもロードしていない。`/lib/modules/.../kernel/drivers/ata` には `ata_piix.ko`・`libata.ko` がある(MODULES=most)。
+  - `modprobe ata_piix` を手で打つと libata がディスクを検出する: `ata1: PATA max UDMA/33 cmd 0x1f0 ctl 0x3f6 bmdma 0xc000 irq 14`、
+    `ata1.00: ATA-0: Emu86 Virtual Disk, 1.0, max PIO0`、`33554432 sectors`。`modprobe sd_mod` で `/proc/partitions` に sda・sda1・sda2・sda5 が出る。
+  - その後 `exit` でブートが続き、ルートがマウントされて **systemd が起動**するが、`udev Kernel Device Manager` と `Journal Service` が
+    1 分 30 秒のタイムアウトで失敗を繰り返す(「A start job is running ... (1min 52s / 3min 4s)」)。
+  - soft lockup のトレースは `sys_finit_module → kernel_read_file`: udevd がモジュールをロードしている最中で、1 モジュールに約 8,000 万命令
+    かかっている(modprobe ata_piix の 3 モジュールで 2.4 億命令)。
+- **原因はゲストの時計。** いまの時計は PM タイマと RTC が「100 万命令 = 1 秒」、タイマ IRQ は PIT の設定に関わらず 1 万命令ごと(HZ=250 なら
+  250 万命令 = 1 秒)、TSC は命令数そのもの(較正で約 3.5 MHz に見える)。ゲストから見た CPU は 1〜3.5 MHz 相当で、1 モジュールのロードが
+  20 秒以上に、udev の 30 秒待ちは 3,000 万〜1 億命令に、systemd の 90 秒は 1〜3 億命令になる。root が見つからなかったのも、udev が
+  ata_piix に辿り着く前に initramfs が待ちを諦めたため。対処は時計の設計(「1 秒 = N 命令」を 1 か所で決め、PIT の周期・PM タイマ・RTC・
+  HLT の待ちを揃える)で、別の ADR で扱う。

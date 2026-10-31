@@ -197,7 +197,8 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | `EmulationRunner.cs` | 命令実行ループ、例外配送、デバイスのポンプ、定期保存の呼び出し。 |
 | `IrqDelivery.cs` | ハードウェア割り込みの選択（優先順・IF・PIC のマスクと in-service・IDT の準備）と、配送・in-service 設定・要求取り下げの `State`。 |
 | `EmulationControl.cs` | UI スレッドからの中断・再開要求と、中断中・停止後の CPU 状態の公開。 |
-| `BootAutomation.cs` | `--boot-debug` の NTLDR 起動メニュー自動操作。手順はイテレータ（コルーチン）の `Script` に上から順に書き、`yield` した待ち条件（画面の文字列、命令数）が満たされるまで `Step` は進まない。画面の読み取りは行ごとの LINQ クエリ。 |
+| `BootAutomation.cs` | 画面（テキスト VRAM）を見ながらキーを注入する自動操作。`--boot-debug` の NTLDR 起動メニュー操作と、`--type "プロンプト=>キー列"`（画面の最後の行がプロンプトで終わるのを待ってキー列を打ち、最後のプロンプトが戻ったら画面を出力して止まる。ヘッドレスでゲストのシェルを調べる用。`
+` は Enter、US 配列でシフトが要る文字はシフトで挟む）。手順はイテレータ（コルーチン）の `Script` に上から順に書き、`yield` した待ち条件（画面の文字列、命令数）が満たされるまで `Step` は進まない。画面の読み取りは行ごとの LINQ クエリ。 |
 | `RunDiagnostics.cs` / `WindowsDiagnostics.cs` | トレース・監視点・停止診断と、Windows 固有の構造体・スタック解析。停止条件はオプションから組み立てた規則のリスト（命令の前のブレークポイント、後の監視点・トラップ・分岐履歴・トレース）を順に試す。後者はゲストメモリの Reader `Guest<T>`（`Dword`/`Byte`/`Ascii`/連結リストの `Walk`/例外を既定値にする `Or`）をクエリ構文で合成して、フレームチェーンや入口の引数・IRP・デバッグ文字列を読む。 |
 | `EnvironmentFactory.cs` / `DiskConfiguration.cs` | 埋め込み BIOS の読み込み、ディスク探索・明示的なパス設定、通常起動用の環境生成。 |
 | `SnapshotStore.cs` | 保存形式の版管理、チェックサム検証、ディスク差分を含むチェックポイントの確定と復元。 |

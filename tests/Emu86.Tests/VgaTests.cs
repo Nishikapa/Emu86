@@ -528,7 +528,7 @@ static class VgaTests
                 env.Vga.Vram[0x10000 + row * 80 + column] = (byte)(highlighted ? 0x70 : 0x07);
             }
         }
-        var automation = new BootAutomation();
+        var automation = BootAutomation.NtldrDebug();
         using var output = new StringWriter();
         automation.Step(env, 1000, output);
         Equal(0, env.Keyboard.Injected.Count, "nothing before the boot sector");
@@ -573,7 +573,7 @@ static class VgaTests
         void Drain() { while (env.Keyboard.Injected.TryDequeue(out _)) { } }
         VgaBiosStub.Install(env);
         using var output = new StringWriter();
-        var automation = new BootAutomation();
+        var automation = BootAutomation.NtldrDebug();
         automation.Step(env, 0, output);
         Equal(2, env.Keyboard.Injected.Count, "F8 pressed immediately after boot");
         Drain();
@@ -604,7 +604,7 @@ static class VgaTests
         Equal(true, output.ToString().Contains("giving up: highlighted line is 'Safe Mode'"), "giving up is logged");
 
         using var quiet = new StringWriter();
-        var timeout = new BootAutomation();
+        var timeout = BootAutomation.NtldrDebug();
         Line(2, "    Safe Mode");
         Line(3, "    Debugging Mode", highlighted: true);
         timeout.Step(env, 0, quiet);
@@ -622,6 +622,29 @@ static class VgaTests
 
     // 既定 DAC: EGA 互換の 64 色(リセット時と mode 3)と、mode 13h の 256 色(16 色 + グレー 16 + 色相環 216 + 黒 8)。
     // 期待値は従来のループ実装の式から手で計算したもの。
+    // --type の自動操作: 文字 → スキャンコード(シフト付きの文字はシフトで挟む)、最後の行がプロンプトで終わるのを待って打ち、
+    // 最後のプロンプトが戻ったら画面を出力して完了する(ランナーはそこで止まる)。
+    static void Typing()
+    {
+        Equal("1e9e,1f9f,1c9c", string.Join(",", BootAutomation.Scancodes("as\n").Select(Convert.ToHexString)).ToLowerInvariant(), "unshifted keys");
+        Equal("2a35b5aa,2a0c8caa,2a1e9eaa", string.Join(",", BootAutomation.Scancodes("?_A").Select(Convert.ToHexString)).ToLowerInvariant(), "shifted keys");
+        Equal(0, BootAutomation.Scancodes("é").Count(), "unknown characters are skipped");
+        using var env = new EmuEnvironment(memory: new byte[0x10000]);
+        using var output = new StringWriter();
+        void Show(int row, string text) { for (var column = 0; column < 80; column++) env.Vga.Vram[row * 80 + column] = (byte)(column < text.Length ? text[column] : ' '); }
+        Show(0, "Welcome to the shell");
+        Show(2, "Loading...");
+        var automation = BootAutomation.Typing(["(initramfs)=>ls\n"]);
+        automation.Step(env, 0, output);
+        Equal(0, env.Keyboard.Injected.Count, "nothing typed before the prompt appears");
+        Show(2, "(initramfs) ");
+        var count = 0L;
+        while (!automation.Completed && count < 20_000_000) { count += 10_000; automation.Step(env, count, output); }
+        Equal(true, automation.Completed && automation.StopWhenCompleted, "typing completed and stops the run");
+        Equal("26 A6 1F 9F 1C 9C", string.Join(" ", env.Keyboard.Injected.Select(scancode => scancode.ToString("X2"))), "injected scancodes for ls + Enter");
+        Equal(true, output.ToString().Contains("[screen]  (initramfs)") && output.ToString().Contains("typing completed"), "screen dump and completion log");
+    }
+
     static void Palette()
     {
         using var env = new EmuEnvironment(memory: new byte[0x100000]);
@@ -726,5 +749,6 @@ static class VgaTests
         ("boot-menu", BootMenuAutomation),
         ("boot-menu-timeouts", BootMenuTimeouts),
         ("palette", Palette),
+        ("typing", Typing),
     ];
 }

@@ -72,6 +72,10 @@ static class Program
         }
     }
 
+    // 画面を見てキーを注入する自動操作(--boot-debug は NTLDR のメニュー、--type は任意のキー列)。
+    static BootAutomation Automation(RunOptions options) =>
+        options.BootDebug ? BootAutomation.NtldrDebug() : options.Type.Count > 0 ? BootAutomation.Typing(options.Type) : null;
+
     static CPU ResetVector() => _cs.setter(_ip.setter(new CPU())(0xFFF0))(0xF000);
 
     // --com1/--com2 で指定された名前付きパイプを UART につなぐ(環境を作り直すときは前の接続を引き継ぐ)。
@@ -96,7 +100,7 @@ static class Program
         TextWriter trace, Action<long, CPU, EmuEnvironment> save, CancellationToken stop, EmulationControl control,
         Action<EmuEnvironment> rebind)
     {
-        var bootAutomation = options.BootDebug ? new BootAutomation() : null;
+        var bootAutomation = Automation(options);
         while (true)
         {
             count = EmulationRunner.Run(options, env, cpu, count, trace, saveSnapshot: save,
@@ -111,7 +115,7 @@ static class Program
             env.Dispose();
             env = fresh;
             env.Vga.FallbackFont = font;
-            if (options.BootDebug) bootAutomation = new BootAutomation();
+            bootAutomation = Automation(options);
             cpu = ResetVector();
             control?.Restart();
             rebind?.Invoke(env);
