@@ -11,7 +11,7 @@ public partial class EmuEnvironment
     // v2 から: RAM・I/O ポート・CMOS・PIT チャネル 0 と、接続中なら ATA のレジスタとバッファ。
     // ディスクの中身(DiskImage)は書き込みのたびにファイルへ反映済みなのでここでは扱わない。
     static readonly Codec<EmuEnvironment> Memory = new Codec<EmuEnvironment>()
-        .Bytes(e => e.OneMegaMemory_)
+        .Bytes(e => e.Ram)
         .Bytes(e => e.IoPort)
         .Bytes(e => e.Cmos)
         .I32(e => e.CmosIndex, (e, v) => e.CmosIndex = v)

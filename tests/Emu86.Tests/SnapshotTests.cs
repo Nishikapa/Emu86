@@ -26,11 +26,11 @@ static class SnapshotTests
     static CPU Cpu() => new() { eip = 0x100, code32 = true, stack32 = true, eax = 0x87654321, ebx = 0x3000, esp = 0x2002, eflags = 0x203 };
 
     static void Page(EmuEnvironment env, int linear, uint physical) =>
-        BitConverter.GetBytes(physical | 3).CopyTo(env.OneMegaMemory_, 0xA000 + linear * 4);
+        BitConverter.GetBytes(physical | 3).CopyTo(env.Ram, 0xA000 + linear * 4);
 
     static void Paging(EmuEnvironment env, CPU cpu)
     {
-        BitConverter.GetBytes(0xA003u).CopyTo(env.OneMegaMemory_, 0x9000);
+        BitConverter.GetBytes(0xA003u).CopyTo(env.Ram, 0x9000);
         Page(env, 0, 0);
         CPU._cr0.setter(cpu)(0x80010001);
         CPU._cr3.setter(cpu)(0x9000);
@@ -54,20 +54,20 @@ static class SnapshotTests
             var env = Environment();
             var cpu = Cpu();
             byte[] invalid = [0x66, 0x67, 0x64, 0xF0, 0x0F, 0xFF];
-            invalid.CopyTo(env.OneMegaMemory_, 0x100);
+            invalid.CopyTo(env.Ram, 0x100);
             var initial = CpuState(cpu);
             Equal(false, executor.Step(env, cpu).IsSuccess, "unsupported opcode");
             Equal(initial, CpuState(cpu), "unsupported instruction rollback");
             Equal(false, cpu.lock_prefix, "LOCK cleanup");
             byte[] move = [0xB8, 0x78, 0x56, 0x34, 0x12];
-            move.CopyTo(env.OneMegaMemory_, 0x100);
+            move.CopyTo(env.Ram, 0x100);
             Equal(true, executor.Step(env, cpu).IsSuccess, "instruction after unsupported opcode");
             Equal(0x12345678u, cpu.eax, "no leaked operand prefix");
 
             cpu = Cpu();
             Paging(env, cpu);
-            env.OneMegaMemory_[0x100] = 0x66;
-            env.OneMegaMemory_[0x101] = 0x50;
+            env.Ram[0x100] = 0x66;
+            env.Ram[0x101] = 0x50;
             initial = CpuState(cpu);
             Throws<PageFaultException>(() => executor.Step(env, cpu), "PUSH fault");
             Equal(initial, CpuState(cpu), "PUSH rollback");
@@ -76,23 +76,23 @@ static class SnapshotTests
             env.Paging.Flush();
             Equal(true, executor.Step(env, cpu).IsSuccess, "PUSH retry");
             Equal(0x2000u, cpu.esp, "PUSH stack after retry");
-            Equal((ushort)0x4321, BitConverter.ToUInt16(env.OneMegaMemory_, 0x5000), "PUSH value after retry");
+            Equal((ushort)0x4321, BitConverter.ToUInt16(env.Ram, 0x5000), "PUSH value after retry");
 
             env = Environment(); cpu = Cpu(); Paging(env, cpu);
             Page(env, 1, 0x5000); Page(env, 3, 0x6000);
-            env.OneMegaMemory_[0x100] = 0xF3; env.OneMegaMemory_[0x101] = 0xA4;
-            env.OneMegaMemory_[0x6000] = 0x11; env.OneMegaMemory_[0x6001] = 0x22;
+            env.Ram[0x100] = 0xF3; env.Ram[0x101] = 0xA4;
+            env.Ram[0x6000] = 0x11; env.Ram[0x6001] = 0x22;
             cpu.ecx = 2; cpu.esi = 0x3000; cpu.edi = 0x1FFF;
             Throws<PageFaultException>(() => executor.Step(env, cpu), "REP fault");
             Equal(0x100u, cpu.eip, "REP restart EIP");
             Equal(1u, cpu.ecx, "REP remaining count");
             Equal(0x3001u, cpu.esi, "REP source progress");
             Equal(0x2000u, cpu.edi, "REP destination progress");
-            env.OneMegaMemory_[0x6000] = 0x99;
+            env.Ram[0x6000] = 0x99;
             Page(env, 2, 0x7000); env.Paging.Flush();
             Equal(true, executor.Step(env, cpu).IsSuccess, "REP retry");
-            Equal((byte)0x11, env.OneMegaMemory_[0x5fff], "completed REP iteration is not replayed");
-            Equal((byte)0x22, env.OneMegaMemory_[0x7000], "remaining REP iteration");
+            Equal((byte)0x11, env.Ram[0x5fff], "completed REP iteration is not replayed");
+            Equal((byte)0x22, env.Ram[0x7000], "remaining REP iteration");
             Equal(0u, cpu.ecx, "REP completion");
 
             initial = CpuState(cpu);
@@ -100,12 +100,12 @@ static class SnapshotTests
             {
                 state.eax = 999; state.fpu_st[0] = 88; state.fs_prefix = true;
                 CPU._cr3.setter(state)(0xB000); context.Paging.Sync(state);
-                context.OneMegaMemory_[0x8000] = 0xAB;
+                context.Ram[0x8000] = 0xAB;
                 throw new PageFaultException(0xDEAD, 2);
             }), "mid-instruction state fault");
             Equal(initial, CpuState(cpu), "CPU and FPU rollback");
             Equal(0x9000u, env.Paging.Cr3Base, "CR3 mirror rollback");
-            Equal((byte)0xAB, env.OneMegaMemory_[0x8000], "memory side effects retained");
+            Equal((byte)0xAB, env.Ram[0x8000], "memory side effects retained");
         }
         var replacement = Cpu();
         State<int> failure = (env, cpu, opcodes) => (false, 0, replacement, "failure");
@@ -117,7 +117,7 @@ static class SnapshotTests
 
     static void Populate(EmuEnvironment env, CPU cpu)
     {
-        env.OneMegaMemory_[0x4321] = 0x5A; env.IoPort[0x4321] = 0x12;
+        env.Ram[0x4321] = 0x5A; env.IoPort[0x4321] = 0x12;
         env.Cmos[14] = 0x41; env.CmosIndex = 14;
         env.Tsc = 12345678; env.Msrs[0x10] = 987654321;
         env.PitCounter = 0x1234; env.PitLatched = 0x5678; env.PitReadPhase = 1;
@@ -198,7 +198,7 @@ static class SnapshotTests
             restored = Environment(); loaded = SnapshotStore.Load("legacy.snap", restored, DiskConfiguration.Discover(Directory.GetCurrentDirectory()));
             Equal(9876L, loaded.count, "legacy count");
             Equal(cpu.eax, loaded.cpu.eax, "legacy CPU");
-            Equal((byte)0x5A, restored.OneMegaMemory_[0x4321], "legacy RAM offset");
+            Equal((byte)0x5A, restored.Ram[0x4321], "legacy RAM offset");
             Equal(version >= 3 ? env.Tsc : 9876UL, restored.Tsc, "legacy TSC");
             Equal(version >= 5 ? 1.25 : 0.0, loaded.cpu.fpu_st[3], "legacy FPU");
             Equal(version >= 6 ? (ushort)0x28 : (ushort)0, loaded.cpu.tr, "legacy TR");
@@ -276,7 +276,7 @@ static class SnapshotTests
         CPU._cr0.setter(cpu)(0x8001003B); cpu.cr2 = 0xC0DEC0DE; CPU._cr3.setter(cpu)(0x39000); CPU._cr4.setter(cpu)(0x2D1);
         cpu.fpu_cw = 0x027F; cpu.fpu_sw = 0x3800; cpu.fpu_st[0] = -2.5; cpu.fpu_st[7] = 1e300;
         cpu.ebp = 0xF9E7C000; cpu.ecx = 0x11; cpu.edx = 0x22; cpu.esi = 0x33; cpu.edi = 0x44;
-        env.OneMegaMemory_[0x9F] = 0xA5; env.IoPort[0x60] = 0x1C; env.Cmos[0x7F] = 0x7E;
+        env.Ram[0x9F] = 0xA5; env.IoPort[0x60] = 0x1C; env.Cmos[0x7F] = 0x7E;
         env.Msrs[0x1B] = 0xFEE00900; env.Dr[7] = 0x401;
         env.Vga.Vram[1] = 0x11; env.Vga.Vram[0x10001] = 0x22; env.Vga.Vram[0x20001] = 0x33; env.Vga.Vram[0x30001] = 0x44;
         env.Vga.Read(0xB8002); // ラッチを読み込む
@@ -339,16 +339,16 @@ static class SnapshotTests
         // GDT: 0x08 = ring0 32 ビットコード、0x10 = データ。IDT: ベクタ 13 の割り込みゲート → 0008:00003000。
         byte[] code = [0xFF, 0xFF, 0x00, 0x00, 0x00, 0x9A, 0xCF, 0x00];
         byte[] data = [0xFF, 0xFF, 0x00, 0x00, 0x00, 0x92, 0xCF, 0x00];
-        code.CopyTo(env.OneMegaMemory_, 0x7008); data.CopyTo(env.OneMegaMemory_, 0x7010);
+        code.CopyTo(env.Ram, 0x7008); data.CopyTo(env.Ram, 0x7010);
         byte[] gate = [0x00, 0x30, 0x08, 0x00, 0x00, 0x8E, 0x00, 0x00];
-        gate.CopyTo(env.OneMegaMemory_, 0x8000 + 13 * 8);
+        gate.CopyTo(env.Ram, 0x8000 + 13 * 8);
         var cpu = new CPU { eip = 0x100, code32 = true, stack32 = true, esp = 0x6000, eflags = 0x202, idt_base = 0x8000, idt_limit = 0xFF, gdt_base = 0x7000, gdt_limit = 0x1F };
         CPU._cr0.setter(cpu)(1); CPU._cs.setter(cpu)(0x08); CPU._ss.setter(cpu)(0x10); cpu.cs_base = 0; cpu.ss_base = 0;
         // IRETD の復帰先 CS=000Bh(ring0 の非適合コードに RPL 3)は #GP(selector)。NT の BOP 復帰経路が意図的に使う。
-        env.OneMegaMemory_[0x100] = 0xCF;
-        BitConverter.GetBytes(0x200u).CopyTo(env.OneMegaMemory_, 0x6000);
-        BitConverter.GetBytes(0x0Bu).CopyTo(env.OneMegaMemory_, 0x6004);
-        BitConverter.GetBytes(0x202u).CopyTo(env.OneMegaMemory_, 0x6008);
+        env.Ram[0x100] = 0xCF;
+        BitConverter.GetBytes(0x200u).CopyTo(env.Ram, 0x6000);
+        BitConverter.GetBytes(0x0Bu).CopyTo(env.Ram, 0x6004);
+        BitConverter.GetBytes(0x202u).CopyTo(env.Ram, 0x6008);
         var before = CpuState(cpu);
         GeneralProtectionException raised = null;
         try { executor.Step(env, cpu); }
@@ -376,12 +376,12 @@ static class SnapshotTests
         Equal((false, true), (Fault.UndefinedOpcode.IdtReady(new CPU { idt_limit = 0xFF }), Fault.UndefinedOpcode.ErrorCode is null), "#UD needs protected mode and has no error code");
         cpu.eip = 0x100; cpu.esp = 0x6000;
         byte[] pageFaultGate = [0x00, 0x40, 0x08, 0x00, 0x00, 0x8E, 0x00, 0x00];
-        pageFaultGate.CopyTo(env.OneMegaMemory_, 0x8000 + 14 * 8);
+        pageFaultGate.CopyTo(env.Ram, 0x8000 + 14 * 8);
         Equal(true, executor.Execute(env, cpu, Raise(pageFault.Fault)).IsSuccess, "#PF delivered");
         Equal((0xDEADB000u, 0x4000u, 2u), (cpu.cr2, cpu.eip, Dword(env, 0x5FF0)), "#PF sets CR2 and pushes the error code");
     }
 
-    static uint Dword(EmuEnvironment env, int address) => BitConverter.ToUInt32(env.OneMegaMemory_, address);
+    static uint Dword(EmuEnvironment env, int address) => BitConverter.ToUInt32(env.Ram, address);
 
     public static void Run()
     {

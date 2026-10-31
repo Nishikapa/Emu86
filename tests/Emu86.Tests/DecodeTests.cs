@@ -53,15 +53,15 @@ static class DecodeTests
                 var scaled = register == 4 && indexRegister != 4 ? registers[indexRegister] << (sib >> 6) : 0;
                 offset = scaled + (noBase ? 0 : registers[baseRegister]);
                 stack = !noBase && baseRegister is 4 or 5;
-                if (register == 4) env.OneMegaMemory_[length++] = (byte)sib;
+                if (register == 4) env.Ram[length++] = (byte)sib;
                 if (mod == 1)
                 {
-                    env.OneMegaMemory_[length++] = (byte)displacement;
+                    env.Ram[length++] = (byte)displacement;
                     offset = unchecked(offset + (uint)(sbyte)displacement);
                 }
                 else if (mod == 2 || noBase)
                 {
-                    BitConverter.GetBytes(displacement).CopyTo(env.OneMegaMemory_, length);
+                    BitConverter.GetBytes(displacement).CopyTo(env.Ram, length);
                     length += 4;
                     offset = unchecked(offset + displacement);
                 }
@@ -76,12 +76,12 @@ static class DecodeTests
                 stack = !noBase && register is 2 or 3 or 6;
                 if (mod == 1)
                 {
-                    env.OneMegaMemory_[length++] = (byte)displacement;
+                    env.Ram[length++] = (byte)displacement;
                     offset = (ushort)(offset + (uint)(sbyte)displacement);
                 }
                 else if (mod == 2 || noBase)
                 {
-                    BitConverter.GetBytes(displacement).CopyTo(env.OneMegaMemory_, length);
+                    BitConverter.GetBytes(displacement).CopyTo(env.Ram, length);
                     length += 2;
                     offset = (ushort)(offset + (ushort)displacement);
                 }
@@ -101,8 +101,8 @@ static class DecodeTests
                 if (segmentPrefix) code.Add(0x64);
                 code.Add(0x8D);
                 code.Add((byte)((mod << 6) | register));
-                code.AddRange(env.OneMegaMemory_.Take(length));
-                code.CopyTo(env.OneMegaMemory_);
+                code.AddRange(env.Ram.Take(length));
+                code.CopyTo(env.Ram);
                 var slowCpu = CreateCpu(code32, false);
                 var fastCpu = CreateCpu(code32, false);
                 Equal(true, slow.Step(env, slowCpu).IsSuccess, "normal LEA success");
@@ -146,11 +146,11 @@ static class DecodeTests
             {
                 var address = start + (uint)index;
                 var physical = address < 0x1000 ? address : 0x5000 + (address & 0xFFF);
-                env.OneMegaMemory_[physical] = code[index];
+                env.Ram[physical] = code[index];
             }
-            BitConverter.GetBytes(0xA003u).CopyTo(env.OneMegaMemory_, 0x9000);
-            BitConverter.GetBytes(3u).CopyTo(env.OneMegaMemory_, 0xA000);
-            if (mappedNextPage) BitConverter.GetBytes(0x5003u).CopyTo(env.OneMegaMemory_, 0xA004);
+            BitConverter.GetBytes(0xA003u).CopyTo(env.Ram, 0x9000);
+            BitConverter.GetBytes(3u).CopyTo(env.Ram, 0xA000);
+            if (mappedNextPage) BitConverter.GetBytes(0x5003u).CopyTo(env.Ram, 0xA004);
             var cpu = new CPU { code32 = code32, eip = start };
             CPU._cr0.setter(cpu)(0x80000001);
             CPU._cr3.setter(cpu)(0x9000);
@@ -181,7 +181,7 @@ static class DecodeTests
         {
             using var env = new EmuEnvironment(memory: new byte[0x10000]);
             byte[] code = [0x8D, 0x84, 0xB5, 0x78, 0x56, 0x34, 0x12];
-            code.CopyTo(env.OneMegaMemory_, 0);
+            code.CopyTo(env.Ram, 0);
             var cpu = new CPU { code32 = true, cs_base = 0xFFF00000, ebp = 0x100, esi = 0x200 };
             Equal(true, new InstructionExecutor(useFast).Step(env, cpu).IsSuccess, "BIOS alias decoding");
             Equal(0x12345F78u, cpu.eax, "BIOS alias displacement");
@@ -205,7 +205,7 @@ static class DecodeTests
     {
         using var env = new EmuEnvironment(memory: new byte[0x10000]);
         var cpu = CreateCpu(true, false);
-        env.OneMegaMemory_[0] = 0xB5;
+        env.Ram[0] = 0xB5;
         var decode = GetMemOrRegAddr(2, 4);
         var immediate = GetMemoryDataIp_(2);
         for (var iteration = 0; iteration < 1000; iteration++)
@@ -224,7 +224,7 @@ static class DecodeTests
         Console.WriteLine($"Decode + immediate allocated bytes/iteration: {(GC.GetAllocatedBytesForCurrentThread() - start) / 10000}");
         // プレフィックス列と ModRM のパーサ、および高速コアの 1 命令(66 67 64 8D 84 B5 disp32 = LEA)も割り当てない。
         byte[] lea = [0x66, 0x67, 0x64, 0xF0, 0x8D, 0x84, 0xB5, 0x78, 0x56, 0x34, 0x12];
-        lea.CopyTo(env.OneMegaMemory_, 0);
+        lea.CopyTo(env.Ram, 0);
         var code = CodeSource.At(env, cpu);
         var modrm = ModRmParser(true);
         for (var iteration = 0; iteration < 1000; iteration++) { Prefixes(code, 0); modrm(code, 4); cpu.eip = 0; FastStep(env, cpu); }
@@ -241,7 +241,7 @@ static class DecodeTests
     {
         using var env = new EmuEnvironment(memory: new byte[0x10000]);
         byte[] bytes = [0x66, 0x2E, 0x67, 0xF0, 0x66, 0x64, 0x8B, 0x44, 0x98, 0xF0, 0x12, 0x34];
-        bytes.CopyTo(env.OneMegaMemory_, 0x100);
+        bytes.CopyTo(env.Ram, 0x100);
         var code = new CodeSource(env, 0, 0x100, true);
         var (ok, prefixes, next) = Prefixes(code, 0);
         Equal(true, ok, "prefixes succeed");
@@ -268,7 +268,7 @@ static class DecodeTests
         Equal(1, ParseModRm(code, 1, 0xC3, true).Length, "register form length");
         Equal(5, ParseModRm(code, 1, 0x05, true).Length, "[disp32] length");
         Equal(2, ParseModRm(code, 1, 0x04, true).Length, "SIB without displacement length");
-        env.OneMegaMemory_[0x200] = 0x05; BitConverter.GetBytes(0xCAFEBABEu).CopyTo(env.OneMegaMemory_, 0x201);
+        env.Ram[0x200] = 0x05; BitConverter.GetBytes(0xCAFEBABEu).CopyTo(env.Ram, 0x201);
         var sibDisp = ParseModRm(new CodeSource(env, 0, 0x200, true), 0, 0x04, true);
         Equal((6, true, (byte)5, 0xCAFEBABEu), (sibDisp.Length, sibDisp.HasSib, sibDisp.Base, sibDisp.Disp), "SIB with base=5 and mod=0 reads disp32");
         Equal(3, ParseModRm(code, 1, 0x06, false).Length, "16-bit [disp16] length");
@@ -293,7 +293,7 @@ static class DecodeTests
         Equal((true, 0, 1), Fetch8.Where(value => value == 0x66).Fold(0, (count, _) => count + 1)(code, 1), "fold with no match consumes nothing");
 
         // 16 ビットコードセグメントでは IP が折り返す: FFFE から 4 バイト読むと 0000 へ戻る。
-        env.OneMegaMemory_[0xFFFE] = 0xAA; env.OneMegaMemory_[0xFFFF] = 0xBB; env.OneMegaMemory_[0] = 0xCC; env.OneMegaMemory_[1] = 0xDD;
+        env.Ram[0xFFFE] = 0xAA; env.Ram[0xFFFF] = 0xBB; env.Ram[0] = 0xCC; env.Ram[1] = 0xDD;
         var wrapped = new CodeSource(env, 0, 0xFFFE, false);
         Equal((0xAA, 0xBB, 0xCC, 0xDD), (wrapped.Byte(0), wrapped.Byte(1), wrapped.Byte(2), wrapped.Byte(3)), "16-bit IP wraps per byte");
         Equal(0xAAu, new CodeSource(env, 0, 0xFFFE, true).Byte(0), "32-bit code does not wrap");
@@ -329,8 +329,8 @@ static class DecodeTests
                 code.Add((byte)(opcode & 0xFF));
                 code.AddRange(modrm);
                 code.AddRange(filler);
-                Array.Clear(env.OneMegaMemory_);
-                code.CopyTo(env.OneMegaMemory_, 0x100);
+                Array.Clear(env.Ram);
+                code.CopyTo(env.Ram, 0x100);
                 var cpu = new CPU { code32 = true, stack32 = true, eip = 0x100, eax = 0x3000, ebx = 0x3000, ecx = 5, edx = 0x3000, esi = 0x3000, edi = 0x4000, esp = 0x8000, ebp = 0x3000, eflags = 2 };
                 bool success;
                 try { success = executor.Step(env, cpu).IsSuccess; }
@@ -355,8 +355,8 @@ static class DecodeTests
         using var env = new EmuEnvironment(memory: new byte[0x10000]);
         string Text(bool code32, params byte[] code)
         {
-            Array.Clear(env.OneMegaMemory_, 0x100, 32);
-            code.CopyTo(env.OneMegaMemory_, 0x100);
+            Array.Clear(env.Ram, 0x100, 32);
+            code.CopyTo(env.Ram, 0x100);
             var cpu = new CPU { code32 = code32, eip = 0x100 };
             return DecodeInstruction(env, cpu).ToString();
         }
@@ -385,7 +385,7 @@ static class DecodeTests
         Equal("CMPXCHG8B [esi]", Text(true, 0x0F, 0xC7, 0x0E), "group 9 memory form");
         Equal("(undefined)", Text(true, 0xD6), "undefined opcode");
         Equal("FPU", Text(true, 0xD9, 0xC9), "FPU escape");
-        env.OneMegaMemory_[0x100] = 0x0F; env.OneMegaMemory_[0x101] = 0xC7; env.OneMegaMemory_[0x102] = 0xC8;
+        env.Ram[0x100] = 0x0F; env.Ram[0x101] = 0xC7; env.Ram[0x102] = 0xC8;
         Equal("0f c7 c8  CMPXCHG8B eax", Disassembler.Describe(env, new CPU { code32 = true, eip = 0x100 }), "bytes and text");
         var faulting = new EmuEnvironment(memory: new byte[0x10000]);
         faulting.Paging.Enabled = true; faulting.Paging.Cr3Base = 0x9000; // 空のページディレクトリ: フェッチが #PF

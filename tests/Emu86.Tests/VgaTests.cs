@@ -38,7 +38,7 @@ static class VgaTests
             byte[] code = [0xC6, 0x05, 0x00, 0x80, 0x0B, 0x00, 0x41,          // mov byte [0xB8000], 'A'
                            0x66, 0xC7, 0x05, 0x02, 0x80, 0x0B, 0x00, 0x1F, 0x42, // mov word [0xB8002], 0x421F
                            0xA0, 0x00, 0x80, 0x0B, 0x00];                     // mov al, [0xB8000]
-            code.CopyTo(env.OneMegaMemory_, 0x100);
+            code.CopyTo(env.Ram, 0x100);
             var executor = new InstructionExecutor(fast);
             for (var step = 0; step < 3; step++) Equal(true, executor.Step(env, cpu).IsSuccess, $"vga memory step {step} fast={fast}");
             Equal((byte)0x41, env.Vga.Vram[0], "text character in plane 0");
@@ -47,7 +47,7 @@ static class VgaTests
             Equal((byte)0x41, cpu.al, "read back through the window");
             Equal((byte)0x41, EnvGetMemoryData8(env, 0xB8000), "byte read");
             Equal((byte)0xFF, EnvGetMemoryData8(env, 0xA0000), "unmapped part of the window reads 0xFF");
-            Equal(true, env.OneMegaMemory_.All(value => value == 0 || Array.IndexOf(code, value) >= 0), "RAM untouched");
+            Equal(true, env.Ram.All(value => value == 0 || Array.IndexOf(code, value) >= 0), "RAM untouched");
         }
     }
 
@@ -175,7 +175,7 @@ static class VgaTests
         Equal("320x200 256 colors", vga.ModeDescription(), "mode 13h description");
     }
 
-    static void Write32(EmuEnvironment env, int address, uint value) => BitConverter.GetBytes(value).CopyTo(env.OneMegaMemory_, address);
+    static void Write32(EmuEnvironment env, int address, uint value) => BitConverter.GetBytes(value).CopyTo(env.Ram, address);
 
     // ring0 の IRETD で V86 モードへ入り、V86 コードの INT 21h が DPL0 ゲートのため #GP(0x10A) として
     // ハンドラへ(V86 形式のフレームで)配送され、IRETD で V86 へ戻り、BOP(C4 C4)の #UD で終了することを確認する。
@@ -201,8 +201,8 @@ static class VgaTests
             byte[] v86 = [0xB8, 0x34, 0x12, 0x50, 0xCD, 0x21, 0xC4, 0xC4, 0x90, 0xEB, 0xFE];
             byte[] gp = [0x8B, 0x0C, 0x24, 0x83, 0x44, 0x24, 0x04, 0x02, 0x83, 0xC4, 0x04, 0xCF];
             byte[] ud = [0xBB, 0x0D, 0x60, 0x00, 0x00, 0xEB, 0xFE];
-            enter.CopyTo(env.OneMegaMemory_, 0x100); v86.CopyTo(env.OneMegaMemory_, 0x20000);
-            gp.CopyTo(env.OneMegaMemory_, 0x400); ud.CopyTo(env.OneMegaMemory_, 0x480);
+            enter.CopyTo(env.Ram, 0x100); v86.CopyTo(env.Ram, 0x20000);
+            gp.CopyTo(env.Ram, 0x400); ud.CopyTo(env.Ram, 0x480);
             using var output = new StringWriter();
             var options = RunOptions.Parse(fast ? ["--limit", "40", "--noirq", "--notrace"] : ["--limit", "40", "--noirq", "--notrace", "--slow"]);
             EmulationRunner.Run(options, env, cpu, 0, null, output, TextWriter.Null);
@@ -210,12 +210,12 @@ static class VgaTests
             Equal(0x600Du, cpu.ebx, "reached #UD handler" + label + ": " + output);
             Equal(0x10Au, cpu.ecx, "#GP error code for INT 21h from V86" + label);
             Equal((ushort)0x1234, cpu.ax, "V86 code ran" + label);
-            Equal((ushort)0x1234, BitConverter.ToUInt16(env.OneMegaMemory_, 0x30FFC), "V86 stack uses SS*16" + label);
+            Equal((ushort)0x1234, BitConverter.ToUInt16(env.Ram, 0x30FFC), "V86 stack uses SS*16" + label);
             Equal(false, cpu.vm, "VM cleared in handler" + label);
             Equal((ushort)8, cpu.cs, "handler code segment" + label);
             Equal(0, cpu.ds | cpu.es | cpu.fs | cpu.gs, "data segments nulled on V86 trap" + label);
             Equal(0x6FDCu, cpu.esp, "V86 trap frame size" + label);
-            uint[] frame = Enumerable.Range(0, 9).Select(index => BitConverter.ToUInt32(env.OneMegaMemory_, 0x6FDC + index * 4)).ToArray();
+            uint[] frame = Enumerable.Range(0, 9).Select(index => BitConverter.ToUInt32(env.Ram, 0x6FDC + index * 4)).ToArray();
             Equal("6,2000,ffc,3000,3000,3000,3000,3000", string.Join(",", new[] { frame[0], frame[1], frame[3], frame[4], frame[5], frame[6], frame[7], frame[8] }.Select(value => value.ToString("x"))), "V86 frame contents" + label);
             Equal(0x20000u, frame[2] & 0x20000, "pushed EFLAGS keeps VM" + label);
         }
@@ -230,7 +230,7 @@ static class VgaTests
             var cpu = new CPU { eip = 0x100, esp = 0x8000, eflags = 2 };
             byte[] main = [0xFB, 0xEB, 0xFE];                   // sti; jmp $
             byte[] handler = [0xE4, 0x60, 0x88, 0xC3, 0xCF];    // in al,60h; mov bl,al; iret
-            main.CopyTo(env.OneMegaMemory_, 0x100); handler.CopyTo(env.OneMegaMemory_, 0x600);
+            main.CopyTo(env.Ram, 0x100); handler.CopyTo(env.Ram, 0x600);
             Write32(env, 9 * 4, 0x00000600);
             env.KbdCmdByte = (byte)(enabled ? 0x45 : 0x44);
             env.Keyboard.Inject(0x1E, 0x9E);
@@ -257,20 +257,20 @@ static class VgaTests
                            0xB8, 0x00, 0x1A, 0xCD, 0x10, 0x88, 0x1E, 0x02, 0x07,           // DCC -> [0x702] = bl
                            0xB8, 0x92, 0x00, 0xCD, 0x10,                                   // mode 12h (bit7: VRAM を消さない)
                            0xEB, 0xFE];
-            main.CopyTo(env.OneMegaMemory_, 0x100); boot.CopyTo(env.OneMegaMemory_, 0x7C00);
+            main.CopyTo(env.Ram, 0x100); boot.CopyTo(env.Ram, 0x7C00);
             Write32(env, 0x19 * 4, 0x00007C00);
             var options = RunOptions.Parse(fast ? ["--limit", "60", "--noirq", "--notrace"] : ["--limit", "60", "--noirq", "--notrace", "--slow"]);
             using var output = new StringWriter();
             EmulationRunner.Run(options, env, cpu, 0, null, output, TextWriter.Null);
             var label = fast ? " (fast)" : " (slow)";
             Equal(true, VgaBiosStub.IsInstalled(env), "stub installed at INT 19h" + label + ": " + output);
-            Equal(0xAA55, BitConverter.ToUInt16(env.OneMegaMemory_, 0xC0000), "option ROM signature" + label);
-            Equal(0, Enumerable.Range(0, VgaBiosStub.RomSize).Sum(index => env.OneMegaMemory_[0xC0000 + index]) & 0xFF, "ROM checksum" + label);
+            Equal(0xAA55, BitConverter.ToUInt16(env.Ram, 0xC0000), "option ROM signature" + label);
+            Equal(0, Enumerable.Range(0, VgaBiosStub.RomSize).Sum(index => env.Ram[0xC0000 + index]) & 0xFF, "ROM checksum" + label);
             Equal((byte)'A', env.Vga.Vram[0], "teletype first character" + label);
             Equal((byte)'B', env.Vga.Vram[1], "teletype second character" + label);
             Equal((byte)0x07, env.Vga.Vram[0x10001], "text attribute preserved" + label);
-            Equal("3,2,8", string.Join(",", env.OneMegaMemory_.Skip(0x700).Take(3)), "get mode / cursor column / display combination code" + label);
-            Equal((byte)0x12, env.OneMegaMemory_[0x449], "BDA mode" + label);
+            Equal("3,2,8", string.Join(",", env.Ram.Skip(0x700).Take(3)), "get mode / cursor column / display combination code" + label);
+            Equal((byte)0x12, env.Ram[0x449], "BDA mode" + label);
             Equal((640, 480), env.Vga.Resolution(), "mode 12h via BIOS" + label);
             Equal((byte)'A', env.Vga.Vram[0], "no-clear flag keeps VRAM" + label);
             Equal((ushort)0, cpu.cs, "returned from the stub to the boot code" + label);
@@ -335,7 +335,7 @@ static class VgaTests
             // push 0x23; push 0x5000; push 0x202; push 0x0B; push 0x200; iretd; (never reached) hlt
             byte[] code = [0x6A, 0x23, 0x68, 0x00, 0x50, 0x00, 0x00, 0x68, 0x02, 0x02, 0x00, 0x00, 0x6A, 0x0B, 0x68, 0x00, 0x02, 0x00, 0x00, 0xCF, 0xF4];
             byte[] handler = [0x8B, 0x0C, 0x24, 0x8B, 0x5C, 0x24, 0x04, 0x8B, 0x54, 0x24, 0x10, 0xEB, 0xFE]; // ecx=err; ebx=eip; edx=[esp+10h](元の IRET 枠の EIP); jmp $
-            code.CopyTo(env.OneMegaMemory_, 0x100); handler.CopyTo(env.OneMegaMemory_, 0x400);
+            code.CopyTo(env.Ram, 0x100); handler.CopyTo(env.Ram, 0x400);
             var options = RunOptions.Parse(fast ? ["--limit", "12", "--noirq", "--notrace"] : ["--limit", "12", "--noirq", "--notrace", "--slow"]);
             EmulationRunner.Run(options, env, cpu, 0, null, TextWriter.Null, TextWriter.Null);
             var label = fast ? " (fast)" : " (slow)";
@@ -343,14 +343,14 @@ static class VgaTests
             Equal(0x113u, cpu.ebx, "fault EIP points at the IRETD" + label);
             Equal(0x200u, cpu.edx, "IRET frame left intact right above the #GP frame" + label);
             Equal((ushort)8, cpu.cs, "still ring0" + label);
-            Equal(0x200u, BitConverter.ToUInt32(env.OneMegaMemory_, 0x5FEC), "frame EIP intact" + label);
+            Equal(0x200u, BitConverter.ToUInt32(env.Ram, 0x5FEC), "frame EIP intact" + label);
             // 正しい ring3 復帰(CS=1B)は通る。
             using var ok = new EmuEnvironment(memory: new byte[0x10000]);
             var cpu2 = new CPU { eip = 0x100, esp = 0x6000, code32 = true, stack32 = true, eflags = 2, gdt_base = 0x500, gdt_limit = 0x1F, idt_base = 0x1000, idt_limit = 0x7FF };
             CPU._cr0.setter(cpu2)(1); CPU._cs.setter(cpu2)(8); cpu2.cs_base = 0; CPU._ss.setter(cpu2)(16); cpu2.ss_base = 0;
-            Array.Copy(env.OneMegaMemory_, 0x500, ok.OneMegaMemory_, 0x500, 0x20);
+            Array.Copy(env.Ram, 0x500, ok.Ram, 0x500, 0x20);
             byte[] code2 = [0x6A, 0x23, 0x68, 0x00, 0x50, 0x00, 0x00, 0x68, 0x02, 0x02, 0x00, 0x00, 0x6A, 0x1B, 0x68, 0x00, 0x02, 0x00, 0x00, 0xCF];
-            code2.CopyTo(ok.OneMegaMemory_, 0x100); ok.OneMegaMemory_[0x200] = 0xEB; ok.OneMegaMemory_[0x201] = 0xFE;
+            code2.CopyTo(ok.Ram, 0x100); ok.Ram[0x200] = 0xEB; ok.Ram[0x201] = 0xFE;
             EmulationRunner.Run(options, ok, cpu2, 0, null, TextWriter.Null, TextWriter.Null);
             Equal((ushort)0x1B, cpu2.cs, "ring3 return accepted" + label);
             Equal(0x5000u, cpu2.esp, "outer stack loaded" + label);
@@ -401,13 +401,13 @@ static class VgaTests
         var cpu = new CPU { eip = 0x100, esp = 0x8000, eflags = 2, edi = 0x700 };
         byte[] main = [0xFB, 0xEB, 0xFE];
         byte[] handler = [0xE4, 0x60, 0xAA, 0xB0, 0x20, 0xE6, 0xA0, 0xE6, 0x20, 0xCF]; // in al,60h; stosb; EOI slave+master; iret
-        main.CopyTo(irq.OneMegaMemory_, 0x100); handler.CopyTo(irq.OneMegaMemory_, 0x600);
+        main.CopyTo(irq.Ram, 0x100); handler.CopyTo(irq.Ram, 0x600);
         Write32(irq, 0x74 * 4, 0x00000600);
         irq.KbdCmdByte = 0x47; // キーボード/AUX 割り込み許可、変換有効
         irq.Mouse.Enabled = true;
         irq.Mouse.Move(2, 1, 0, 2);
         EmulationRunner.Run(RunOptions.Parse(["--limit", "40100", "--notrace"]), irq, cpu, 0, null, TextWriter.Null, TextWriter.Null);
-        Equal("0A,02,01", Hex(irq.OneMegaMemory_.Skip(0x700).Take(3).ToArray()), "right button packet via IRQ12");
+        Equal("0A,02,01", Hex(irq.Ram.Skip(0x700).Take(3).ToArray()), "right button packet via IRQ12");
         Equal(0x703u, cpu.edi, "exactly three bytes delivered");
         Equal(0, irq.Mouse.Output.Count, "all packet bytes consumed");
         // スナップショット v9 にマウス状態が入る。
@@ -432,7 +432,7 @@ static class VgaTests
         {
             using var env = new EmuEnvironment(memory: new byte[0x10000]);
             var cpu = new CPU { eip = 0x100, esp = 0x8000, eflags = 2, code32 = true, stack32 = true };
-            code.CopyTo(env.OneMegaMemory_, 0x100);
+            code.CopyTo(env.Ram, 0x100);
             using var output = new StringWriter();
             var count = EmulationRunner.Run(RunOptions.Parse(["--limit", "30000", "--notrace", "--noirq"]), env, cpu, 0, null, output, TextWriter.Null);
             Equal(true, env.ResetRequested, "reset flagged: " + name);
@@ -441,7 +441,7 @@ static class VgaTests
         }
         using var none = new EmuEnvironment(memory: new byte[0x10000]);
         byte[] keep = [0xB0, 0xD1, 0xE6, 0x64, 0xB0, 0x03, 0xE6, 0x60, 0xEB, 0xFE]; // 出力ポート 03 (bit0=1) はリセットしない
-        keep.CopyTo(none.OneMegaMemory_, 0x100);
+        keep.CopyTo(none.Ram, 0x100);
         var count2 = EmulationRunner.Run(RunOptions.Parse(["--limit", "30000", "--notrace", "--noirq"]), none,
             new CPU { eip = 0x100, esp = 0x8000, eflags = 2, code32 = true, stack32 = true }, 0, null, TextWriter.Null, TextWriter.Null);
         Equal(30000L, count2, "A20 write does not reset");
@@ -508,11 +508,11 @@ static class VgaTests
         var cpu = new CPU { eip = 0x100, esp = 0x8000, eflags = 2, edi = 0x700 };
         byte[] main = [0xFB, 0xEB, 0xFE];
         byte[] handler = [0xBA, 0xF8, 0x03, 0xEC, 0xAA, 0xB0, 0x20, 0xE6, 0x20, 0xCF]; // mov dx,3F8h; in al,dx; stosb; EOI; iret
-        main.CopyTo(irq.OneMegaMemory_, 0x100); handler.CopyTo(irq.OneMegaMemory_, 0x600);
+        main.CopyTo(irq.Ram, 0x100); handler.CopyTo(irq.Ram, 0x600);
         Write32(irq, 0x0C * 4, 0x00000600);
         irq.Com1.Ier = 0x01; irq.Com1.Rx.Enqueue((byte)'x'); irq.Com1.Rx.Enqueue((byte)'y');
         EmulationRunner.Run(RunOptions.Parse(["--limit", "20100", "--notrace"]), irq, cpu, 0, null, TextWriter.Null, TextWriter.Null);
-        Equal("xy", System.Text.Encoding.ASCII.GetString(irq.OneMegaMemory_, 0x700, 2), "bytes delivered through IRQ4");
+        Equal("xy", System.Text.Encoding.ASCII.GetString(irq.Ram, 0x700, 2), "bytes delivered through IRQ4");
         // スナップショット v10 に UART の状態が入る。
         env.Com2.Ier = 0x03; env.Com2.Rx.Enqueue(0x11);
         SnapshotStore.Save("serial.snap", 3, new CPU(), env);
@@ -546,9 +546,9 @@ static class VgaTests
         Line(2, "    Safe Mode", highlighted: true);
         Line(3, "    Debugging Mode");
         Line(4, "    Return to OS Choices Menu");
-        env.OneMegaMemory_[0x41A] = 0x24; env.OneMegaMemory_[0x41C] = 0x28;
+        env.Ram[0x41A] = 0x24; env.Ram[0x41C] = 0x28;
         automation.Step(env, 1_000_000, output);
-        Equal("0x1E,0x1E", $"0x{env.OneMegaMemory_[0x41A]:X2},0x{env.OneMegaMemory_[0x41C]:X2}", "BIOS key buffer emptied when the menu appears");
+        Equal("0x1E,0x1E", $"0x{env.Ram[0x41A]:X2},0x{env.Ram[0x41C]:X2}", "BIOS key buffer emptied when the menu appears");
         automation.Step(env, 1_300_000, output);
         Equal("E0,50,E0,D0", string.Join(",", env.Keyboard.Injected.Select(b => b.ToString("X2"))), "down arrow sent while another line is highlighted");
         while (env.Keyboard.Injected.TryDequeue(out _)) { }
@@ -665,7 +665,7 @@ static class VgaTests
         VgaBiosStub.Install(env);
         var vga = env.Vga;
         var cpu = new CPU { eax = 0x0941, ebx = 0x1F, ecx = 3 }; // AH=09 AL='A' BL=属性 CX=3
-        env.OneMegaMemory_[0x450] = 2; env.OneMegaMemory_[0x451] = 1;    // カーソル (行 1, 列 2)
+        env.Ram[0x450] = 2; env.Ram[0x451] = 1;    // カーソル (行 1, 列 2)
         VgaBiosStub.Service(env, cpu);
         var cell = 1 * 80 + 2;
         Equal("41,41,41", string.Join(",", Enumerable.Range(0, 3).Select(offset => vga.Vram[cell + offset].ToString("x2"))), "AH=09 writes the character");
