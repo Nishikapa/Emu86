@@ -1,6 +1,5 @@
 using Emu86;
 using static Emu86.Conversions;
-using static Emu86.FastCore;
 using static Emu86.Mmu;
 using static Emu86.Fetch;
 using static Emu86.Decoder;
@@ -19,6 +18,7 @@ static class DecodeTests
     static void Addresses()
     {
         using var env = new EmuEnvironment(memory: new byte[0x10000]);
+        Ir.SingleStep(env);
         var slow = new InstructionExecutor(false);
         var fast = new InstructionExecutor(true);
 
@@ -95,11 +95,12 @@ static class DecodeTests
                 code.Add((byte)((mod << 6) | register));
                 code.AddRange(env.Ram.Take(length));
                 code.CopyTo(env.Ram);
+                env.Translations.InvalidateAll();
                 var slowCpu = CreateCpu(code32, false);
                 var fastCpu = CreateCpu(code32, false);
                 Equal(true, slow.Step(env, slowCpu).IsSuccess, "normal LEA success");
                 Equal(true, fast.Step(env, fastCpu).IsSuccess, "fast LEA success");
-                Equal(true, fast.UsedFastPath, "LEA uses fast decoder");
+                Equal(true, fast.UsedTranslation, "LEA runs on the IR");
                 Equal(code32 ? offset : (ushort)offset, code32 ? slowCpu.eax : slowCpu.ax, "LEA instruction value");
                 Equal(slowCpu.eax, fastCpu.eax, "LEA core agreement");
                 Equal((uint)code.Count, slowCpu.eip, "normal LEA instruction length");
@@ -148,6 +149,7 @@ static class DecodeTests
             CPU._cr3.setter(cpu)(0x9000);
             env.Paging.Sync(cpu);
             var executor = new InstructionExecutor(useFast);
+            if (useFast) Ir.SingleStep(env);
             var faulted = false;
             try
             {
@@ -155,7 +157,7 @@ static class DecodeTests
                 Equal(start + (uint)code.Count, cpu.eip, "boundary instruction length");
                 var expected = kind == 0 ? 0x78u : kind == 1 ? 0x5678u : kind == 2 ? 0x12345678u : 0x1234u;
                 Equal(expected, cpu.eax, "boundary instruction value");
-                Equal(useFast, executor.UsedFastPath, "boundary core selection");
+                Equal(useFast, executor.UsedTranslation, "boundary core selection");
             }
             catch (PageFaultException fault)
             {
@@ -175,6 +177,7 @@ static class DecodeTests
             byte[] code = [0x8D, 0x84, 0xB5, 0x78, 0x56, 0x34, 0x12];
             code.CopyTo(env.Ram, 0);
             var cpu = new CPU { code32 = true, cs_base = 0xFFF00000, ebp = 0x100, esi = 0x200 };
+            if (useFast) Ir.SingleStep(env);
             Equal(true, new InstructionExecutor(useFast).Step(env, cpu).IsSuccess, "BIOS alias decoding");
             Equal(0x12345F78u, cpu.eax, "BIOS alias displacement");
             Equal((uint)code.Length, cpu.eip, "BIOS alias instruction length");
@@ -242,18 +245,20 @@ static class DecodeTests
             immediate(env, cpu, null);
         }
         Console.WriteLine($"Decode + immediate allocated bytes/iteration: {(GC.GetAllocatedBytesForCurrentThread() - start) / 10000}");
-        // プレフィックス列と ModRM のパーサ、および高速コアの 1 命令(66 67 64 8D 84 B5 disp32 = LEA)も割り当てない。
+        // プレフィックス列と ModRM のパーサ、および IR で 1 命令ずつ実行する 1 命令(66 67 64 8D 84 B5 disp32 = LEA)も割り当てない。
         byte[] lea = [0x66, 0x67, 0x64, 0xF0, 0x8D, 0x84, 0xB5, 0x78, 0x56, 0x34, 0x12];
         lea.CopyTo(env.Ram, 0);
+        Ir.SingleStep(env);
+        var executor = new InstructionExecutor(true);
         var code = CodeSource.At(env, cpu);
         var modrm = ModRmParser(true);
-        for (var iteration = 0; iteration < 1000; iteration++) { Prefixes(code, 0); modrm(code, 4); cpu.eip = 0; FastStep(env, cpu); }
+        for (var iteration = 0; iteration < 1000; iteration++) { Prefixes(code, 0); modrm(code, 4); cpu.eip = 0; executor.Step(env, cpu); }
         start = GC.GetAllocatedBytesForCurrentThread();
         for (var iteration = 0; iteration < 10000; iteration++) { Prefixes(code, 0); modrm(code, 4); }
         Console.WriteLine($"Prefix + ModRM parser allocated bytes/iteration: {(GC.GetAllocatedBytesForCurrentThread() - start) / 10000}");
         start = GC.GetAllocatedBytesForCurrentThread();
-        for (var iteration = 0; iteration < 10000; iteration++) { cpu.eip = 0; FastStep(env, cpu); }
-        Console.WriteLine($"Fast core LEA allocated bytes/iteration: {(GC.GetAllocatedBytesForCurrentThread() - start) / 10000}");
+        for (var iteration = 0; iteration < 10000; iteration++) { cpu.eip = 0; executor.Step(env, cpu); }
+        Console.WriteLine($"IR single-step LEA allocated bytes/iteration: {(GC.GetAllocatedBytesForCurrentThread() - start) / 10000}");
     }
 
     // 命令バイト列のパーサ: プレフィックスの畳み込み、ModRM/SIB/変位の構造、コンビネータの失敗時の位置、16 ビット IP の折り返し。

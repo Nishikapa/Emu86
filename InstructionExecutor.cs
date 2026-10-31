@@ -1,5 +1,4 @@
 using static Emu86.Conversions;
-using static Emu86.FastCore;
 using static Emu86.Mmu;
 
 namespace Emu86;
@@ -44,12 +43,13 @@ public struct DecodeContext
     }
 }
 
-public sealed class InstructionExecutor(bool useFast = true)
+// 1 Step の実行: 翻訳キャッシュ(IR。1 命令のブロックから基本ブロックの連結まで)で実行できれば実行し、IR の対象外の命令だけを
+// 通常コア(State モナド)で実行する(docs/adr/0003)。useTranslation = false(--slow)なら常に通常コア。
+public sealed class InstructionExecutor(bool useTranslation = true)
 {
     readonly CPU checkpoint = new();
     readonly State<Unit> decoded = Instructions.ExecuteDecoded;
-    public bool UsedFastPath { get; private set; }
-    // 翻訳キャッシュ(IR のブロック)で実行した(UsedFastPath も真)。
+    // 翻訳キャッシュ(IR)で実行した。偽なら通常コアで 1 命令実行した。
     public bool UsedTranslation { get; private set; }
     // この Step で実行してよい命令数(翻訳ブロック用。呼び出し側が次のイベントまでの命令数を入れる)。
     public int Budget = int.MaxValue;
@@ -59,21 +59,20 @@ public sealed class InstructionExecutor(bool useFast = true)
     public uint LastEip { get; private set; }
 
     public (bool IsSuccess, Unit value, CPU cpu, string log) Step(EmuEnvironment env, CPU cpu) =>
-        Execute(env, cpu, decoded, useFast);
+        Execute(env, cpu, decoded, useTranslation);
 
     public (bool IsSuccess, Unit value, CPU cpu, string log) Execute(EmuEnvironment env, CPU cpu, State<Unit> instruction) =>
         Execute(env, cpu, instruction, false);
 
-    (bool IsSuccess, Unit value, CPU cpu, string log) Execute(EmuEnvironment env, CPU cpu, State<Unit> instruction, bool tryFast)
+    (bool IsSuccess, Unit value, CPU cpu, string log) Execute(EmuEnvironment env, CPU cpu, State<Unit> instruction, bool tryTranslation)
     {
         cpu.Decode = default;
-        UsedFastPath = false;
         UsedTranslation = false;
         Executed = 0;
         LastEip = cpu.eip;
         // 翻訳済みブロックがあれば IR で実行する。退避はしない: IR の規律によりフォルト時の CPU は失敗した命令の先頭の状態で、
         // 完了した命令数はキャッシュが報告する。
-        if (tryFast && env.Translations.Enabled)
+        if (tryTranslation && env.Translations.Enabled)
         {
             try
             {
@@ -81,7 +80,6 @@ public sealed class InstructionExecutor(bool useFast = true)
                 {
                     Executed = executed;
                     LastEip = lastEip;
-                    UsedFastPath = true;
                     UsedTranslation = true;
                     cpu.Decode = default;
                     return (true, Unit.unit, cpu, string.Empty);
@@ -99,13 +97,7 @@ public sealed class InstructionExecutor(bool useFast = true)
         cpu.CopyTo(checkpoint);
         try
         {
-            // 高速コアで 1 命令実行し、未対応の命令だけモナド版へフォールバックする。
-            if (tryFast && FastStep(env, cpu))
-            {
-                UsedFastPath = true;
-                Executed = 1;
-                return (true, Unit.unit, cpu, string.Empty);
-            }
+            // 通常コアで 1 命令実行する(IR の対象外の命令、または 1 回目の実行)。失敗(#UD)やフォルトは開始時の CPU へ戻す。
             var result = instruction(env, cpu, null);
             if (result.IsSuccess && !ReferenceEquals(result.cpu, cpu)) result.cpu.CopyTo(cpu);
             if (result.IsSuccess) Executed = 1;

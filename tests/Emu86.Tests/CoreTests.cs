@@ -1,7 +1,6 @@
 using Emu86;
 using System.Security.Cryptography;
 using static Emu86.Conversions;
-using static Emu86.FastCore;
 using static Emu86.DataAccess;
 using static Emu86.Mmu;
 using static Emu86.Decoder;
@@ -11,14 +10,18 @@ static class CoreTests
 {
     static readonly State<Unit> SlowStep = Instructions.Execute2;
     static readonly EmuEnvironment SlowEnv = CreateEnvironment();
-    static readonly EmuEnvironment FastEnv = CreateEnvironment();
+    // 比較対象: IR 解釈器で 1 命令ずつ(docs/adr/0003 で高速コアを置き換えた)。
+    static readonly EmuEnvironment FastEnv = CreateEnvironment(ir: true);
+    static readonly InstructionExecutor IrStep = new(true);
     static readonly MemoryStream Results = new();
     static readonly BinaryWriter Writer = new(Results);
     static int cases;
 
-    static EmuEnvironment CreateEnvironment()
+    static EmuEnvironment CreateEnvironment(bool ir = false)
     {
-        return new EmuEnvironment(memory: new byte[0x10000]);
+        var env = new EmuEnvironment(memory: new byte[0x10000]);
+        if (ir) Ir.SingleStep(env);
+        return env;
     }
 
     static CPU CreateCpu(uint left = 0, uint right = 0, uint flags = 0x202) =>
@@ -38,6 +41,7 @@ static class CoreTests
     {
         Array.Clear(env.Ram);
         code.CopyTo(env.Ram, 0);
+        env.Translations.InvalidateAll(); // コードを直接書き換えたので、前のケースの IR を捨てる
         env.Paging.Enabled = false;
         env.Paging.Pae = false;
         env.Paging.WriteProtect = false;
@@ -65,7 +69,8 @@ static class CoreTests
         setup?.Invoke(FastEnv);
         var slowResult = SlowStep(SlowEnv, slowCpu, null);
         Equal(true, slowResult.IsSuccess, "slow success");
-        Equal(true, FastStep(FastEnv, fastCpu), "fast success");
+        Equal(true, IrStep.Step(FastEnv, fastCpu).IsSuccess, "IR success");
+        Equal(true, IrStep.UsedTranslation, $"IR used for {Convert.ToHexString(code)}");
         Equal(Convert.ToHexString(CpuBytes(slowCpu)), Convert.ToHexString(CpuBytes(fastCpu)), $"CPU {Convert.ToHexString(code)}");
         Equal(true, SlowEnv.Ram.AsSpan().SequenceEqual(FastEnv.Ram), $"memory {Convert.ToHexString(code)}");
         if (diagnostics)
@@ -153,7 +158,7 @@ static class CoreTests
                 var cpu = CreateCpu(0x87654321, 0x1fff);
                 try
                 {
-                    if (fast) FastStep(env, cpu);
+                    if (fast) IrStep.Step(env, cpu);
                     else if (moffs) MovMoffsFromAcc(2, cpu.ebx)(env, cpu, null);
                     else SetMemOrRegData((true, cpu.ebx), cpu.eax.ToTypeData())(env, cpu, null);
                     throw new Exception("expected page fault");
@@ -162,7 +167,7 @@ static class CoreTests
                 {
                     Equal(0x2000u, fault.Linear, "page fault address");
                     Equal(2u, fault.ErrorCode, "page fault code");
-                    Equal((byte)0x21, env.Ram[0x5fff], "partial write preserved");
+                    Equal((byte)0, env.Ram[0x5fff], "no partial write before the fault (both pages are checked first)");
                     cases++;
                 }
             }
@@ -442,10 +447,9 @@ static class CoreTests
             for (var index = 0; index < iterations; index++) { step(); cpu.eip = 0; }
             return watch.Elapsed.TotalMilliseconds * 1_000_000.0 / iterations;
         }
-        var fast = Measure(() => FastStep(reference, cpu));
         var interpreterTime = Measure(() => Semantics.Interpret(block2, reference, cpu));
         var compiledTime = Measure(() => compiledAdd(reference, cpu));
-        Console.WriteLine($"ADD eax, ebx ns/op: fast core {fast:F1}, IR interpreter {interpreterTime:F1}, IR compiled {compiledTime:F1}");
+        Console.WriteLine($"ADD eax, ebx ns/op: IR interpreter {interpreterTime:F1}, IR compiled {compiledTime:F1}");
     }
 
     // 翻訳ブロック: 実行器の 1 回の Step が分岐までの命令列をまとめて完了し(Executed)、結果は通常コアと同じ。
@@ -574,7 +578,7 @@ static class CoreTests
         Equal((1, 0x102u, 0x100u), (pagedExecutor.Executed, pagedCpu.eip, pagedExecutor.LastEip), "one instruction completed before the fault");
         Equal(eaxBefore + pagedCpu.ebx, pagedCpu.eax, "ADD completed, MOV did not");
         cases++;
-        // 実行器を通した 1 命令あたりの時間(5 命令のループ): 翻訳ブロック(コンパイル済み段階)と高速コアのみ。
+        // 実行器を通した 1 命令あたりの時間(5 命令のループ): 通常コアのみ、翻訳ブロック(コンパイル済み段階)、1 命令ずつの IR。
         using var timing = new EmuEnvironment(memory: new byte[0x10000]);
         Loop(0x3000).CopyTo(timing.Ram, 0x100);
         timing.Ram[0x110] = 0xF4; // ループを抜けた先の HLT で連結が止まる
@@ -598,7 +602,7 @@ static class CoreTests
             Run(5_000_000);
             return watch.Elapsed.TotalMilliseconds * 1_000_000.0 / executed;
         }
-        Console.WriteLine($"executor ns/instruction over a 5-instruction loop: fast core {PerInstruction(false):F1}, translated block {PerInstruction(true):F1}, one instruction per step {PerInstruction(true, 1):F1}");
+        Console.WriteLine($"executor ns/instruction over a 5-instruction loop: reference core {PerInstruction(false):F1}, translated block {PerInstruction(true):F1}, one instruction per step {PerInstruction(true, 1):F1}");
         // デコードと IR への下ろしの費用(ADD eax, ebx / MOV [ebx+8], eax / Jcc を順に)。
         byte[] sample = [0x01, 0xD8, 0x89, 0x43, 0x08, 0x75, 0x10];
         sample.CopyTo(timing.Ram, 0x200);

@@ -264,7 +264,7 @@ public partial class CPU
 
     static public readonly Accessor<CPU, uint> _eip = new(c => c.eip, c => v => { c.eip = v; return c; });
 
-    // FastStep(高速コア)が直接書き込むため、セッターは公開している。
+    // 翻訳された IR(解釈器とコンパイル済みコード)が直接書き込むため、セッターは公開している。
     public uint eip { get; set; }
     public ushort ip { get => (ushort)(this.eip & 0xFFFF); private set => this.eip = (this.eip & 0xFFFF0000) + value; }
 
