@@ -4,18 +4,10 @@ using static Emu86.FastCore;
 using static Emu86.Mmu;
 using static Emu86.Fetch;
 using static Emu86.Decoder;
+using static Assert;
 
 static class DecodeTests
 {
-    static int checks;
-
-    static void Equal<T>(T expected, T actual, string label)
-    {
-        checks++;
-        if (!EqualityComparer<T>.Default.Equals(expected, actual))
-            throw new Exception($"{label}: expected {expected}, got {actual}");
-    }
-
     static CPU CreateCpu(bool code32, bool addressPrefix) => new()
     {
         code32 = code32, address_size_prefix = addressPrefix,
@@ -392,14 +384,14 @@ static class DecodeTests
         Equal("(unmapped)", Disassembler.Describe(faulting, new CPU { code32 = true, eip = 0x100 }), "unreadable code");
     }
 
-    public static void Run()
-    {
-        Addresses();
-        FetchBoundaries();
-        Parsers();
-        Lengths();
-        Disassembly();
-        Allocations();
-        Console.WriteLine($"Decode assertions passed: {checks}");
-    }
+    // 名前付きのケース(ランナーが順に実行し、失敗したケース名を報告する)。
+    public static (string Name, Action Run)[] Cases =>
+    [
+        ("addresses", Addresses),
+        ("fetch-boundaries", FetchBoundaries),
+        ("parsers", Parsers),
+        ("lengths", Lengths),
+        ("disassembly", Disassembly),
+        ("allocations", Allocations),
+    ];
 }

@@ -5,12 +5,13 @@
 ```sh
 dotnet run --project tests/Emu86.Tests -c Release
 dotnet run --project tests/Emu86.Tests -c Release -- completion disk
-dotnet run --project tests/Emu86.Tests -c Release -- devices decode
-dotnet run --project tests/Emu86.Tests -c Release -- core state
-dotnet run --project tests/Emu86.Tests -c Release -- vga
+dotnet run --project tests/Emu86.Tests -c Release -- core/fpu vga/palette   # ケース単位
+dotnet run --project tests/Emu86.Tests -c Release -- --list                 # スイート/ケースの一覧
 ```
 
-コンソール型テストランナーです。終了コードは成功時 0、検証失敗時 1、不明なスイート名の指定時 2 です。本体ソースのコピーではなく `ProjectReference` と `InternalsVisibleTo` を使用します。スイートは作業ディレクトリ・コンソール出力を切り替えるため、同一プロセスでは逐次実行します。
+コンソール型テストランナーです。各スイートは名前付きのケースの列（`Cases`）で、引数にはスイート名（`core`）かケース名（`core/fpu`）を指定します。ケースが失敗しても同じスイートの残りのケースは実行し、`FAIL スイート/ケース: 例外` を stderr に出してから `PASS スイート (ケース数, 検証数)` か `FAIL スイート (失敗数 of ケース数)` を出します。終了コードは成功時 0、検証失敗時 1、不明な名前の指定時 2 です。検証は共通の `Assert.Equal`/`Assert.Throws`（`Assert.cs`）で、失敗は例外になります。本体ソースのコピーではなく `ProjectReference` と `InternalsVisibleTo` を使用します。スイートは作業ディレクトリ・コンソール出力を切り替えるため、同一プロセスでは逐次実行し、作業ディレクトリはスイートごとに作り直します。
+
+ケースは原則として単独でも実行できますが、`core/baseline` は ALU とメモリ書き込みの全ケースを流してハッシュを採る 1 つのケースで、`runner/golden` と `runner/golden-plain` は同じ 12 ケースを既定の翻訳ブロックと `--no-translate` で走らせます。
 
 | スイート | 検証対象 |
 |---|---|

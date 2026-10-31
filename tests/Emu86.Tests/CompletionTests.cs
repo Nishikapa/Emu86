@@ -1,17 +1,9 @@
 using Emu86;
 using static Emu86.Conversions;
+using static Assert;
 
 static class CompletionTests
 {
-    static int assertions;
-
-    static void Equal<T>(T expected, T actual, string name)
-    {
-        assertions++;
-        if (!EqualityComparer<T>.Default.Equals(expected, actual))
-            throw new Exception($"{name}: expected {expected}, got {actual}");
-    }
-
     static void Write32(EmuEnvironment env, int address, uint value) =>
         BitConverter.GetBytes(value).CopyTo(env.Ram, address);
 
@@ -139,13 +131,14 @@ static class CompletionTests
         Equal(false, busyError.ToString().Contains("[halt]"), "no idle time is skipped with IF=0");
     }
 
-    public static void Run()
-    {
-        foreach (var slow in new[] { false, true }) { FaultAtLimit(slow); HandlerExecution(slow); }
-        EmptyBudget(0, 0); EmptyBudget(8, 8); EmptyBudget(9, 8);
-        ResumeWithoutPeriodicSnapshots();
-        HaltWaitsForInterrupts();
-        FailedDelivery();
-        Console.WriteLine($"Completion checks passed: {assertions} assertions");
-    }
+    // 名前付きのケース(ランナーが順に実行し、失敗したケース名を報告する)。
+    public static (string Name, Action Run)[] Cases =>
+    [
+        ("fault-at-limit", () => { FaultAtLimit(slow: false); FaultAtLimit(slow: true); }),
+        ("handler-execution", () => { HandlerExecution(slow: false); HandlerExecution(slow: true); }),
+        ("empty-budget", () => { EmptyBudget(0, 0); EmptyBudget(8, 8); EmptyBudget(9, 8); }),
+        ("resume-without-snapshots", ResumeWithoutPeriodicSnapshots),
+        ("halt-wait", HaltWaitsForInterrupts),
+        ("failed-delivery", FailedDelivery),
+    ];
 }

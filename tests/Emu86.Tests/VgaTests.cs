@@ -3,18 +3,11 @@ using System.Security.Cryptography;
 using static Emu86.Conversions;
 using static Emu86.Ports;
 using static Emu86.Mmu;
+using static Assert;
 
 // VGA デバイス(VRAM の振り分け・レジスタ・描画)、V86 モードの遷移、キーボード IRQ1 の回帰テスト。
 static class VgaTests
 {
-    static int assertions;
-
-    static void Equal<T>(T expected, T actual, string name)
-    {
-        assertions++;
-        if (!EqualityComparer<T>.Default.Equals(expected, actual)) throw new Exception($"{name}: expected {expected}, got {actual}");
-    }
-
     static void Out(EmuEnvironment env, int index, int data, int value)
     {
         EnvOutPort(env, index, (byte)data);
@@ -712,9 +705,25 @@ static class VgaTests
         Equal(0, image.GetPixel(12, 8).ToArgb() & 0xFFFFFF, "a cell holding character 0 is black");
     }
 
-    public static void Run()
-    {
-        MemoryWindow(); PlanarAndChain4(); Registers(); Rendering(); VirtualMode(); KeyboardInterrupt(); BiosStub(); BiosServices(); Capture(); PciRom(); IretPrivilegeCheck(); Mouse(); ResetRequest(); Serial(); BootMenuAutomation(); BootMenuTimeouts(); Palette();
-        Console.WriteLine($"VGA/V86/keyboard assertions passed: {assertions}");
-    }
+    // 名前付きのケース(ランナーが順に実行し、失敗したケース名を報告する)。
+    public static (string Name, Action Run)[] Cases =>
+    [
+        ("memory-window", MemoryWindow),
+        ("planar-chain4", PlanarAndChain4),
+        ("registers", Registers),
+        ("rendering", Rendering),
+        ("virtual-mode", VirtualMode),
+        ("keyboard-interrupt", KeyboardInterrupt),
+        ("bios-stub", BiosStub),
+        ("bios-services", BiosServices),
+        ("capture", Capture),
+        ("pci-rom", PciRom),
+        ("iret-privilege", IretPrivilegeCheck),
+        ("mouse", Mouse),
+        ("reset-request", ResetRequest),
+        ("serial", Serial),
+        ("boot-menu", BootMenuAutomation),
+        ("boot-menu-timeouts", BootMenuTimeouts),
+        ("palette", Palette),
+    ];
 }
