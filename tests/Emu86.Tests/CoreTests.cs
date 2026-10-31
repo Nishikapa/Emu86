@@ -5,6 +5,7 @@ using static Emu86.FastCore;
 using static Emu86.DataAccess;
 using static Emu86.Mmu;
 using static Emu86.Decoder;
+using static Assert;
 
 static class CoreTests
 {
@@ -50,12 +51,6 @@ static class CoreTests
         using var writer = new BinaryWriter(stream);
         cpu.WriteTo(writer);
         return stream.ToArray();
-    }
-
-    static void Equal<T>(T expected, T actual, string label)
-    {
-        if (!EqualityComparer<T>.Default.Equals(expected, actual))
-            throw new Exception($"{label}: expected {expected}, got {actual}");
     }
 
     static void Check(byte[] code, CPU initial, Action<EmuEnvironment> setup = null, Action<CPU, EmuEnvironment> expected = null, bool diagnostics = false)
@@ -730,7 +725,8 @@ static class CoreTests
         }
     }
 
-    public static void Run()
+    // ALU・メモリ書き込みの結果列を、ALU 整理前に採取したハッシュと照合する(両コアが同時に変わっても差分を検出する)。
+    static void Baseline()
     {
         Arithmetic();
         Memory(false);
@@ -738,16 +734,21 @@ static class CoreTests
         var baselineHash = Convert.ToHexString(SHA256.HashData(Results.ToArray()));
         Equal("E956129AF77B2263DAB0B3463C62E6310B7114FB93E814B91FA01BC22DA1140F", baselineHash, "pre-refactor results");
         Console.WriteLine($"Baseline-compatible cases: {cases}; SHA256={baselineHash}");
-        Memory(true);
-        PageWalk();
-        SemanticsIr();
-        TranslationCacheExecution();
-        FpuRegression();
-        DescriptorChecks();
-        RepPrefixOnOtherInstructions();
-        UndefinedGroupMembers();
-        Integration();
-        OperandTransfers();
-        Console.WriteLine($"Core cases passed: {cases}");
     }
+
+    // 名前付きのケース(ランナーが順に実行し、失敗したケース名を報告する)。
+    public static (string Name, Action Run)[] Cases =>
+    [
+        ("baseline", Baseline),
+        ("memory-diagnostics", () => Memory(true)),
+        ("page-walk", PageWalk),
+        ("ir", SemanticsIr),
+        ("translation-cache", TranslationCacheExecution),
+        ("fpu", FpuRegression),
+        ("descriptors", DescriptorChecks),
+        ("rep-prefix", RepPrefixOnOtherInstructions),
+        ("undefined-groups", UndefinedGroupMembers),
+        ("integration", Integration),
+        ("operand-transfers", OperandTransfers),
+    ];
 }

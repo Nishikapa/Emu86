@@ -1,24 +1,10 @@
 using Emu86;
 using System.Security.Cryptography;
 using static Emu86.Fields;
+using static Assert;
 
 static class DiskTests
 {
-    static int assertions;
-
-    static void Equal<T>(T expected, T actual, string name)
-    {
-        assertions++;
-        if (!EqualityComparer<T>.Default.Equals(expected, actual))
-            throw new Exception($"{name}: expected {expected}, got {actual}");
-    }
-
-    static void Throws<T>(Action action, string name) where T : Exception
-    {
-        try { action(); } catch (T) { assertions++; return; }
-        throw new Exception(name + ": expected " + typeof(T).Name);
-    }
-
     static void SmallRawDisk()
     {
         const string basePath = "small.vhd";
@@ -195,9 +181,14 @@ static class DiskTests
         Equal(((byte)0x51, (byte)0x04), (ata.ReadReg(0x3F6), ata.ReadReg(0x1F1)), "IDENTIFY PACKET DEVICE aborts");
     }
 
-    public static void Run()
-    {
-        FieldParsers(); SmallRawDisk(); Layouts(); RoundTrips(); InvalidRegions(); AtaCommands();
-        Console.WriteLine($"Disk checks passed: {assertions} assertions");
-    }
+    // 名前付きのケース(ランナーが順に実行し、失敗したケース名を報告する)。
+    public static (string Name, Action Run)[] Cases =>
+    [
+        ("field-parsers", FieldParsers),
+        ("small-raw-disk", SmallRawDisk),
+        ("layouts", Layouts),
+        ("round-trips", RoundTrips),
+        ("invalid-regions", InvalidRegions),
+        ("ata-commands", AtaCommands),
+    ];
 }

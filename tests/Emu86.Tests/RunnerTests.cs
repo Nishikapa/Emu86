@@ -3,21 +3,10 @@ using System.Reflection;
 using System.Security.Cryptography;
 using static Emu86.Conversions;
 using static Emu86.Mmu;
+using static Assert;
 
 static class RunnerTests
 {
-    static int assertions;
-    static void Equal<T>(T expected, T actual, string name)
-    {
-        assertions++;
-        if (!EqualityComparer<T>.Default.Equals(expected, actual)) throw new Exception($"{name}: expected {expected}, got {actual}");
-    }
-    static void Throws<T>(Action action, string name) where T : Exception
-    {
-        try { action(); } catch (T) { assertions++; return; }
-        throw new Exception(name + ": expected " + typeof(T).Name);
-    }
-
     static void Options()
     {
         var defaults = RunOptions.Parse([]);
@@ -369,12 +358,19 @@ static class RunnerTests
         Equal(-1, IrqDelivery.Select(env, cpu), "IF=0 holds every line");
     }
 
-    public static void Run()
-    {
-        Options(); Runners(); Environments(); CommandLine(); PauseResume(); InterruptSelection(); GuestReaders();
-        goldenIndex = 0; plainGolden = true; Runners(); plainGolden = false;
-        Console.WriteLine($"Runner/environment checks passed: {assertions} assertions");
-    }
+    // 名前付きのケース(ランナーが順に実行し、失敗したケース名を報告する)。
+    public static (string Name, Action Run)[] Cases =>
+    [
+        ("options", Options),
+        ("golden", () => { goldenIndex = 0; Runners(); }),
+        ("environments", Environments),
+        ("command-line", CommandLine),
+        ("pause-resume", PauseResume),
+        ("interrupt-selection", InterruptSelection),
+        ("guest-readers", GuestReaders),
+        // 同じ golden ケースを --no-translate(1 命令ずつ)でも走らせ、既定の翻訳ブロックと同じ結果になることを確かめる。
+        ("golden-plain", () => { goldenIndex = 0; plainGolden = true; try { Runners(); } finally { plainGolden = false; } }),
+    ];
 
     static void CommandLine()
     {

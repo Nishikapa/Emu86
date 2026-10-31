@@ -2,18 +2,10 @@ using Emu86;
 using System.Security.Cryptography;
 using static Emu86.Conversions;
 using static Emu86.Ports;
+using static Assert;
 
 static class DeviceTests
 {
-    static int checks;
-
-    static void Equal<T>(T expected, T actual, string label)
-    {
-        checks++;
-        if (!EqualityComparer<T>.Default.Equals(expected, actual))
-            throw new Exception($"{label}: expected {expected}, got {actual}");
-    }
-
     static void PortSequences()
     {
         using var env = new EmuEnvironment(memory: new byte[0x10000]);
@@ -190,12 +182,12 @@ static class DeviceTests
         Equal("2B", Clock(15_000_000, 0x0A), "status A keeps the rate bits; UIP reads as 0");
     }
 
-    public static void Run()
-    {
-        PortSequences();
-        Controller8042();
-        RealTimeClock();
-        Compatibility();
-        Console.WriteLine($"Device assertions passed: {checks}");
-    }
+    // 名前付きのケース(ランナーが順に実行し、失敗したケース名を報告する)。
+    public static (string Name, Action Run)[] Cases =>
+    [
+        ("port-sequences", PortSequences),
+        ("controller-8042", Controller8042),
+        ("rtc", RealTimeClock),
+        ("compatibility", Compatibility),
+    ];
 }

@@ -5,23 +5,10 @@ using static Emu86.Conversions;
 using static Emu86.Ports;
 using static Emu86.Mmu;
 using static Emu86.Interrupts;
+using static Assert;
 
 static class SnapshotTests
 {
-    static int assertions;
-    static void Equal<T>(T expected, T actual, string name)
-    {
-        assertions++;
-        if (!EqualityComparer<T>.Default.Equals(expected, actual)) throw new Exception($"{name}: expected {expected}, got {actual}");
-    }
-
-    static void Throws<T>(Action action, string name) where T : Exception
-    {
-        try { action(); }
-        catch (T) { assertions++; return; }
-        throw new Exception(name + ": expected " + typeof(T).Name);
-    }
-
     static EmuEnvironment Environment() => new(memory: new byte[0x10000]);
     static CPU Cpu() => new() { eip = 0x100, code32 = true, stack32 = true, eax = 0x87654321, ebx = 0x3000, esp = 0x2002, eflags = 0x203 };
 
@@ -383,9 +370,13 @@ static class SnapshotTests
 
     static uint Dword(EmuEnvironment env, int address) => BitConverter.ToUInt32(env.Ram, address);
 
-    public static void Run()
-    {
-        Instructions(); Snapshots(); Disks(); Layout(); Faults();
-        Console.WriteLine($"State/snapshot checks passed: {assertions} assertions");
-    }
+    // 名前付きのケース(ランナーが順に実行し、失敗したケース名を報告する)。
+    public static (string Name, Action Run)[] Cases =>
+    [
+        ("instructions", Instructions),
+        ("snapshots", Snapshots),
+        ("disks", Disks),
+        ("layout", Layout),
+        ("faults", Faults),
+    ];
 }

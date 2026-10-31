@@ -4,25 +4,10 @@ using static Emu86.States;
 using static Emu86.DataAccess;
 using static Emu86.AluStates;
 using static Emu86.CpuStates;
+using static Assert;
 
 static class StateTests
 {
-    static int assertions;
-
-    static void Equal<T>(T expected, T actual, string label)
-    {
-        assertions++;
-        if (!EqualityComparer<T>.Default.Equals(expected, actual))
-            throw new Exception($"{label}: expected {expected}, got {actual}");
-    }
-
-    static void Throws<T>(Action action, string label) where T : Exception
-    {
-        try { action(); }
-        catch (T) { assertions++; return; }
-        throw new Exception($"{label}: expected {typeof(T).Name}");
-    }
-
     static void CpuUpdates()
     {
         using var env = new EmuEnvironment(memory: new byte[0x10000]);
@@ -208,12 +193,12 @@ static class StateTests
         Equal(false, cpu.cf, "modify toggles a flag");
     }
 
-    public static void Run()
-    {
-        CpuUpdates();
-        Combinators();
-        OperandWidths();
-        ControlRegisters();
-        Console.WriteLine($"State helper assertions passed: {assertions}");
-    }
+    // 名前付きのケース(ランナーが順に実行し、失敗したケース名を報告する)。
+    public static (string Name, Action Run)[] Cases =>
+    [
+        ("cpu-updates", CpuUpdates),
+        ("combinators", Combinators),
+        ("operand-widths", OperandWidths),
+        ("control-registers", ControlRegisters),
+    ];
 }

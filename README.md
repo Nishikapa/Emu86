@@ -63,6 +63,9 @@ dotnet run --project tests/Emu86.Tests -c Release
 
 # 実行後処理・ディスクの回帰テストだけを実行
 dotnet run --project tests/Emu86.Tests -c Release -- completion disk
+
+# ケース単位（一覧は --list）
+dotnet run --project tests/Emu86.Tests -c Release -- core/fpu vga/palette
 ```
 
 `core` は両コアの状態一致、`state` は CPU 状態更新・オペランド幅選択・制御レジスタ同期、`devices` は周辺デバイスの入出力と分離前の状態・ログとの一致、`vga` は VGA の VRAM 振り分け・レジスタ・描画と V86 モード遷移・キーボード IRQ1、`decode` は ModRM/SIB・プレフィックス・ページ境界での命令取得、`snapshot` は CPU 復元と新旧スナップショット、`runner` は引数解析・実行・診断・リソース解放、`completion` は例外後も含む上限・定期保存、`disk` は小容量・チャンク境界・BAT 領域境界と異常系を検証します。テスト用ディスクは専用の一時ディレクトリに作成し、終了時に削除します。OS の長時間ブート検証とは別のテストです。
