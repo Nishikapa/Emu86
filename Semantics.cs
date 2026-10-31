@@ -375,6 +375,12 @@ public sealed record CpuidStmt : Stmt
     public override void Run(EmuEnvironment env, CPU cpu) => Semantics.Cpuid(cpu);
 }
 
+// CMPXCHG8B m64
+public sealed record CompareExchange8Stmt(Expr Address) : Stmt
+{
+    public override void Run(EmuEnvironment env, CPU cpu) => Semantics.CompareExchange8(env, cpu, Address.Evaluate(env, cpu));
+}
+
 public sealed record Block(IReadOnlyList<Stmt> Statements) : Stmt
 {
     public override void Run(EmuEnvironment env, CPU cpu)
@@ -708,6 +714,7 @@ public static class Semantics
             0x0FA0 or 0x0FA8 => PushValue(typeW, _ => new SegmentExpr(op == 0x0FA0 ? 4 : 5), length),
             0x0FA1 or 0x0FA9 => Statement(new StateStmt(Instructions.PopSregInto(op == 0x0FA1 ? 4 : 5, typeW).Then(CpuStates.IpInc(length)), "POP FS/GS")),
             0x0FA2 => Simple(new CpuidStmt(), length),
+            0x0FC7 when reg == 1 && instruction.ModRm is { Mod: not 3 } => Simple(new CompareExchange8Stmt(Rm().Address), length),
             0x0FB2 or 0x0FB4 or 0x0FB5 when instruction.ModRm is { Mod: not 3 } =>
                 Statement(new ArgumentStateStmt(Rm().Address, address => Instructions.LoadFarPointer(reg, op == 0x0FB2 ? 2 : op == 0x0FB4 ? 4 : 5, (true, address), typeW).Then(CpuStates.IpInc(length)), "LSS/LFS/LGS")),
             _ => null,
@@ -878,6 +885,7 @@ public static class Semantics
         PortOutStmt output => Call(nameof(PortOut), s.Env, Const(output.Type), CompileExpression(output.Port, s), CompileExpression(output.Value, s)),
         RdtscStmt => Call(nameof(Rdtsc), s.Env, s.Cpu),
         CpuidStmt => Call(nameof(Cpuid), s.Cpu),
+        CompareExchange8Stmt cmpxchg8 => Call(nameof(CompareExchange8), s.Env, s.Cpu, CompileExpression(cmpxchg8.Address, s)),
         Block { Statements.Count: 0 } => Expression.Empty(),
         Block block => Expression.Block(block.Statements.Select(inner => CompileStatement(inner, s))),
         _ => throw new ArgumentOutOfRangeException(nameof(statement)),
@@ -1288,6 +1296,28 @@ public static class Semantics
     }
 
     public static void Cpuid(CPU cpu) => (cpu.eax, cpu.ebx, cpu.ecx, cpu.edx) = Instructions.CpuidLeaf(cpu.eax);
+
+    // CMPXCHG8B: EDX:EAX と m64 を比べ、等しければ m64 <- ECX:EBX(ZF=1)、違えば EDX:EAX <- m64(ZF=0)。
+    // 通常コアと同じく、等しいときだけ書く(実機は常に書き戻す)。書く前に両方の dword の書き込み先を検査する。
+    public static void CompareExchange8(EmuEnvironment env, CPU cpu, uint address)
+    {
+        var low = Load(env, address, 2);
+        var high = Load(env, address + 4, 2);
+        if (cpu.eax == low && cpu.edx == high)
+        {
+            Probe(env, address, 2, readsFirst: true);
+            Probe(env, address + 4, 2, readsFirst: true);
+            Store(env, address, 2, cpu.ebx);
+            Store(env, address + 4, 2, cpu.ecx);
+            cpu.zf = true;
+        }
+        else
+        {
+            cpu.eax = low;
+            cpu.edx = high;
+            cpu.zf = false;
+        }
+    }
 
     // 文字列命令。repeat: 0 単発、1 REP/REPE、2 REPNE。CMPS/SCAS だけ ZF で打ち切る。
     public static void StringOp(EmuEnvironment env, CPU cpu, int op, int size, bool address32, int prefixes, int repeat)
