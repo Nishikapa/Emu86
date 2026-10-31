@@ -211,7 +211,7 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | `RomBuilder.cs` | オプション ROM のバイト列ビルダ（Writer）。ラベルで `jmp short` の変位やポインタを解決し、末尾でチェックサムを埋める。 |
 | `Operand.cs` / `Registers.cs` | 静的クラス `Operands`。オペランド Lens `Operand`（読み出す State と書き戻す関数）と `Reg`/`Rm`/`Const`、その上の `Move`/`Binary`/`Swap`。d ビットで向きが決まる命令はオペランドを入れ替えるだけで書く。 |
 | `VgaWindow.cs` / `RegisterDialog.cs` | Windows Forms の表示ウィンドウ（描画、キー入力とマウス捕捉、中断・再開ボタン）とレジスタ表示ダイアログ。 |
-| `Ext.cs` | 静的クラス `Conversions`。型変換ユーティリティ（`ToTypeData`/`MapType`/`Bits`/`Mask` 等）。 |
+| `Ext.cs` | 静的クラス `Conversions`。型変換ユーティリティ（`ToTypeData`、`Data` の拡張メンバー `Value`/`Signed`、`Bytes`/`Bits`/`Mask`/`Msb`）。 |
 | `Program.cs` / `Program.*.cs` | 命令の実装とオペコードテーブル。起動処理は `Program.Runner.cs`。 |
 | `Disk.cs` | `DiskImage`（VHD/VHDX/AVHDX/生イメージの CoW ディスクバックエンド。セクタの所在は「自分 → 親 → ゼロ」の `Locate` チェーンで解決）と `AtaDevice`（ATA PIO デバイス、IRQ14。コマンドは「番号 → 動作」の表で、表にないものは abort）。ヘッダの読み取りは `DiskFormat.cs` のレイアウトを当てはめるだけ。 |
 | `DiskFormat.cs` | バイト列のパーサコンビネータ `Field<T>`（`U32`/`U64BE`/`Uuid`/`Utf16`、構造体の先頭からの位置 `At`、繰り返し `Count`、識別子 `Magic`）と、それで書いた VHD/VHDX の読み取り側の形式（フッタ、動的ヘッダとロケータ、リージョン表、メタデータ表と各項目、ペアレントロケータ）。 |

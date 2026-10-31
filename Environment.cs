@@ -147,11 +147,8 @@ static public class Mmu
             : EnumerateLinear(env, addr);
     }
 
-    static IEnumerable<byte> EnumerateLinear(EmuEnvironment env, uint addr)
-    {
-        for (uint i = 0; ; i++)
-            yield return EnvGetMemoryData8(env, addr + i);
-    }
+    static IEnumerable<byte> EnumerateLinear(EmuEnvironment env, uint addr) =>
+        Enumerable.InfiniteSequence(addr, 1u).Select(linear => EnvGetMemoryData8(env, linear));
 
     static public IEnumerable<byte> EnvGetMemoryDatas(EmuEnvironment env, ushort segment, ushort offset) =>
         EnvGetMemoryDatas(env, GetMemoryAddr(segment, offset).addr);
@@ -423,7 +420,7 @@ static public class DataAccess
 
     // SP/ESP をデータ長分減らしてからスタックトップへ書き込む（PUSH）。
     static public State<Unit> Push(Data data) =>
-        from _1 in StackAdjust(-arrLen[data.type])
+        from _1 in StackAdjust(-Bytes(data.type))
         from cpu in GetCpu
         from _2 in SetMemOrRegData(EnvGetStackAddr(cpu), data)
         select Unit.unit;
@@ -438,7 +435,7 @@ static public class DataAccess
             GetMemOrRegData16(addr),
             GetMemOrRegData32(addr)
         )
-        from _ in StackAdjust(arrLen[type])
+        from _ in StackAdjust(Bytes(type))
         select data;
 
     static public State<Unit> Push16(ushort value) =>
@@ -557,7 +554,7 @@ static public class DataAccess
         {
             if (t.isMem)
             {
-                EnvWriteN(env, t.addr, arrLen[data.type], data.Value());
+                EnvWriteN(env, t.addr, Bytes(data.type), data.Value);
                 return cpu;
             }
             return SetRegisterValue(cpu, (int)t.addr, data);
@@ -604,10 +601,15 @@ static public class DataAccess
 static public class StringOps
 {
     // 文字列命令の実効パラメータ。
-    //   要素サイズ(バイト): operand size に従う(w かつ 32bit なら4、そうでなければ 2/1)。
+    //   要素の幅(type)      : operand size に従う(w かつ 32bit なら dword、そうでなければ word/byte)。
     //   アドレスモード     : code32 でフラット32bit(ESI/EDI, ベース0)、そうでなければ real(DS:SI/ES:DI)。
     //   源(DS:SI)はセグメントオーバーライドで差し替えられる。先(ES:DI)は固定。
-    static int StrSize(CPU cpu, bool w) => w ? ((cpu.code32 != cpu.operand_size_prefix) ? 4 : 2) : 1;
+    static int StrType(CPU cpu, bool w) => w ? ((cpu.code32 != cpu.operand_size_prefix) ? 2 : 1) : 0;
+
+    static int StrSize(CPU cpu, bool w) => Bytes(StrType(cpu, w));
+
+    // AL/AX/EAX(type の幅のアキュムレータ)。
+    static uint StrAcc(CPU cpu, int type) => cpu.eax & Mask(type);
 
     static bool StrA32(CPU cpu) => cpu.code32 != cpu.address_size_prefix;
 
@@ -638,9 +640,8 @@ static public class StringOps
     static public State<Unit> Stos(bool w) =>
         SetCpu((env, cpu) =>
         {
-            int size = StrSize(cpu, w);
-            uint val = size == 1 ? cpu.al : size == 2 ? cpu.ax : cpu.eax;
-            EnvWriteN(env, StrDst(cpu), size, val);
+            int type = StrType(cpu, w), size = Bytes(type);
+            EnvWriteN(env, StrDst(cpu), size, StrAcc(cpu, type));
             return StrAdvance(cpu, size, si: false, di: true);
         });
 
@@ -658,13 +659,11 @@ static public class StringOps
     static public State<Unit> Cmps(bool w) =>
         from vals in GetDataFromEnvCpu((env, cpu) =>
         {
-            int size = StrSize(cpu, w);
-            return (size, s: EnvReadN(env, StrSrc(cpu), size), d: EnvReadN(env, StrDst(cpu), size));
+            int type = StrType(cpu, w), size = Bytes(type);
+            return (type, s: EnvReadN(env, StrSrc(cpu), size), d: EnvReadN(env, StrDst(cpu), size));
         })
-        from _f in vals.size == 1 ? update_eflags_sub((byte)vals.s, (byte)vals.d)
-                 : vals.size == 2 ? update_eflags_sub((ushort)vals.s, (ushort)vals.d)
-                 : update_eflags_sub(vals.s, vals.d)
-        from _adv in SetCpu(cpu => StrAdvance(cpu, StrSize(cpu, w), si: true, di: true))
+        from _f in update_eflags_sub(vals.type, vals.s, vals.d)
+        from _adv in SetCpu(cpu => StrAdvance(cpu, Bytes(vals.type), si: true, di: true))
         select Unit.unit;
 
     // INS: ポート DX から 1 要素読み、[ES:DI] へ格納し、DF に従って DI を増減する。
@@ -689,14 +688,11 @@ static public class StringOps
     static public State<Unit> Scas(bool w) =>
         from vals in GetDataFromEnvCpu((env, cpu) =>
         {
-            int size = StrSize(cpu, w);
-            uint a = size == 1 ? cpu.al : size == 2 ? cpu.ax : cpu.eax;
-            return (size, a, m: EnvReadN(env, StrDst(cpu), size));
+            int type = StrType(cpu, w);
+            return (type, a: StrAcc(cpu, type), m: EnvReadN(env, StrDst(cpu), Bytes(type)));
         })
-        from _f in vals.size == 1 ? update_eflags_sub((byte)vals.a, (byte)vals.m)
-                 : vals.size == 2 ? update_eflags_sub((ushort)vals.a, (ushort)vals.m)
-                 : update_eflags_sub(vals.a, vals.m)
-        from _adv in SetCpu(cpu => StrAdvance(cpu, StrSize(cpu, w), si: false, di: true))
+        from _f in update_eflags_sub(vals.type, vals.a, vals.m)
+        from _adv in SetCpu(cpu => StrAdvance(cpu, Bytes(vals.type), si: false, di: true))
         select Unit.unit;
 }
 
@@ -729,10 +725,10 @@ static public class BitOps
     //   forward=true で最下位(BSF)、false で最上位(BSR)。
     //   ソースが 0 なら ZF=1 とし、結果は書き込まない（未定義）。
     static public State<Unit> BitScan(int reg, Data src, bool forward) =>
-        src.Value() == 0
+        src.Value == 0
             ? _zf.Set(true)
             : from _z in _zf.Set(false)
-              from _w in SetRegData(reg, ((uint)BitScanIndex(src.Value(), forward, Bits(src.type))).ToTypeData(src.type))
+              from _w in SetRegData(reg, ((uint)BitScanIndex(src.Value, forward, Bits(src.type))).ToTypeData(src.type))
               select Unit.unit;
 
     static int BitScanIndex(uint src, bool forward, int bits)

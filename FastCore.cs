@@ -623,7 +623,7 @@ static public class FastCore
     // スタック幅は SS.B(stack32)で決まる(CS.D ではない)。
     static internal void FPush(EmuEnvironment env, CPU c, int type, uint v)
     {
-        var size = type == 0 ? 1 : type == 1 ? 2 : 4;
+        var size = Bytes(type);
         if (c.stack32) c.esp = (uint)(c.esp - size); else c.sp = (ushort)(c.sp - size);
         var addr = c.ss_base + (c.stack32 ? c.esp : c.sp);
         if (type == 0) EnvWriteByte(env, addr, (byte)v);
@@ -638,7 +638,7 @@ static public class FastCore
         var v = type == 0 ? EnvGetMemoryData8(env, addr)
               : type == 1 ? EnvGetMemoryData16(env, addr)
               : EnvGetMemoryData32(env, addr);
-        var size = type == 0 ? 1 : type == 1 ? 2 : 4;
+        var size = Bytes(type);
         if (c.stack32) c.esp = (uint)(c.esp + size); else c.sp = (ushort)(c.sp + size);
         return v;
     }

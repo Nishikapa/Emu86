@@ -91,7 +91,7 @@ static class StateTests
             State<uint> readDword = (context, state, opcodes) => { reads[2]++; return (true, 0x12345678, state, "dword"); };
             var result = Choice(type, readByte, readWord, readDword)(env, cpu, null);
             Equal(type, result.value.type, "operand width");
-            Equal(new uint[] { 0x12, 0x1234, 0x12345678 }[type], result.value.Value(), "operand value");
+            Equal(new uint[] { 0x12, 0x1234, 0x12345678 }[type], result.value.Value, "operand value");
             Equal(new[] { "byte", "word", "dword" }[type], result.log, "selected state log");
             Equal(cpu, result.cpu, "selected state CPU");
             Equal(1, reads[type], "selected state runs once");
@@ -102,7 +102,7 @@ static class StateTests
                 value => { reads[1]++; return (ushort)value; },
                 value => { reads[2]++; return value; });
             Equal(0, reads.Sum(), "conversion deferred");
-            Equal(0x87654321u & Mask(type), convert(0x87654321).Value(), "conversion width");
+            Equal(0x87654321u & Mask(type), convert(0x87654321).Value, "conversion width");
             Equal(1, reads[type], "selected converter runs once");
             Equal(1, reads.Sum(), "unselected converters do not run");
         }

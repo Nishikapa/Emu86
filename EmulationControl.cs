@@ -6,7 +6,7 @@ namespace Emu86;
 public sealed class EmulationControl
 {
     readonly ManualResetEventSlim resume = new(true);
-    readonly object gate = new();
+    readonly Lock gate = new();
     volatile bool pauseRequested;
     CPU published;
 

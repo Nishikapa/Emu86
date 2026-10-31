@@ -51,15 +51,15 @@ static public partial class Decoder
     /// Parser コンビネータ ///////////////////////////////
     // Select/Where/Fold で組んだパーサは、組み立てを static に 1 度だけ行えば評価時に割り当てない。
     // SelectMany(クエリ構文の 2 つ目以降の from)は評価のたびにクロージャを作るので、毎命令の経路では使わない。
-    static public Parser<T> ToParser<T>(this T value) => (in CodeSource code, int pos) => (true, value, pos);
+    static public Parser<T> ToParser<T>(this T value) => (in code, pos) => (true, value, pos);
 
-    static public Parser<B> Select<A, B>(this Parser<A> parser, Func<A, B> selector) => (in CodeSource code, int pos) =>
+    static public Parser<B> Select<A, B>(this Parser<A> parser, Func<A, B> selector) => (in code, pos) =>
     {
         var (ok, value, next) = parser(code, pos);
         return (ok, ok ? selector(value) : default, next);
     };
 
-    static public Parser<C> SelectMany<A, B, C>(this Parser<A> parser, Func<A, Parser<B>> selector, Func<A, B, C> projector) => (in CodeSource code, int pos) =>
+    static public Parser<C> SelectMany<A, B, C>(this Parser<A> parser, Func<A, Parser<B>> selector, Func<A, B, C> projector) => (in code, pos) =>
     {
         var (ok, a, next) = parser(code, pos);
         if (!ok) return (false, default, pos);
@@ -67,20 +67,20 @@ static public partial class Decoder
         return ok2 ? (true, projector(a, b), next2) : (false, default, pos);
     };
 
-    static public Parser<T> Where<T>(this Parser<T> parser, Func<T, bool> predicate) => (in CodeSource code, int pos) =>
+    static public Parser<T> Where<T>(this Parser<T> parser, Func<T, bool> predicate) => (in code, pos) =>
     {
         var (ok, value, next) = parser(code, pos);
         return ok && predicate(value) ? (true, value, next) : (false, default, pos);
     };
 
-    static public Parser<T> Or<T>(this Parser<T> first, Parser<T> second) => (in CodeSource code, int pos) =>
+    static public Parser<T> Or<T>(this Parser<T> first, Parser<T> second) => (in code, pos) =>
     {
         var result = first(code, pos);
         return result.ok ? result : second(code, pos);
     };
 
     // 当てはまる限り繰り返して畳み込む(0 回以上。リストを作らない)。
-    static public Parser<A> Fold<T, A>(this Parser<T> parser, A seed, Func<A, T, A> combine) => (in CodeSource code, int pos) =>
+    static public Parser<A> Fold<T, A>(this Parser<T> parser, A seed, Func<A, T, A> combine) => (in code, pos) =>
     {
         var accumulated = seed;
         while (true)
@@ -92,9 +92,9 @@ static public partial class Decoder
         }
     };
 
-    static public readonly Parser<byte> Fetch8 = (in CodeSource code, int pos) => (true, code.Byte(pos), pos + 1);
-    static public readonly Parser<ushort> Fetch16 = (in CodeSource code, int pos) => (true, code.Word(pos), pos + 2);
-    static public readonly Parser<uint> Fetch32 = (in CodeSource code, int pos) => (true, code.Dword(pos), pos + 4);
+    static public readonly Parser<byte> Fetch8 = (in code, pos) => (true, code.Byte(pos), pos + 1);
+    static public readonly Parser<ushort> Fetch16 = (in code, pos) => (true, code.Word(pos), pos + 2);
+    static public readonly Parser<uint> Fetch32 = (in code, pos) => (true, code.Dword(pos), pos + 4);
 
     /// プレフィックス ///////////////////////////////
     static public Prefix PrefixOf(byte value) => value switch
@@ -128,7 +128,7 @@ static public partial class Decoder
         }
     }
 
-    static public readonly Parser<Prefix> Prefixes = (in CodeSource code, int pos) =>
+    static public readonly Parser<Prefix> Prefixes = (in code, pos) =>
     {
         var length = ScanPrefixes(code, pos, out var prefixes);
         return (true, prefixes, pos + length);
@@ -193,13 +193,13 @@ static public partial class Decoder
     // ModRM バイトから読む Parser(構造だけを返す)。
     static public Parser<ModRm> ModRmParser(bool a32) => a32 ? ModRm32 : ModRm16;
 
-    static readonly Parser<ModRm> ModRm16 = (in CodeSource code, int pos) =>
+    static readonly Parser<ModRm> ModRm16 = (in code, pos) =>
     {
         var modrm = ParseModRm(code, pos + 1, code.Byte(pos), false);
         return (true, modrm, pos + modrm.Length);
     };
 
-    static readonly Parser<ModRm> ModRm32 = (in CodeSource code, int pos) =>
+    static readonly Parser<ModRm> ModRm32 = (in code, pos) =>
     {
         var modrm = ParseModRm(code, pos + 1, code.Byte(pos), true);
         return (true, modrm, pos + modrm.Length);

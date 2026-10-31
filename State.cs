@@ -15,8 +15,9 @@ static public class States
     static public readonly State<Unit> Undefined = (env, cpu, ope) => (false, default, cpu, string.Empty);
 
     // グループ命令(ModRM の reg フィールドで選ぶ)の表。表に無い値は Undefined。
-    // 辞書を作らず順に比べる(8 項以下)。以前の Choice は該当が無いとホスト側の例外で落ちていた。
-    static public State<Unit> Group(int key, params (int key, State<Unit> state)[] cases)
+    // 辞書を作らず順に比べる(8 項以下)。params ReadOnlySpan なので呼び出しごとの配列割り当てもない。
+    // 以前の Choice は該当が無いとホスト側の例外で落ちていた。
+    static public State<Unit> Group(int key, params ReadOnlySpan<(int key, State<Unit> state)> cases)
     {
         foreach (var (candidate, state) in cases)
             if (candidate == key) return state;

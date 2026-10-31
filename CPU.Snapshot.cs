@@ -4,9 +4,8 @@ public partial class CPU
 {
     // 保存形式(v2 から不変)。導出プロパティ(ip/bp/sp/al/ah 等)は元の 32bit レジスタから再計算されるため書き出さない。
     // セグメントは _cs 等のアクセサで読み書きする(セッタが置く セレクタ*16 の基底は、直後の *_base で上書きされる)。
-    // アクセサは別ファイルの static フィールドなので、初期化順に依存しないよう最初の利用時に組み立てる。
-    static Codec<CPU> registers;
-    static Codec<CPU> Registers => registers ??= new Codec<CPU>()
+    // アクセサは別ファイルの static フィールドなので、初期化順に依存しないよう最初の利用時に組み立てる(field キーワードで遅延初期化)。
+    static Codec<CPU> Registers => field ??= new Codec<CPU>()
         .U16(_cs).U16(_ds).U16(_es).U16(_ss).U16(_fs).U16(_gs)
         .U32(_cs_base).U32(_ds_base).U32(_es_base).U32(_ss_base).U32(_fs_base).U32(_gs_base)
         .U32(_eip)
@@ -23,8 +22,7 @@ public partial class CPU
         .U32(_eax).U32(_ebx).U32(_ecx).U32(_edx).U32(_esi).U32(_edi);
 
     // v5 で FPU スタック、v6 でタスク/LDT レジスタを追加。
-    static Codec<CPU> runtime;
-    static Codec<CPU> Runtime => runtime ??= new Codec<CPU>()
+    static Codec<CPU> Runtime => field ??= new Codec<CPU>()
         .I32(c => c.fpu_top, (c, v) => c.fpu_top = v, since: 5)
         .Check(c => c.fpu_top is >= 0 and <= 7, "Invalid FPU stack top")
         .U8(c => c.fpu_valid, (c, v) => c.fpu_valid = v, since: 5)

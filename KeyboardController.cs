@@ -19,7 +19,7 @@ internal sealed class KeyboardController
     // 実行スレッドが Pump で 1 バイトずつ出力バッファへ移す。スナップショットには含めない。
     public readonly System.Collections.Concurrent.ConcurrentQueue<byte> Injected = new();
 
-    public void Inject(params byte[] scancodes)
+    public void Inject(params ReadOnlySpan<byte> scancodes)
     {
         foreach (var scancode in scancodes) Injected.Enqueue(scancode);
     }
