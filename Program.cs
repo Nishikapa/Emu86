@@ -1390,6 +1390,6 @@ static partial class Program
     // アドレスはデコードして消費するだけで、変換はしない。
     static State<Unit> Invlpg(int mod, int rm) =>
         from addr in GetMemOrRegOffset(mod, rm)
-        from _ in Effect((env, _) => env.FlushTlb())
+        from _ in Effect((env, _) => env.Paging.Flush())
         select unit;
 }

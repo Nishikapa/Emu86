@@ -36,15 +36,19 @@ internal sealed class RunDiagnostics
         env.Ata?.Log = options.AtaLog;
         env.Pci.Log = options.PciLog;
         env.Pci.Caller = () => WindowsDiagnostics.Caller(env, cpu);
-        env.PicLog = options.PicLog;
+        env.PicMaster.Log = env.PicSlave.Log = options.PicLog;
         env.Vga.Log = options.VgaLog;
-        env.IntLog = options.IntLog ? [] : null;
-        env.WriteLog = options.WriteLog != null ? [] : null;
-        env.WLogLo = options.WriteLog?.Lo ?? 0;
-        env.WLogHi = options.WriteLog?.Hi ?? 0;
-        env.WatchLo = options.Watch.Lo;
-        env.WatchHi = options.Watch.Hi;
-        env.WatchTriggered = false;
+        env.Diagnostics = options.IntLog || options.WriteLog != null || options.Watch.Hi != 0
+            ? new MemoryDiagnostics
+            {
+                InterruptLog = options.IntLog ? [] : null,
+                WriteLog = options.WriteLog != null ? [] : null,
+                WriteLogLo = options.WriteLog?.Lo ?? 0,
+                WriteLogHi = options.WriteLog?.Hi ?? 0,
+                WatchLo = options.Watch.Lo,
+                WatchHi = options.Watch.Hi,
+            }
+            : null;
         if (count > 0) this.trace?.WriteLine($"\n--- resumed at instruction {count} ---");
 
         if (options.BreakEip != 0)
@@ -56,9 +60,9 @@ internal sealed class RunDiagnostics
 
         traps.Add(step =>
         {
-            if (!env.WatchTriggered) return false;
-            env.WatchTriggered = false;
-            return Stop($"WATCH: write into [{env.WatchLo:x8},{env.WatchHi:x8}) by instruction at {step.BeforeCs:x4}:{step.BeforeEip:x8} (instr {step.Count})");
+            if (env.Diagnostics is not { WatchTriggered: true } watch) return false;
+            watch.WatchTriggered = false;
+            return Stop($"WATCH: write into [{watch.WatchLo:x8},{watch.WatchHi:x8}) by instruction at {step.BeforeCs:x4}:{step.BeforeEip:x8} (instr {step.Count})");
         });
         // ESP がカーネルのエントリコード領域を指す不正値になった瞬間を捕捉する。
         if (options.EspTrap)
@@ -137,7 +141,7 @@ internal sealed class RunDiagnostics
 
     public bool BeforeInstruction(long count)
     {
-        env.CurEip = cpu.eip;
+        if (env.Diagnostics is { } diagnostics) diagnostics.CurrentEip = cpu.eip;
         if (options.EntryLog.Hi != 0 && cpu.pe)
         {
             var inRange = options.EntryLog.Contains(cpu.eip);
@@ -150,7 +154,7 @@ internal sealed class RunDiagnostics
         }
         var step = new Step(cpu.cs, cpu.eip, count);
         if (breakpoints.Any(rule => rule(step))) return true;
-        env.Ata?.LogReads = env.PagingOn;
+        env.Ata?.LogReads = env.Paging.Enabled;
         env.Pci.Eip = cpu.eip;
         return false;
     }
@@ -195,28 +199,28 @@ internal sealed class RunDiagnostics
 
     void WriteMemoryLog()
     {
-        if (env.WriteLog == null) return;
-        output.WriteLine($"--- writes to [{env.WLogLo:x8},{env.WLogHi:x8}) (last 30 of {env.WriteLog.Count}) ---");
-        foreach (var entry in env.WriteLog.TakeLast(30)) output.WriteLine("  " + entry);
+        if (env.Diagnostics is not { WriteLog: { } writes } diagnostics) return;
+        output.WriteLine($"--- writes to [{diagnostics.WriteLogLo:x8},{diagnostics.WriteLogHi:x8}) (last 30 of {writes.Count}) ---");
+        foreach (var entry in writes.TakeLast(30)) output.WriteLine("  " + entry);
     }
 
     public void ReportStop(long count)
     {
         output.WriteLine($"STOP at {cpu.cs:x4}:{cpu.eip:x8} after {count} instructions, opcode: {OpcodeBytes()}");
         WriteMemoryLog();
-        if (env.IntLog != null)
+        if (env.Diagnostics is { InterruptLog: { } interrupts } diagnostics)
         {
-            output.WriteLine($"--- protected-mode interrupt deliveries (total {env.IntLog.Count}) ---");
+            output.WriteLine($"--- protected-mode interrupt deliveries (total {interrupts.Count}) ---");
             output.WriteLine("[first 30]");
-            foreach (var entry in env.IntLog.Take(30))
+            foreach (var entry in interrupts.Take(30))
                 output.WriteLine("  " + entry);
             output.WriteLine($"[last {options.IntLogLast}]");
-            foreach (var entry in env.IntLog.TakeLast(options.IntLogLast))
+            foreach (var entry in interrupts.TakeLast(options.IntLogLast))
                 output.WriteLine("  " + entry);
-            if (env.IntLogV86.Count > 0)
+            if (diagnostics.InterruptLogV86.Count > 0)
             {
-                output.WriteLine($"--- deliveries from virtual-8086 mode (total {env.IntLogV86.Count}) ---");
-                foreach (var entry in env.IntLogV86.TakeLast(200))
+                output.WriteLine($"--- deliveries from virtual-8086 mode (total {diagnostics.InterruptLogV86.Count}) ---");
+                foreach (var entry in diagnostics.InterruptLogV86.TakeLast(200))
                     output.WriteLine("  " + entry);
             }
         }

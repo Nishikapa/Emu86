@@ -201,10 +201,12 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | `SnapshotStore.cs` | 保存形式の版管理、チェックサム検証、ディスク差分を含むチェックポイントの確定と復元。 |
 | `Codec.cs` | スナップショットの双方向コーデック `Codec<T>`。フィールドを保存形式の並び順に 1 度だけ登録し（`since:` で追加された版を指定）、保存と復元を同じ記述から導出する。 |
 | `CPU.Snapshot.cs` / `Environment.Snapshot.cs` | CPU レジスタ・FPU と、環境・デバイスの保存形式（`Codec<T>` の表）。PCI・ATA・VGA・マウス・UART の内部状態は各デバイスが自分の表を持つ。 |
-| `Environment.cs` | `EmuEnvironment`（既定 256 MB メモリ、64 KB I/O ポート、ATA 接続）と、役割ごとの静的クラス: `Mmu`（ページング変換（非 PAE 2 段と PAE 3 段を段の表 `PageLevel[]` で共通に歩く）と TLB、物理メモリの読み書き）、`Ports`（I/O ポート。`PortMap.cs` の表を引く）、`DataAccess`（State で書いたレジスタ・スタック・r/m オペランドの読み書き）、`StringOps`、`BitOps`、`Interrupts`（割り込み・例外の配送と IRET）、`Segments`（記述子の読み取り・照合とセグメントレジスタのロード）。 |
+| `Environment.cs` | `EmuEnvironment`（既定 256 MB メモリ、64 KB I/O ポート、ATA 接続、`Paging`、`Diagnostics`、TSC・MSR・DR）と、役割ごとの静的クラス: `Mmu`（ページング変換（非 PAE 2 段と PAE 3 段を段の表 `PageLevel[]` で共通に歩き、TLB は `Paging` に入れる）、物理メモリの読み書き）、`Ports`（I/O ポート。`PortMap.cs` の表を引く）、`DataAccess`（State で書いたレジスタ・スタック・r/m オペランドの読み書き）、`StringOps`、`BitOps`、`Interrupts`（割り込み・例外の配送と IRET）、`Segments`（記述子の読み取り・照合とセグメントレジスタのロード）。 |
+| `Paging.cs` | ページング変換状態（CR0.PG/CR0.WP/CR3/CR4.PAE のミラー。CR 書き込みとスナップショット復元時に `Sync`）と直結 TLB（読み取り用と、Dirty 設定済みを保証する書き込み用。`TryLookup`/`Fill`/`Flush`）。過渡状態なのでスナップショットには含めない。 |
+| `MemoryDiagnostics.cs` | デバッグ用の記録: 物理アドレスのウォッチポイント（`--watch`）、物理範囲への書き込みログ（`--wlog`）、プロテクトモード割り込み配送のログ（`--intlog`）。`EmuEnvironment.Diagnostics` はどれも無効なら null で、メモリ書き込みの経路は null 検査 1 回で素通りする。 |
 | `PortMap.cs` | I/O ポートの表。1 項 = ポート範囲とデバイスの読み書き（1 バイト、幅付きを自分で扱う項、デバイスの有無や PCI の BAR で決まる範囲の条件）。起動時にポート番号ごとの配列に展開し、入出力は該当する項を表の順に試すだけ。該当がなければ 64 KB の `IoPort` 配列を素通し。 |
 | `Environment.Devices.cs` | 環境ごとのデバイス所有と、既存の状態名への転送プロパティ。保存形式のバイト順・バージョンは変更しない。 |
-| `PicDevice.cs` / `PitDevice.cs` / `CmosDevice.cs` / `KeyboardController.cs` / `MouseDevice.cs` / `AcpiPmDevice.cs` | PIC・PIT・CMOS・8042・PS/2 マウス・ACPI 電源管理の状態と入出力処理。PIC のマスタ/スレーブは共通実装の独立したインスタンス。8042 とマウスのコマンドは表（コマンド → 応答と動作、引数を取るものは次のバイトの処理）で、引数待ちの状態はスナップショットに残る `PendingCommand` のまま。 |
+| `PicDevice.cs` / `PitDevice.cs` / `CmosDevice.cs` / `KeyboardController.cs` / `MouseDevice.cs` / `AcpiPmDevice.cs` | PIC・PIT・CMOS・8042・PS/2 マウス・ACPI 電源管理の状態と入出力処理。PIC のマスタ/スレーブは共通実装の独立したインスタンス（`--piclog` は各インスタンスの `Log`）。8042 とマウスのコマンドは表（コマンド → 応答と動作、引数を取るものは次のバイトの処理）で、引数待ちの状態はスナップショットに残る `PendingCommand` のまま。 |
 | `Pci.cs` | PCI コンフィグ空間（0xCF8/0xCFC）。i440FX ホストブリッジ、PIIX4 ISA/IDE/電源管理、VGA 互換デバイスと拡張 ROM BAR。 |
 | `SerialPort.cs` | 16550 互換 UART と、ホストの名前付きパイプへの橋渡し（送受信は専用タスク）。レジスタはオフセット 0〜7 の `Register`（読み出しと書き込みの Lens）の表。 |
 | `VgaDevice.cs` / `VgaBiosStub.cs` | VGA のレジスタ・VRAM ウィンドウ・描画と、拡張 ROM として見せる最小 VGA BIOS（INT 10h を C# 側で処理）。レジスタは「ポート → `Register`（読み出しと書き込みの Lens）」の表で、インデックス/データのポート対（Sequencer/Graphics/CRTC/Attribute）は `Indexed` が作る（範囲外の要素、CRTC の保護、Attribute のフリップフロップ）。INT 10h は「AH → State」の表（AL/BL で分かれる機能は入れ子の表）で、レジスタの出し入れは `Accessor` の `Get`/`Set` で書く。 |

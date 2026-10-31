@@ -706,7 +706,7 @@ public static class Semantics
     // 存在するが書き込み禁止なら書き込みフォルト(err=3)になる。変換結果は TLB に残るので、その後の Store はフォルトしない。
     public static void Probe(EmuEnvironment env, uint address, int type, bool readsFirst)
     {
-        if (!env.PagingOn) return;
+        if (!env.Paging.Enabled) return;
         var size = Bytes(type);
         var crosses = (address & 0xFFF) > 0x1000 - (uint)size;
         if (readsFirst)

@@ -34,7 +34,7 @@ static class SnapshotTests
         Page(env, 0, 0);
         CPU._cr0.setter(cpu)(0x80010001);
         CPU._cr3.setter(cpu)(0x9000);
-        EnvSyncPaging(env, cpu);
+        env.Paging.Sync(cpu);
     }
 
     static string CpuState(CPU cpu)
@@ -71,9 +71,9 @@ static class SnapshotTests
             initial = CpuState(cpu);
             Throws<PageFaultException>(() => executor.Step(env, cpu), "PUSH fault");
             Equal(initial, CpuState(cpu), "PUSH rollback");
-            Equal(true, env.PagingOn, "paging mirror after rollback");
+            Equal(true, env.Paging.Enabled, "paging mirror after rollback");
             Page(env, 2, 0x5000);
-            env.FlushTlb();
+            env.Paging.Flush();
             Equal(true, executor.Step(env, cpu).IsSuccess, "PUSH retry");
             Equal(0x2000u, cpu.esp, "PUSH stack after retry");
             Equal((ushort)0x4321, BitConverter.ToUInt16(env.OneMegaMemory_, 0x5000), "PUSH value after retry");
@@ -89,7 +89,7 @@ static class SnapshotTests
             Equal(0x3001u, cpu.esi, "REP source progress");
             Equal(0x2000u, cpu.edi, "REP destination progress");
             env.OneMegaMemory_[0x6000] = 0x99;
-            Page(env, 2, 0x7000); env.FlushTlb();
+            Page(env, 2, 0x7000); env.Paging.Flush();
             Equal(true, executor.Step(env, cpu).IsSuccess, "REP retry");
             Equal((byte)0x11, env.OneMegaMemory_[0x5fff], "completed REP iteration is not replayed");
             Equal((byte)0x22, env.OneMegaMemory_[0x7000], "remaining REP iteration");
@@ -99,12 +99,12 @@ static class SnapshotTests
             Throws<PageFaultException>(() => executor.Execute(env, cpu, (context, state, opcodes) =>
             {
                 state.eax = 999; state.fpu_st[0] = 88; state.fs_prefix = true;
-                CPU._cr3.setter(state)(0xB000); EnvSyncPaging(context, state);
+                CPU._cr3.setter(state)(0xB000); context.Paging.Sync(state);
                 context.OneMegaMemory_[0x8000] = 0xAB;
                 throw new PageFaultException(0xDEAD, 2);
             }), "mid-instruction state fault");
             Equal(initial, CpuState(cpu), "CPU and FPU rollback");
-            Equal(0x9000u, env.Cr3Base, "CR3 mirror rollback");
+            Equal(0x9000u, env.Paging.Cr3Base, "CR3 mirror rollback");
             Equal((byte)0xAB, env.OneMegaMemory_[0x8000], "memory side effects retained");
         }
         var replacement = Cpu();

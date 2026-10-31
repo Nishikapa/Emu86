@@ -14,7 +14,7 @@ Emu86 は現在、単一の仮想 CPU を単一のホストスレッドで逐次
 | ゲスト時刻 | 実行済み命令数(100 万命令 = 1 秒)。TSC・ACPI PM タイマ・IRQ0 周期(1 万命令)がすべてこれに従う | `env.Tsc = count`、`AcpiPmDevice.Timer(tsc)` |
 | 割り込みコントローラ | 8259 PIC のみ。Local APIC / I/O APIC は存在せず、CPUID でも APIC ビットを伏せている | `Cpuid_0FA2`(`d = 0x00008179`) |
 | MMIO | 未実装。RAM 外は「読み 0xFF・書き無視」。LAPIC(0xFEE00000)/IOAPIC(0xFEC00000) を置く仕組みがない | `Environment.cs` の EnvWriteByte 付近コメント |
-| CPU 固有状態の置き場所 | ページング状態(PagingOn/PaeOn/WpOn/Cr3Base)、TLB、TSC、MSR、DR0-7 が **環境(EmuEnvironment)側** にある。実機ではいずれも CPU ごとの状態 | `Environment.cs` 1165-1210 行 |
+| CPU 固有状態の置き場所 | ページング状態と TLB(`Paging`: Enabled/Pae/WriteProtect/Cr3Base)、TSC、MSR、DR0-7 が **環境(EmuEnvironment)側** にある。実機ではいずれも CPU ごとの状態 | `Paging.cs`、`Environment.cs` の `EmuEnvironment` |
 | アトミック性 | LOCK プレフィックスは無視(「単一 CPU なので」)。XCHG/CMPXCHG/XADD/CMPXCHG8B は通常の読み書きで実装。32 ビット書き込みは 1 バイトずつ 4 回の store | `FastCore.cs:38`、`EnvWriteDword` |
 | HLT | NOP(待たずに次命令へ進む) | `Hlt_F4`、`FastCore.cs:453` |
 | スナップショット | CPU は 1 個固定(v10) | `SnapshotStore.cs`、`CPU.Snapshot.cs` |

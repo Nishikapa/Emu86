@@ -132,13 +132,13 @@ public sealed class InstructionExecutor(bool useFast = true)
     void Restore(EmuEnvironment env, CPU cpu, bool resumeRepeat)
     {
         var decode = cpu.Decode;
-        // ページング関連の CR が変わっていない限り EnvSyncPaging(= TLB 全消去)は呼ばない。
+        // ページング関連の CR が変わっていない限り Paging.Sync(= TLB 全消去)は呼ばない。
         // Windows は要求時ページングで #PF が頻発するため、フォルトのたびに TLB を捨てると
         // 定常速度が 3 割以上落ちる。CR の変更はメモリオペランドを持たずフォルトしないので、
         // 命令途中のフォルトで CR が食い違うことは通常ない。
         var pagingChanged = cpu.pg != checkpoint.pg || cpu.wp != checkpoint.wp || cpu.cr3 != checkpoint.cr3 || cpu.cr4 != checkpoint.cr4;
         checkpoint.CopyTo(cpu);
         if (resumeRepeat) decode.RestoreRepeat(cpu);
-        if (pagingChanged) EnvSyncPaging(env, cpu);
+        if (pagingChanged) env.Paging.Sync(cpu);
     }
 }

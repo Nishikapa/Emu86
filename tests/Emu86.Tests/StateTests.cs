@@ -120,16 +120,16 @@ static class StateTests
         foreach (var entry in new[] { (Register: 0, Value: 0x80010001u), (Register: 2, Value: 0x12345678u),
             (Register: 3, Value: 0x9000u), (Register: 4, Value: 0x20u) })
         {
-            env.TlbTagR[0] = env.TlbTagW[0] = uint.MaxValue;
+            env.Paging.TagR[0] = env.Paging.TagW[0] = uint.MaxValue;
             var result = SetCrReg(entry.Register, entry.Value)(env, cpu, null);
             Equal(true, result.IsSuccess, "control register write");
             Equal(cpu, result.cpu, "control register CPU");
             Equal(entry.Value, GetCrReg(entry.Register)(env, cpu, null).value, "control register readback");
-            Equal(0u, env.TlbTagR[0], "read TLB flushed");
-            Equal(0u, env.TlbTagW[0], "write TLB flushed");
+            Equal(0u, env.Paging.TagR[0], "read TLB flushed");
+            Equal(0u, env.Paging.TagW[0], "write TLB flushed");
         }
-        Equal(true, env.PagingOn && env.WpOn && env.PaeOn, "paging state synchronized");
-        Equal(0x9000u, env.Cr3Base, "page table base synchronized");
+        Equal(true, env.Paging.Enabled && env.Paging.WriteProtect && env.Paging.Pae, "paging state synchronized");
+        Equal(0x9000u, env.Paging.Cr3Base, "page table base synchronized");
         foreach (var invalid in new[] { -1, 1, 5, 8 })
         {
             Throws<KeyNotFoundException>(() => GetCrReg(invalid), "invalid control register read");

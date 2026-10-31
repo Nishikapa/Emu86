@@ -154,7 +154,7 @@ static class DecodeTests
             var cpu = new CPU { code32 = code32, eip = start };
             CPU._cr0.setter(cpu)(0x80000001);
             CPU._cr3.setter(cpu)(0x9000);
-            EnvSyncPaging(env, cpu);
+            env.Paging.Sync(cpu);
             var executor = new InstructionExecutor(useFast);
             var faulted = false;
             try
@@ -195,7 +195,7 @@ static class DecodeTests
             using var env = new EmuEnvironment(memory: new byte[0x10000]);
             var cpu = CreateCpu(code32, addressPrefix);
             cpu.eip = 0x1000;
-            env.PagingOn = true;
+            env.Paging.Enabled = true;
             Equal((false, (uint)register), GetMemOrRegAddr(3, register)(env, cpu, null).value, "register-only does not fetch");
             Equal(0x1000u, cpu.eip, "register-only EIP unchanged");
         }
@@ -388,7 +388,7 @@ static class DecodeTests
         env.OneMegaMemory_[0x100] = 0x0F; env.OneMegaMemory_[0x101] = 0xC7; env.OneMegaMemory_[0x102] = 0xC8;
         Equal("0f c7 c8  CMPXCHG8B eax", Disassembler.Describe(env, new CPU { code32 = true, eip = 0x100 }), "bytes and text");
         var faulting = new EmuEnvironment(memory: new byte[0x10000]);
-        faulting.PagingOn = true; faulting.Cr3Base = 0x9000; // 空のページディレクトリ: フェッチが #PF
+        faulting.Paging.Enabled = true; faulting.Paging.Cr3Base = 0x9000; // 空のページディレクトリ: フェッチが #PF
         Equal("(unmapped)", Disassembler.Describe(faulting, new CPU { code32 = true, eip = 0x100 }), "unreadable code");
     }
 
