@@ -1,5 +1,7 @@
-using System.Buffers.Binary;
+using static Emu86.Writers;
 
+// 読み込みに必要なリージョン表・メタデータ・BAT と末尾のペイロードだけを持つ最小限の人工 VHDX(ヘッダの CRC は検証されない)。
+// BAT の期待値は本体の VhdxBatLayout を使わずに計算する。
 static class VhdxFixture
 {
     public const int BatOffset = 0x300000;
@@ -11,37 +13,26 @@ static class VhdxFixture
         var blocksPerChunk = (1L << 32) / blockSize;
         var lastEntry = payloadBlocks - 1 + (payloadBlocks - 1) / blocksPerChunk;
         var batLength = (int)(((lastEntry + 1) * 8 + 0xFFFFF) & ~0xFFFFFL);
-        var image = new byte[BatOffset + batLength];
-        "vhdxfile"u8.CopyTo(image);
-        var regions = image.AsSpan(0x30000, 0x10000);
-        "regi"u8.CopyTo(regions);
-        BinaryPrimitives.WriteUInt32LittleEndian(regions[8..], 2);
-        new Guid("2DC27766-F623-4200-9D64-115E9BFD4A08").TryWriteBytes(regions[16..]);
-        BinaryPrimitives.WriteInt64LittleEndian(regions[32..], BatOffset);
-        BinaryPrimitives.WriteInt32LittleEndian(regions[40..], batLength);
-        new Guid("8B7CA206-4790-4B9A-B8FE-575F050F886E").TryWriteBytes(regions[48..]);
-        BinaryPrimitives.WriteInt64LittleEndian(regions[64..], 0x200000);
-        BinaryPrimitives.WriteInt32LittleEndian(regions[72..], 0x100000);
-        var metadata = image.AsSpan(0x200000, 0x100000);
-        "metadata"u8.CopyTo(metadata);
-        BinaryPrimitives.WriteUInt16LittleEndian(metadata[10..], 3);
-        var offset = 0x10000;
         (Guid Id, byte[] Data)[] items =
         [
-            (new Guid("CAA16737-FA36-4D43-B3B6-33F0AA44E76B"), BitConverter.GetBytes((long)blockSize)),
-            (new Guid("2FA54224-CD1B-4876-B211-5DBED83BF4B8"), BitConverter.GetBytes(virtualSize)),
-            (new Guid("8141BF1D-A96F-4709-BA47-F233A8FAAB5F"), BitConverter.GetBytes(512))
+            (new Guid("CAA16737-FA36-4D43-B3B6-33F0AA44E76B"), Sequence(U32((uint)blockSize), U32(0)).Build(8)), // File Parameters(親なし)
+            (new Guid("2FA54224-CD1B-4876-B211-5DBED83BF4B8"), I64(virtualSize).Build(8)),                        // Virtual Disk Size
+            (new Guid("8141BF1D-A96F-4709-BA47-F233A8FAAB5F"), U32(512).Build(4))                                  // Logical Sector Size
         ];
-        for (var index = 0; index < items.Length; index++)
-        {
-            var entry = metadata[(32 + index * 32)..];
-            items[index].Id.TryWriteBytes(entry);
-            BinaryPrimitives.WriteInt32LittleEndian(entry[16..], offset);
-            BinaryPrimitives.WriteInt32LittleEndian(entry[20..], items[index].Data.Length);
-            items[index].Data.CopyTo(metadata[offset..]);
-            offset += 16;
-        }
-        BinaryPrimitives.WriteUInt64LittleEndian(image.AsSpan(BatOffset + (int)lastEntry * 8), (ulong)image.Length | 6);
+        var image = Sequence(
+            Magic("vhdxfile"),
+            At(0x30000, Sequence(
+                Magic("regi"),
+                At(8, U32(2)),
+                At(16, Sequence(Uuid(new Guid("2DC27766-F623-4200-9D64-115E9BFD4A08")), I64(BatOffset), U32((uint)batLength))),
+                At(48, Sequence(Uuid(new Guid("8B7CA206-4790-4B9A-B8FE-575F050F886E")), I64(0x200000), U32(0x100000))))),
+            At(0x200000, Sequence(
+                Magic("metadata"),
+                At(10, U16((ushort)items.Length)),
+                At(32, Count(items.Index(), item => Sequence(Uuid(item.Item.Id), U32((uint)(0x10000 + item.Index * 16)), U32((uint)item.Item.Data.Length), Skip(8)))),
+                Sequence(items.Index().Select(item => At(0x10000 + item.Index * 16, Bytes(item.Item.Data)))))),
+            At(BatOffset + (int)lastEntry * 8, U64((ulong)(BatOffset + batLength) | 6)))
+            .Build(BatOffset + batLength);
         using var file = File.Create(path);
         file.Write(image);
         file.Write(Enumerable.Repeat(PayloadValue, blockSize).ToArray());

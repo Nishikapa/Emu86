@@ -1,6 +1,7 @@
 using Emu86;
 using System.Security.Cryptography;
 using static Emu86.Fields;
+using W = Emu86.Writers;
 using static Assert;
 
 static class DiskTests
@@ -145,6 +146,62 @@ static class DiskTests
         Throws<InvalidDataException>(() => Count(3, U64).Parse(buffer), "truncated structure");
     }
 
+    // 書き込み側のビルダー: 固定位置と順次、繰り返し、チェックサム、Fields との往復。
+    static void WriterCombinators()
+    {
+        var table = W.Sequence(W.Magic("tbl!"), W.At(4, W.U32(2)), W.At(8, W.Count(new uint[] { 0x44332211, 0xDDCCBBAA }, W.U32)), W.At(16, W.U16(0x0201))).Build(18);
+        Equal("74626C210200000011223344AABBCCDD0102", Convert.ToHexString(table), "magic, fixed positions and repetition");
+        var parsed = (from _ in Magic("tbl!"u8.ToArray(), "test table") from count in At(4, U32) from items in At(8, Count((int)count, U32)) select items).Parse(table);
+        Equal("44332211,DDCCBBAA", string.Join(",", parsed.Select(value => value.ToString("X8"))), "Fields read back what Writers wrote");
+        Equal("0102000003", Convert.ToHexString(W.U8(1).Then(W.U8(2)).Then(W.Skip(2)).Then(W.U8(3)).Build(5)), "Then advances, Skip leaves zeros");
+        Equal("1122334408000000", Convert.ToHexString(W.Sequence(W.At(0, W.U32BE(0x11223344)), W.Checksum(4, 8, data => (uint)data.Length)).Build(8)), "checksum covers the structure with its field zeroed");
+        var id = Guid.NewGuid();
+        Equal((id, "ab"), (from guid in Uuid from text in Utf16(4) select (guid, text)).Parse(W.Sequence(W.Uuid(id), W.Utf16("ab")).Build(20)), "GUID and UTF-16 round trip");
+        Throws<ArgumentOutOfRangeException>(() => W.U32(1).Build(2), "writing past the buffer");
+    }
+
+    // 生成した差分 VHDX の構造: 2 つのヘッダの CRC と連番と共通の GUID、リージョン表の 2 項と複製、メタデータ 6 項(16 バイト境界に順に詰める)、
+    // File Parameters の親フラグ、ペアレントロケータの 3 組。
+    static void OverlayStructure()
+    {
+        VhdxFixture.CreateDynamic("structure-base.vhdx", 16L << 20);
+        DiskImage.EnsureOverlay("structure.avhdx", "structure-base.vhdx");
+        var bytes = File.ReadAllBytes("structure.avhdx");
+        Equal("vhdxfile", System.Text.Encoding.ASCII.GetString(bytes, 0, 8), "file identifier");
+        foreach (var headerOffset in new[] { 0x10000, 0x20000 })
+        {
+            var header = bytes.AsSpan(headerOffset, 4096).ToArray();
+            var stored = U32.Parse(header, 4);
+            header.AsSpan(4, 4).Clear();
+            Equal(stored, DiskImage.Crc32C(header), $"header checksum at {headerOffset:x}");
+            Equal((ulong)(headerOffset >> 16), U64.Parse(header, 8), "header sequence number");
+            Equal((ushort)1, U16.Parse(header, 0x42), "header version");
+        }
+        Equal(Uuid.Parse(bytes, 0x10010), Uuid.Parse(bytes, 0x20010), "headers share the FileWriteGuid");
+        Equal(Uuid.Parse(bytes, 0x10020), Uuid.Parse(bytes, 0x20020), "headers share the DataWriteGuid");
+        var regions = (from _ in Magic("regi"u8.ToArray(), "regions") from count in At(8, U32)
+                       from entries in At(16, Count((int)count, from guid in Uuid from offset in I64 from length in U32 from required in U32 select (guid, offset, length, required)))
+                       select entries).Parse(bytes, 0x30000);
+        Equal("2DC27766-F623-4200-9D64-115E9BFD4A08@300000,8B7CA206-4790-4B9A-B8FE-575F050F886E@200000",
+            string.Join(",", regions.Select(region => $"{region.guid.ToString().ToUpperInvariant()}@{region.offset:x}")), "region entries");
+        Equal(true, regions.All(region => region.required == 1) && regions[1].length == 0x100000, "regions are required and the metadata region is 1MB");
+        Equal(true, bytes.AsSpan(0x30000, 0x10000).SequenceEqual(bytes.AsSpan(0x40000, 0x10000)), "region table copies match");
+        var metadata = (from _ in Magic("metadata"u8.ToArray(), "metadata") from count in At(10, U16)
+                        from entries in At(32, Count(count, from guid in Uuid from offset in U32 from length in U32 from flags in U32 from __ in Skip(4) select (guid, offset, length, flags)))
+                        select entries).Parse(bytes, 0x200000);
+        Equal(6, metadata.Count, "metadata entries");
+        Equal(0x10000u, metadata[0].offset, "first item follows the table area");
+        Equal(true, metadata.Zip(metadata.Skip(1)).All(pair => pair.Second.offset == pair.First.offset + ((pair.First.length + 15) & ~15u)), "items are packed in order on 16-byte boundaries");
+        Equal(2u, U32.Parse(bytes, 0x200000 + (int)metadata[0].offset + 4), "file parameters mark a parent");
+        var locator = metadata[5];
+        var pairs = (from count in At(18, U16) from entries in At(20, Count(count, from keyOffset in U32 from valueOffset in U32 from keyLength in U16 from valueLength in U16 select (keyOffset, valueOffset, keyLength, valueLength)))
+                     from texts in Sequence(entries.Select(entry => from key in At((int)entry.keyOffset, Utf16(entry.keyLength)) from value in At((int)entry.valueOffset, Utf16(entry.valueLength)) select (key, value)))
+                     select texts).Parse(bytes, 0x200000 + (int)locator.offset);
+        Equal("parent_linkage,relative_path,absolute_win32_path", string.Join(",", pairs.Select(pair => pair.key)), "parent locator keys");
+        Equal(Path.GetFullPath("structure-base.vhdx"), pairs[2].value, "absolute parent path");
+        Equal(".\\structure-base.vhdx", pairs[1].value, "relative parent path");
+    }
+
     // ATA のコマンド表: WRITE SECTORS で 1 セクタ書き、READ SECTORS で読み戻す。IDENTIFY の応答、非データコマンドの完了、
     // 未対応コマンドと IDENTIFY PACKET の abort、ステータス読み出しによる INTRQ の取り下げ。
     static void AtaCommands()
@@ -185,6 +242,8 @@ static class DiskTests
     public static (string Name, Action Run)[] Cases =>
     [
         ("field-parsers", FieldParsers),
+        ("writers", WriterCombinators),
+        ("overlay-structure", OverlayStructure),
         ("small-raw-disk", SmallRawDisk),
         ("layouts", Layouts),
         ("round-trips", RoundTrips),

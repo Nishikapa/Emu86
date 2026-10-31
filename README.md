@@ -218,8 +218,8 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | `VgaWindow.cs` / `RegisterDialog.cs` | Windows Forms の表示ウィンドウ（描画、キー入力とマウス捕捉、中断・再開ボタン）とレジスタ表示ダイアログ。 |
 | `Ext.cs` | 静的クラス `Conversions`。型変換ユーティリティ（`ToTypeData`、`Data` の拡張メンバー `Value`/`Signed`、`Bytes`/`Bits`/`Mask`/`Msb`）。 |
 | `Instructions.*.cs` | 静的クラス `Instructions`（partial）。モナド版の命令の実装を種類ごとのファイルに分ける: `ControlFlow`（ジャンプ・コール・リターン・LOOP・INT/IRET）、`Arithmetic`（ALU グループ・シフト・乗除算・INC/DEC・ビット操作・BCD・CMPXCHG/XADD）、`DataMovement`（MOV の各形・LEA・XCHG・CMOVcc・SETcc・MOVZX/MOVSX・far ポインタのロード）、`Stack`（PUSH/POP・PUSHA/POPA・ENTER/LEAVE・PUSHF/POPF）、`Flags`、`String`（文字列命令と REP の繰り返し）、`System`（CR/DR の MOV・CPUID・RDTSC・MSR・記述子テーブル・VERR/VERW/LAR/LSL・INVLPG・HLT）、`Io`（IN/OUT）。`Instructions.Table.cs` はオペコード表（1 バイト、0F xx）とディスパッチ、プレフィックス処理、実行の入口（`Execute`/`ExecuteDecoded`/`Execute2`）。 |
-| `Disk.cs` | `DiskImage`（VHD/VHDX/AVHDX/生イメージの CoW ディスクバックエンド。セクタの所在は「自分 → 親 → ゼロ」の `Locate` チェーンで解決）と `AtaDevice`（ATA PIO デバイス、IRQ14。コマンドは「番号 → 動作」の表で、表にないものは abort）。ヘッダの読み取りは `DiskFormat.cs` のレイアウトを当てはめるだけ。 |
-| `DiskFormat.cs` | バイト列のパーサコンビネータ `Field<T>`（`U32`/`U64BE`/`Uuid`/`Utf16`、構造体の先頭からの位置 `At`、繰り返し `Count`、識別子 `Magic`）と、それで書いた VHD/VHDX の読み取り側の形式（フッタ、動的ヘッダとロケータ、リージョン表、メタデータ表と各項目、ペアレントロケータ）。 |
+| `Disk.cs` | `DiskImage`（VHD/VHDX/AVHDX/生イメージの CoW ディスクバックエンド。セクタの所在は「自分 → 親 → ゼロ」の `Locate` チェーンで解決）と `AtaDevice`（ATA PIO デバイス、IRQ14。コマンドは「番号 → 動作」の表で、表にないものは abort）。ヘッダの読み取りと差分 VHDX の生成は `DiskFormat.cs`/`DiskFormat.Write.cs` のレイアウトを当てはめるだけ。 |
+| `DiskFormat.cs` / `DiskFormat.Write.cs` | バイト列のパーサコンビネータ `Field<T>`（`U32`/`U64BE`/`Uuid`/`Utf16`、構造体の先頭からの位置 `At`、繰り返し `Count`、識別子 `Magic`）と、それで書いた VHD/VHDX の読み取り側の形式（フッタ、動的ヘッダとロケータ、リージョン表、メタデータ表と各項目、ペアレントロケータ）。書き込み側は対になるビルダー `Writer`（同名の `U32`/`Uuid`/`Utf16`/`At`/`Count`、順次の `Then`/`Sequence`、`Checksum`、`Build`）で、差分 VHDX の File Identifier・ヘッダ・リージョン表・メタデータ表・ペアレントロケータを読み取り側と同じ形に書く（`CreateAvhdx`）。 |
 | `VhdxBatLayout.cs` | VHDX のペイロード・ビットマップの位置、BAT の必要エントリ数・領域サイズ。 |
 | `tests/Emu86.Tests/` | 本体を参照する回帰テストと、実行状態・トレースの比較用データ。 |
 | `tools/win-debug/` | Windows ブート解析用の Python スクリプト（スナップショットの CPU/メモリ読み出し、Unicorn との差分トレース、シンボル付きスタック表示など）。 |
