@@ -262,6 +262,7 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 
 - 単一 CPU のみ。Local APIC / I/O APIC と MMIO は未実装で、`CPUID` でも APIC を報告しません（マルチ CPU 対応は `docs/adr/0001-multithreading-and-smp.md` で保留中）。
 - 命令定義 1 つから解釈実行とコンパイル済み経路を導出する IR と基本ブロックの翻訳キャッシュは既定で有効です（XP 起動で GUI に到達する 65 億命令まで、1 命令ずつの実行と状態がバイト一致したまま 4〜5 割速い。`--no-translate` で戻せる。`docs/adr/0002-instruction-semantics-ir.md`）。
+- 命令の意味は通常コア（`State` モナド、正）・高速コア・IR の 3 か所にあります。高速コアを IR に吸収して 2 系統にする案は `docs/adr/0003-core-unification.md`（提案、判断待ち）。
 - TSS によるハードウェアタスクスイッチ・タスクゲート（NMI、#DF）・コールゲート・LDT は未実装です（`LLDT`/`LTR` はセレクタを保持するだけ）。#PF 配送中の再フォルトはダブルフォルトとして停止します。
 - SSE/MMX、`SYSENTER`/`SYSEXIT`、`FXSAVE`/`FXRSTOR` は未実装で、`CPUID` でも報告しません。
 - `HLT` は、配送できる割り込みが無ければ次のイベント（タイマ周期・サービス周期・保存・上限）まで命令数（= ゲストの時刻）を進めます。IF=0 と `--noirq` のときは待てないので次の命令へ進みます。スキップした量は終了時に `[halt]` として標準エラー出力に出ます。`LOCK` プレフィックスは無視します。
