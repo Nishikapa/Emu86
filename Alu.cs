@@ -100,6 +100,98 @@ static public class Alu
     // PF: 結果の下位 8 ビットの 1 の個数が偶数なら 1。
     static public bool Par(uint v) => (System.Numerics.BitOperations.PopCount(v & 0xFF) & 1) == 0;
 
+    // DIV/IDIV: AX/AL、DX:AX/AX、EDX:EAX/EAX を商と剰余で上書きする。0 除算は例外(ランナーが停止する)。
+    static internal void Divide(CPU c, int type, uint divisor, bool signed)
+    {
+        if (divisor == 0) throw new DivideByZeroException();
+        if (!signed)
+        {
+            if (type == 0) { uint dividend = c.ax; c.al = (byte)(dividend / divisor); c.ah = (byte)(dividend % divisor); }
+            else if (type == 1) { var dividend = ((uint)c.dx << 16) | c.ax; c.ax = (ushort)(dividend / divisor); c.dx = (ushort)(dividend % divisor); }
+            else { var dividend = ((ulong)c.edx << 32) | c.eax; c.eax = (uint)(dividend / divisor); c.edx = (uint)(dividend % divisor); }
+            return;
+        }
+        if (type == 0) { int dividend = (short)c.ax; c.al = (byte)(sbyte)(dividend / (sbyte)(byte)divisor); c.ah = (byte)(sbyte)(dividend % (sbyte)(byte)divisor); }
+        else if (type == 1) { var dividend = (int)(((uint)c.dx << 16) | c.ax); c.ax = (ushort)(short)(dividend / (short)(ushort)divisor); c.dx = (ushort)(short)(dividend % (short)(ushort)divisor); }
+        else { var dividend = (long)(((ulong)c.edx << 32) | c.eax); c.eax = (uint)(dividend / (int)divisor); c.edx = (uint)(dividend % (int)divisor); }
+    }
+
+    // BCD 調整: 0 AAA、1 AAS、2 DAA、3 DAS、4 AAM(基数 imm。0 は呼び出し側で #DE)、5 AAD。
+    static internal void AdjustDecimal(CPU cpu, int kind, uint imm)
+    {
+        switch (kind)
+        {
+            case 0 or 1:
+            {
+                var adjust = (cpu.al & 0x0F) > 9 || cpu.af;
+                if (adjust)
+                {
+                    if (kind == 0) { cpu.al = (byte)(cpu.al + 6); cpu.ah = (byte)(cpu.ah + 1); }
+                    else { cpu.al = (byte)(cpu.al - 6); cpu.ah = (byte)(cpu.ah - 1); }
+                }
+                cpu.af = adjust; cpu.cf = adjust;
+                cpu.al = (byte)(cpu.al & 0x0F);
+                return;
+            }
+            case 2 or 3:
+            {
+                byte old = cpu.al; var subtract = kind == 3;
+                var af = (old & 0x0F) > 9 || cpu.af;
+                var cf = cpu.cf || old > 0x99;
+                int al = old;
+                if (af) al = subtract ? al - 6 : al + 6;
+                if (cf) al = subtract ? al - 0x60 : al + 0x60;
+                cpu.al = (byte)al;
+                cpu.af = af; cpu.cf = cf;
+                break;
+            }
+            case 4: { byte al = cpu.al; cpu.ah = (byte)(al / imm); cpu.al = (byte)(al % imm); break; }
+            default: cpu.al = (byte)(cpu.al + cpu.ah * imm); cpu.ah = 0; break;
+        }
+        cpu.zf = cpu.al == 0; cpu.sf = (cpu.al & 0x80) != 0; cpu.pf = Par(cpu.al);
+    }
+
+    // POPF: CPL>0(V86 モードも CPL=3)では IOPL は変更不可、CPL>IOPL なら IF も変更不可。VM/RF は POPF では変わらない。
+    static internal void PopFlags(CPU cpu, int type, uint value)
+    {
+        var next = type == 2 ? value : (cpu.eflags & 0xFFFF0000) | (value & 0xFFFF);
+        if (cpu.pe && cpu.cpl != 0)
+        {
+            const uint IOPL = 0x3000, IF = 0x200, VM = 0x20000, RF = 0x10000;
+            var keep = IOPL | VM | RF;
+            if (cpu.cpl > ((cpu.eflags >> 12) & 3)) keep |= IF;
+            next = (next & ~keep) | (cpu.eflags & keep);
+        }
+        cpu.eflags = next;
+    }
+
+    // SAHF: FLAGS の下位 8 ビットを AH で置き換える(bit1 は常に 1)。
+    static internal void Sahf(CPU cpu) => cpu.eflags = (cpu.eflags & 0xFFFFFF00) | cpu.ah | 0x02u;
+
+    // SHLD/SHRD の結果と CF/OF(count は 1..bits-1 を想定。16 ビットで count>=16 は未定義なので bits に丸める)。
+    static internal (uint result, bool cf, bool of) DoubleShift(uint dst, uint src, int count, int bits, bool left)
+    {
+        uint mask = bits == 16 ? 0xFFFFu : 0xFFFFFFFFu;
+        uint msb = bits == 16 ? 0x8000u : 0x80000000u;
+        ulong d = dst & mask, s = src & mask;
+        int rest = bits - count;
+        if (rest <= 0) rest = bits;
+        uint result;
+        bool cf;
+        if (left)
+        {
+            result = (uint)(((d << count) | (s >> rest)) & mask);
+            cf = ((dst >> rest) & 1) != 0;         // dst から押し出された最後のビット
+        }
+        else
+        {
+            result = (uint)(((d >> count) | (s << rest)) & mask);
+            cf = ((dst >> (count - 1)) & 1) != 0;
+        }
+        bool of = count == 1 && (((result & msb) != 0) != ((dst & msb) != 0));
+        return (result, cf, of);
+    }
+
     // Group2 シフト/ローテートを 1bit ずつ count 回適用する。
     // kind: 0=ROL 1=ROR 2=RCL 3=RCR 4=SHL/SAL 5=SHR 6=SAL 7=SAR
     static internal (uint result, bool cf, bool of) ComputeShift(uint v, int count, int kind, int bits, bool cfIn)

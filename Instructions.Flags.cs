@@ -3,6 +3,7 @@ using static Emu86.Conversions;
 using static Emu86.Unit;
 using static Emu86.States;
 using static Emu86.CpuStates;
+using static Emu86.Alu;
 
 namespace Emu86;
 
@@ -33,12 +34,7 @@ static partial class Instructions
     // SAHF (0x9E): AH の下位8bit を FLAGS の下位8bit(SF/ZF/AF/PF/CF)へ転送する。
     static State<Unit> Sahf_9E =>
         from _1 in SetLog("Sahf_9E")
-        from _2 in SetCpu(cpu =>
-        {
-            // FLAGS 下位8bit のうち bit1 は常に 1。AH をそのまま反映する。
-            cpu.eflags = (cpu.eflags & 0xFFFFFF00) | cpu.ah | 0x02u;
-            return cpu;
-        })
+        from _2 in SetCpu(cpu => { Sahf(cpu); return cpu; })
         select unit;
 
     // LAHF (0x9F): FLAGS の下位8bit を AH へ転送する。
