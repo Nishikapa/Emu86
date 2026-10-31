@@ -35,6 +35,10 @@ static public class CpuStates
     static public State<Unit> SetCpu(Func<EmuEnvironment, CPU, CPU> func) =>
         (env, cpu, opcodes) => (true, unit, func(env, cpu), string.Empty);
 
+    // 環境への副作用だけを起こす(ポート出力・MSR・TLB・画面など)。CPU は変えない。
+    static public State<Unit> Effect(Action<EmuEnvironment, CPU> action) =>
+        (env, cpu, opcodes) => { action(env, cpu); return (true, unit, cpu, string.Empty); };
+
     static public State<Unit> SetCpu<T>(params (Accessor<CPU, T> acc, T value)[] arr) =>
         (env, cpu, opcodes) =>
         {
@@ -112,6 +116,29 @@ static public partial class Fetch
         GetMemoryDataIp16.Select(Conversions.ToTypeData),
         GetMemoryDataIp32.Select(Conversions.ToTypeData)
     ];
+
+    // オペコード末尾バイトの w ビット(bit0: 0=8 ビット、1=16/32 ビット)。2 バイト命令(0F xx)では 2 バイト目を見る。
+    static public readonly State<bool> WidthBit = Opecodes.Select(opecode => 0 != (opecode[^1] & 0x01));
+
+    // w ビットから決めた実効オペランド幅(type)。
+    static public readonly State<int> OperandTypeW =
+        from w in WidthBit
+        from type in OperandType(w)
+        select type;
+
+    // 符号拡張した imm8 を type の幅で(Group1 83、PUSH 6A、IMUL 6B)。
+    static public State<Data> Imm8SignExtended(int type) =>
+        GetMemoryDataIp8.Select(imm => ((uint)(sbyte)imm).ToTypeData(type));
+
+    // 分岐の相対オフセット。rel8 は符号拡張、rel16/rel32 は実効オペランドサイズに従う(rel16 は符号拡張)。
+    static public readonly State<int> Rel8 = GetMemoryDataIp8.Select(offset => (int)(sbyte)offset);
+
+    static public readonly State<int> RelNear =
+        from type in OperandType(true)
+        from offset in type == 2
+            ? GetMemoryDataIp32.Select(dd => (int)dd)
+            : GetMemoryDataIp16.Select(dw => (int)(short)dw)
+        select offset;
 }
 
 // State で書いた演算とフラグ更新(Calc、Group2 のシフト、条件判定、フラグ更新の State)。

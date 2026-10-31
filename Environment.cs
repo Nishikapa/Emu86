@@ -395,7 +395,7 @@ static public class DataAccess
     // CR 書き込み後はページング状態を env へ同期する(PG 切替・CR3 変更で TLB もフラッシュ)。
     static public State<Unit> SetCrReg(int reg, uint data) =>
         from _1 in GetControlRegister(reg).Set(data)
-        from _2 in SetCpu((env, cpu) => { EnvSyncPaging(env, cpu); return cpu; })
+        from _2 in Effect(EnvSyncPaging)
         select Unit.unit;
 
     static public State<Unit> SetRegData(int reg, Data data) =>
@@ -412,12 +412,18 @@ static public class DataAccess
     static private MemAddr EnvGetStackAddr(CPU cpu) =>
         (true, cpu.ss_base + (cpu.stack32 ? cpu.esp : cpu.sp));
 
+    // SP/ESP を delta だけ動かす(32 ビットスタックなら ESP、そうでなければ SP)。PUSH/POP/RET n/RETF n が使う。
+    static public State<Unit> StackAdjust(int delta) =>
+        SetCpu(cpu =>
+        {
+            if (cpu.stack32) cpu.esp = (uint)(cpu.esp + delta);
+            else cpu.sp = (ushort)(cpu.sp + delta);
+            return cpu;
+        });
+
     // SP/ESP をデータ長分減らしてからスタックトップへ書き込む（PUSH）。
     static public State<Unit> Push(Data data) =>
-        from stack32 in GetDataFromCpu(cpu => cpu.stack32)
-        from _1 in stack32 ?
-            _esp.Modify(esp => (uint)(esp - arrLen[data.type])) :
-            _sp.Modify(sp => (ushort)(sp - arrLen[data.type]))
+        from _1 in StackAdjust(-arrLen[data.type])
         from cpu in GetCpu
         from _2 in SetMemOrRegData(EnvGetStackAddr(cpu), data)
         select Unit.unit;
@@ -432,9 +438,7 @@ static public class DataAccess
             GetMemOrRegData16(addr),
             GetMemOrRegData32(addr)
         )
-        from _ in cpu.stack32 ?
-            _esp.Modify(esp => (uint)(esp + arrLen[type])) :
-            _sp.Modify(sp => (ushort)(sp + arrLen[type]))
+        from _ in StackAdjust(arrLen[type])
         select data;
 
     static public State<Unit> Push16(ushort value) =>
@@ -493,11 +497,7 @@ static public class DataAccess
 
     // MOV [moffs], AL/AX/EAX: アキュムレータを直接アドレス DS:offset へ書く。
     static public State<Unit> MovMoffsFromAcc(int type, uint offset) =>
-        SetCpu((env, cpu) =>
-        {
-            EnvWriteN(env, EnvMoffsAddr(cpu, offset), Bits(type) / 8, cpu.eax);
-            return cpu;
-        });
+        Effect((env, cpu) => EnvWriteN(env, EnvMoffsAddr(cpu, offset), Bits(type) / 8, cpu.eax));
 
     // セグメントレジスタ(ES/CS/SS/DS/FS/GS)を reg 番号で読み出す。
     static public State<ushort> GetSRegData(int reg) =>
@@ -790,7 +790,7 @@ static public class Interrupts
     // リアルモードの INT 19h(SeaBIOS の POST 完了後のブート)で VGA BIOS スタブを導入する
     // (SeaBIOS はレガシー ROM 領域を走査しないため、この時点で IVT 10h を差し替える)。
     static State<Unit> InterruptReal(int vector) =>
-        from _stub in SetCpu((env, cpu) => { if (vector == 0x19) VgaBiosStub.Install(env); return cpu; })
+        from _stub in Effect((env, _) => { if (vector == 0x19) VgaBiosStub.Install(env); })
         from fl in GetDataFromCpu(cpu => (ushort)cpu.eflags)
         from _1 in Push16(fl)
         from cs in GetSRegData(1)
