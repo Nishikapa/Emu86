@@ -245,6 +245,7 @@ public static class OpcodeTable
         ModRm(0x00, "Group6", "Ew", group: Group6); ModRm(0x01, "Group7", "Ms", group: Group7);
         ModRm(0x02, "LAR", "Gv,Ew"); ModRm(0x03, "LSL", "Gv,Ew");
         Set(0x06, "CLTS"); Set(0x08, "INVD"); Set(0x09, "WBINVD"); Set(0x0B, "UD2");
+        for (var hint = 0x18; hint <= 0x1F; hint++) ModRm(hint, hint == 0x18 ? "PREFETCH" : "NOP", "Ev"); // ヒント NOP(0F 1F /0 = 多バイト NOP)
         ModRm(0x20, "MOV", "Rd,Cd"); ModRm(0x21, "MOV", "Rd,Dd"); ModRm(0x22, "MOV", "Cd,Rd"); ModRm(0x23, "MOV", "Dd,Rd");
         Set(0x30, "WRMSR"); Set(0x31, "RDTSC"); Set(0x32, "RDMSR"); Set(0x33, "RDPMC");
         for (var condition = 0; condition < 16; condition++)

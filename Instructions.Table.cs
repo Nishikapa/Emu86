@@ -124,6 +124,7 @@ static partial class Instructions
         (0x0F, 0x02, 0x01, Lar_0F02),
         (0x0F, 0x03, 0x01, Lsl_0F03),
         (0x0F, 0x08, 0x02, CacheInvd_0F08_09),    // INVD / WBINVD (NOP 扱い)
+        (0x0F, 0x18, 0x08, HintNop_0F18_1F),      // PREFETCHh / 予約 NOP / NOP r/m(ModRM を消費するだけ)
         (0x0F, 0x20, 0x01, Mov_0F20),
         (0x0F, 0x21, 0x01, Mov_0F21),
         (0x0F, 0x23, 0x01, Mov_0F23),

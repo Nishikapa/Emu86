@@ -32,6 +32,7 @@ internal sealed class DiagnosticOptions
     public uint BreakEip { get; set; }
     public long BreakAt { get; set; }
     public long? UserPageFaultMin { get; set; }
+    public long? FaultLogMin { get; set; }
     public AddressRange EntryLog { get; set; }
     public AddressRange BreakRange { get; set; }
     public AddressRange? WriteLog { get; set; }
@@ -91,6 +92,8 @@ internal sealed class RunOptions
     [
         Flag("Run", "--resume", "Resume from the snapshot instead of booting from the reset vector", o => o.Resume = true),
         Of("Run", "--snapshot", "path", "Snapshot file to save to and resume from (default snapshot.snap)", Value, (o, v) => o.SnapshotPath = v),
+        Of("Run", "--ips", "count", "Instructions per guest second: the PIT, ACPI PM timer and RTC advance at this rate (default 50,000,000; a resumed snapshot keeps its own)",
+            Integer, (o, v) => GuestClock.DefaultInstructionsPerSecond = v < 1 ? throw new ArgumentException("--ips: expected 1 or more") : (long)v),
         Of("Run", "--rtc", "yyyy-MM-ddTHH:mm:ss", "Start the real-time clock at this guest time on a cold boot (default: the host's local time)", Timestamp, (o, v) => o.Rtc = v),
         Of("Run", "--screen", "path", "Save the VGA display as a PNG at each snapshot and when the run stops", Value, (o, v) => o.ScreenPath = v),
         Of("Run", "--limit", "count|max", "Stop after count instructions (max = run until the window closes)",
@@ -106,7 +109,7 @@ internal sealed class RunOptions
         Of("Run", "--com1", "name", @"Serve COM1 on \\.\pipe\name (WinDbg: com:pipe,port=\\.\pipe\name,resets=0,reconnect)", Value, (o, v) => o.Com1Pipe = v),
         Of("Run", "--com2", "name", @"Serve COM2 on \\.\pipe\name", Value, (o, v) => o.Com2Pipe = v),
         Flag("Run", "--boot-debug", "Drive NTLDR's F8 menu to boot Windows in Debugging Mode (COM2, 19200 bps)", o => o.BootDebug = true),
-        Of("Run", "--type", "[prompt=>]keys", "Type keys into the guest once the last screen line ends with prompt (repeatable, in order; \n is Enter); the run stops when the last prompt returns", Value, (o, v) => o.Type.Add(v)),
+        Of("Run", "--type", "[prompt=>]keys", "Type keys into the guest once the last screen line ends with prompt (repeatable, in order; \n is Enter, <down> <end> <c-x> <a-f2> are special keys; <graphics>, <text> or <2s> instead of a prompt waits for the display mode or guest seconds); the run stops when the last prompt returns", Value, (o, v) => o.Type.Add(v)),
         Flag("Run", "--help", "Show this help and exit", o => o.Help = true),
         Of("Disk", "--disk", "path", "Base disk image (default: sample.vhd or sample.vhdx in the current directory)", Value, (o, v) => o.DiskPath = v),
         Of("Disk", "--overlay", "path", "Writable overlay for --disk (default: the base path with .avhdx)", Value, (o, v) => o.OverlayPath = v),
@@ -124,6 +127,8 @@ internal sealed class RunOptions
         Flag("Diagnostics", "--vgalog", "Log VGA register writes to stderr", o => o.Diagnostics.VgaLog = true),
         Of("Diagnostics", "--intlog", "[lastCount]", "Log protected-mode interrupt deliveries; report the first 30 and the last lastCount (default 4)",
             IntLogTail, (o, v) => { o.Diagnostics.IntLog = true; o.Diagnostics.IntLogLast = v; }),
+        Of("Diagnostics", "--faultlog", "[minCount]", "Log the first 200 delivered faults other than #PF (#GP, #SS, #NP, #TS, ...) with the opcode and the top of the stack, from instruction minCount on (default 0)",
+            Integer.Optional(0), (o, v) => o.Diagnostics.FaultLogMin = v),
         Of("Diagnostics", "--upflog", "[minCount]", "Log user-mode page faults from instruction minCount on (default 0)",
             Integer.Optional(0), (o, v) => o.Diagnostics.UserPageFaultMin = v),
         Of("Diagnostics", "--breakeip", "hex", "Stop when EIP reaches the address", Hex, (o, v) => o.Diagnostics.BreakEip = v),

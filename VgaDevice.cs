@@ -36,6 +36,20 @@ public sealed class VgaDevice
     // プレーン 2 にフォントが無いとき(VGA BIOS 無しの直接書き込み)に使う 8×16 フォント(256 文字 × 16 行)。
     public byte[] FallbackFont;
 
+    /// Bochs VBE(DISPI)///////////////////////////////
+    // QEMU の標準 VGA と同じ拡張: ポート 0x1CE(インデックス)/0x1CF(データ)の 16 ビットレジスタで、PCI BAR0 の線形フレームバッファ(16MB)に
+    // 解像度・色深度・仮想幅・表示開始位置を設定する。Linux の bochs_drm(fbcon と X の modesetting)が使う。有効なあいだは描画が
+    // フレームバッファから行われ(Render)、レガシーの窓 0xA0000-0xAFFFF は Bank レジスタで選んだ 64KB をフレームバッファに映す。
+    // フレームバッファ自体への読み書きは Environment が PCI の BAR0(PciHost.LfbBase)で振り分ける。
+    public const int LfbSize = 16 << 20;
+    public const ushort VbeId = 0xB0C5;
+    public readonly byte[] Lfb = new byte[LfbSize];
+    // 0 ID、1 XRES、2 YRES、3 BPP、4 ENABLE(bit0 有効、bit1 GETCAPS、bit6 LFB、bit7 NOCLEARMEM)、5 BANK、6 VIRT_WIDTH、7 VIRT_HEIGHT、
+    // 8 X_OFFSET、9 Y_OFFSET、10 VIDEO_MEMORY_64K(読み出し専用)。
+    public readonly ushort[] Vbe = new ushort[11];
+    public ushort VbeIndex;
+    public bool VbeEnabled => (Vbe[4] & 1) != 0;
+
     // 既定 DAC の先頭 64 色(EGA 互換): 色 index の bit0-2 が B/G/R の高輝度(0x2A)、bit3-5 が低輝度(0x15)の加算。
     public static readonly byte[] EgaDac =
         [.. from index in Enumerable.Range(0, 64)
@@ -47,6 +61,10 @@ public sealed class VgaDevice
     public void Reset()
     {
         Array.Clear(Vram);
+        Array.Clear(Lfb);
+        Array.Clear(Vbe);
+        Vbe[0] = VbeId;
+        VbeIndex = 0;
         new byte[] { 0x03, 0x00, 0x03, 0x00, 0x02 }.CopyTo(Sequencer, 0);
         new byte[] { 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x0E, 0x00, 0xFF }.CopyTo(Graphics, 0);
         new byte[] { 0x5F, 0x4F, 0x50, 0x82, 0x55, 0x81, 0xBF, 0x1F, 0x00, 0x4F, 0x0D, 0x0E, 0x00, 0x00, 0x00, 0x00,
@@ -83,6 +101,11 @@ public sealed class VgaDevice
 
     public byte Read(uint physical)
     {
+        if (VbeEnabled && physical < WindowBase + 0x10000)
+        {
+            var bank = ((uint)Vbe[5] << 16) + (physical - WindowBase);
+            return bank < LfbSize ? Lfb[bank] : (byte)0xFF;
+        }
         if (!Map(physical, out var offset)) return 0xFF;
         int plane, unit;
         if (Chain4) { plane = (int)(offset & 3); unit = (int)(offset >> 2); }
@@ -104,6 +127,12 @@ public sealed class VgaDevice
 
     public void Write(uint physical, byte value)
     {
+        if (VbeEnabled && physical < WindowBase + 0x10000)
+        {
+            var bank = ((uint)Vbe[5] << 16) + (physical - WindowBase);
+            if (bank < LfbSize) WriteLfb(bank, value);
+            return;
+        }
         if (!Map(physical, out var offset)) return;
         Dirty = true;
         if (Chain4)
@@ -156,6 +185,39 @@ public sealed class VgaDevice
 
     public static bool IsPort(int port) =>
         port is 0x3B4 or 0x3B5 or 0x3BA or (>= 0x3C0 and <= 0x3CF) or 0x3D4 or 0x3D5 or 0x3DA;
+
+    public static bool IsVbePort(int port) => port is 0x1CE or 0x1CF;
+
+    // VBE レジスタ(16 ビット)。GETCAPS(ENABLE bit1)が立っているあいだ XRES/YRES/BPP は最大値を返す。
+    public ushort VbeRead(int port)
+    {
+        if (port == 0x1CE) return VbeIndex;
+        var getCaps = (Vbe[4] & 2) != 0;
+        return VbeIndex switch
+        {
+            1 when getCaps => 2560,
+            2 when getCaps => 1600,
+            3 when getCaps => 32,
+            10 => (ushort)(LfbSize >> 16),
+            < 11 => Vbe[VbeIndex],
+            _ => 0,
+        };
+    }
+
+    // ID の書き込みはバージョン交渉(対応する版をそのまま返す)。有効化(ENABLE bit0)で NOCLEARMEM(bit7)でなければフレームバッファを消す。
+    public void VbeWrite(int port, ushort value)
+    {
+        if (port == 0x1CE) { VbeIndex = value; return; }
+        if (Log) Console.Error.WriteLine($"[vga] vbe[{VbeIndex}] <- {value:x4}");
+        if (VbeIndex >= 10) return; // VIDEO_MEMORY_64K と範囲外は読み出し専用
+        if (VbeIndex == 0) { Vbe[0] = value is >= 0xB0C0 and <= VbeId ? value : VbeId; return; }
+        if (VbeIndex == 4 && (value & 1) != 0 && !VbeEnabled && (value & 0x80) == 0) Array.Clear(Lfb);
+        Vbe[VbeIndex] = value;
+        Dirty = true;
+    }
+
+    // 線形フレームバッファへの書き込み(オフセットの範囲検査は Environment が行う)。
+    public void WriteLfb(uint offset, byte value) { Lfb[offset] = value; Dirty = true; }
 
     /// レジスタ(Lens)とポート表 ///////////////////////////////////////////
     // Register は 1 つのポートの読み出し(tsc は Input Status 1 の垂直帰線用)と書き込み(null なら書けない)。
@@ -268,7 +330,7 @@ public sealed class VgaDevice
     }
 
     /// 描画 ///////////////////////////////////////////
-    public bool GraphicsMode => (Graphics[6] & 1) != 0;
+    public bool GraphicsMode => VbeEnabled || (Graphics[6] & 1) != 0;
     public bool Color256 => (Attribute[0x10] & 0x40) != 0 || Chain4;
     int Columns => Crtc[1] + 1;
     int ScanLines => (Crtc[0x12] | ((Crtc[7] & 0x02) << 7) | ((Crtc[7] & 0x40) << 3)) + 1;
@@ -292,6 +354,7 @@ public sealed class VgaDevice
     // 走査線はキャラクタ高さ(グラフィックでは行の繰り返し数)と倍走査で割る。
     public (int Width, int Height) Resolution()
     {
+        if (VbeEnabled) return (Math.Max(1, (int)Vbe[1]), Math.Max(1, (int)Vbe[2]));
         var rows = ScanLines / Math.Max(1, CharHeight * ((Crtc[9] & 0x80) != 0 ? 2 : 1));
         if (!GraphicsMode) return (Columns * 8, Math.Max(1, rows) * CharHeight);
         return (Color256 ? Columns * 4 : Columns * 8, Math.Max(1, rows));
@@ -300,6 +363,7 @@ public sealed class VgaDevice
     public string ModeDescription()
     {
         var (width, height) = Resolution();
+        if (VbeEnabled) return $"{width}x{height} {Vbe[3]} bpp (VBE)";
         return GraphicsMode
             ? $"{width}x{height} {(Color256 ? "256" : "16")} colors"
             : $"text {Columns}x{height / CharHeight}";
@@ -329,7 +393,8 @@ public sealed class VgaDevice
         var (width, height) = Resolution();
         if (buffer.Length < width * height) throw new ArgumentException("buffer is too small", nameof(buffer));
         Dirty = false;
-        if (GraphicsMode)
+        if (VbeEnabled) RenderLfb(buffer, width, height);
+        else if (GraphicsMode)
         {
             if (Color256) RenderChain4(buffer, width, height);
             else RenderPlanar(buffer, width, height);
@@ -338,6 +403,45 @@ public sealed class VgaDevice
             RenderText(buffer, width, height);
         return (width, height);
     }
+
+    // VBE の線形フレームバッファ: 32/24 ビットは xRGB、16 は RGB565、15 は RGB555、8 は DAC のパレット。仮想幅(VIRT_WIDTH)が行のピッチ、
+    // X/Y_OFFSET が表示開始位置(bochs_drm のページフリップ)。フレームバッファの外は黒。
+    void RenderLfb(uint[] buffer, int width, int height)
+    {
+        int bpp = Vbe[3], bytesPerPixel = Math.Max(1, (bpp + 7) / 8);
+        var stride = (Vbe[6] == 0 ? width : Vbe[6]) * bytesPerPixel;
+        var start = (long)Vbe[9] * stride + (long)Vbe[8] * bytesPerPixel;
+        uint[] palette = null;
+        if (bpp == 8) { palette = new uint[256]; for (var index = 0; index < 256; index++) palette[index] = DacColor(index); }
+        for (var y = 0; y < height; y++)
+        {
+            var row = start + (long)y * stride;
+            for (var x = 0; x < width; x++)
+            {
+                var offset = row + (long)x * bytesPerPixel;
+                var color = 0xFF000000u;
+                if (offset >= 0 && offset + bytesPerPixel <= LfbSize)
+                {
+                    var at = (int)offset;
+                    color = bpp switch
+                    {
+                        32 or 24 => 0xFF000000u | Lfb[at] | ((uint)Lfb[at + 1] << 8) | ((uint)Lfb[at + 2] << 16),
+                        16 => Rgb565(Lfb[at] | (Lfb[at + 1] << 8)),
+                        15 => Rgb555(Lfb[at] | (Lfb[at + 1] << 8)),
+                        8 => palette[Lfb[at]],
+                        _ => 0xFF000000u,
+                    };
+                }
+                buffer[y * width + x] = color;
+            }
+        }
+    }
+
+    static uint Rgb565(int value) =>
+        0xFF000000u | ((uint)(((value >> 11) & 0x1F) * 255 / 31) << 16) | ((uint)(((value >> 5) & 0x3F) * 255 / 63) << 8) | (uint)((value & 0x1F) * 255 / 31);
+
+    static uint Rgb555(int value) =>
+        0xFF000000u | ((uint)(((value >> 10) & 0x1F) * 255 / 31) << 16) | ((uint)(((value >> 5) & 0x1F) * 255 / 31) << 8) | (uint)((value & 0x1F) * 255 / 31);
 
     void RenderChain4(uint[] buffer, int width, int height)
     {
@@ -440,13 +544,17 @@ public sealed class VgaDevice
         .U8(v => v.MiscOutput, (v, x) => v.MiscOutput = x)
         .U8(v => v.FeatureControl, (v, x) => v.FeatureControl = x)
         .Bool(v => v.AttributeData, (v, x) => v.AttributeData = x)
-        .Bytes(v => v.latch);
+        .Bytes(v => v.latch)
+        // v12: Bochs VBE のレジスタと線形フレームバッファ。
+        .U16s(v => v.Vbe, since: 12)
+        .U16(v => v.VbeIndex, (v, x) => v.VbeIndex = x, since: 12)
+        .Bytes(v => v.Lfb, since: 12);
 
     public void SaveState(BinaryWriter writer) => Layout.Save(writer, this);
 
-    public void LoadState(BinaryReader reader)
+    public void LoadState(BinaryReader reader, int version = SnapshotStore.Version)
     {
-        Layout.Load(reader, this, SnapshotStore.Version);
+        Layout.Load(reader, this, version);
         Dirty = true;
     }
 }

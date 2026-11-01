@@ -88,7 +88,11 @@ public partial class EmuEnvironment
         .U16(e => e.Gpe0Sts, (e, v) => e.Gpe0Sts = v)
         .U16(e => e.Gpe0En, (e, v) => e.Gpe0En = v)
         .U32s(e => e.Dr)
-        .Custom((writer, e) => e.Ata?.SaveInterruptState(writer), (reader, e) => e.Ata?.LoadInterruptState(reader));
+        .Custom((writer, e) => e.Ata?.SaveInterruptState(writer), (reader, e) => e.Ata?.LoadInterruptState(reader))
+        // v11: ゲストの時計(1 秒 = N 命令)と、再装填値・モードどおりに数える PIT のチャネル 0/2(docs/adr/0004)。
+        .I64(e => e.Clock.InstructionsPerSecond, (e, v) => e.Clock.InstructionsPerSecond = v, since: 11)
+        .Nested(e => e.Pit.Channel0, PitDevice.Channel.Layout, since: 11)
+        .Nested(e => e.Pit.Channel2, PitDevice.Channel.Layout, since: 11);
 
     public void SaveState(BinaryWriter writer) => Memory.Save(writer, this);
 
@@ -109,5 +113,9 @@ public partial class EmuEnvironment
 
     internal void SaveDeviceState(BinaryWriter writer) => Devices.Save(writer, this);
 
-    internal void LoadDeviceState(BinaryReader reader) => Devices.Load(reader, this, SnapshotStore.Version);
+    internal void LoadDeviceState(BinaryReader reader, int version)
+    {
+        Devices.Load(reader, this, version);
+        Pit.Changed = true; // 次の IRQ0 の時刻を取り直す(v10 以前は PIT の設定が無いので既定の 18.2 Hz になる)
+    }
 }

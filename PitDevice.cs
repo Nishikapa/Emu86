@@ -1,98 +1,194 @@
 namespace Emu86;
 
-internal sealed class PitDevice
+// 8254 PIT(docs/adr/0004)。チャネル 0(IRQ0)と 2(スピーカ、TSC 較正)を、再装填値とモードどおりにゲストの時計
+// (命令数 → 1.193182 MHz のティック)で数える。カウントは「開始時刻からの経過ティック」から計算するだけで、周期ごとの更新はしない。
+//   モード 0/1/4/5: 1 回だけ数える(終端で OUT が上がり、IRQ0 は 1 回。終端後も 16 ビットで回り続ける)。
+//   モード 2/3: 周期的(3 は 2 ずつ減り、前半 OUT=1・後半 0)。
+//   チャネル 0 の設定が変わると Changed が立ち、ランナーが次の IRQ0 の時刻(NextTimerIrq)を計算し直す。
+//   ポート 0x61: bit0 = チャネル 2 のゲート(開いたところから数える)、bit1 = スピーカ、bit4 = DRAM リフレッシュ(15.085µs = 18 ティックごとに反転)、
+//   bit5 = チャネル 2 の OUT。チャネル 1(DRAM リフレッシュ)は数えない。
+internal sealed class PitDevice(GuestClock clock)
 {
-    public ushort Counter = 0xFFFF;
-    public ushort Latched = 0xFFFF;
-    public int ReadPhase;
-    public byte Port61;
-    public byte Refresh;
-    public ushort Channel2Counter = 0xFFFF;
-    public int Channel2WritePhase;
-    public int Channel2ReadPhase;
-    public bool Channel2Armed;
-    public int Channel2Wait;
-    public bool StatusPending;
+    public sealed class Channel
+    {
+        public ushort Reload;              // 0 = 65536
+        public byte Mode = 3;
+        public byte Access = 3;            // 1 下位、2 上位、3 下位→上位
+        public byte WritePhase, ReadPhase;
+        public ushort Pending;             // 下位→上位の書き込み途中の下位バイト
+        public ulong Started;              // カウント開始(再装填値を書き終えた、またはゲートが開いた)時刻
+        public bool Programmed;
+        public int Latched = -1;           // ラッチしたカウント(-1 = 無し)
+        public int StatusLatched = -1;     // ラッチした状態バイト(-1 = 無し)
 
-    public byte Read(int port)
+        public uint Period => Reload == 0 ? 65536u : Reload;
+        public bool OneShot => Mode is 0 or 1 or 4 or 5;
+
+        internal static readonly Codec<Channel> Layout = new Codec<Channel>()
+            .U16(c => c.Reload, (c, v) => c.Reload = v)
+            .U8(c => c.Mode, (c, v) => c.Mode = v)
+            .U8(c => c.Access, (c, v) => c.Access = v)
+            .U8(c => c.WritePhase, (c, v) => c.WritePhase = v)
+            .U8(c => c.ReadPhase, (c, v) => c.ReadPhase = v)
+            .U16(c => c.Pending, (c, v) => c.Pending = v)
+            .U64(c => c.Started, (c, v) => c.Started = v)
+            .Bool(c => c.Programmed, (c, v) => c.Programmed = v)
+            .I32(c => c.Latched, (c, v) => c.Latched = v)
+            .I32(c => c.StatusLatched, (c, v) => c.StatusLatched = v);
+    }
+
+    public readonly Channel Channel0 = new(), Channel2 = new();
+    public byte Port61;
+    // チャネル 0 の設定が変わった(ランナーが NextTimerIrq を取り直す)。
+    public bool Changed = true;
+
+    ulong Elapsed(Channel channel, ulong tsc) => tsc > channel.Started ? clock.PitTicks(tsc - channel.Started) : 0;
+
+    // 現在のカウント(周期モードは 1..Period。モード 3 は 2 ずつ減る)。
+    public int Count(Channel channel, ulong tsc)
+    {
+        var elapsed = Elapsed(channel, tsc);
+        var period = channel.Period;
+        if (channel.OneShot) return (int)((period - elapsed) & 0xFFFF);
+        if (channel.Mode == 3) return (int)(period - (2 * elapsed) % period);
+        return (int)(period - elapsed % period);
+    }
+
+    // OUT: モード 0 系は終端で 1、モード 2 は終端の 1 ティックだけ 0、モード 3 は前半 1・後半 0。
+    // ゲートが閉じたチャネル 2 は数えない(モード 2/3 は 1、1 回だけのモードは 0)。
+    public bool Out(Channel channel, ulong tsc, bool gate = true)
+    {
+        if (!gate) return !channel.OneShot;
+        var elapsed = Elapsed(channel, tsc);
+        var period = channel.Period;
+        return channel.Mode switch
+        {
+            0 or 1 or 4 or 5 => elapsed >= period,
+            2 => elapsed % period != period - 1,
+            _ => elapsed % period < (period + 1) / 2,
+        };
+    }
+
+    // 次に IRQ0 が立つ命令数(tsc より後)。1 回だけのモードで終端を過ぎていれば long.MaxValue(次の設定まで立たない)。
+    public long NextTimerIrq(ulong tsc)
+    {
+        var channel = Channel0;
+        var period = channel.Period;
+        var elapsed = Elapsed(channel, tsc);
+        if (channel.OneShot)
+            return elapsed >= period ? long.MaxValue : Math.Max((long)(channel.Started + clock.Instructions(period, GuestClock.PitHz)), (long)tsc + 1);
+        var next = channel.Started + clock.Instructions((elapsed / period + 1) * period, GuestClock.PitHz);
+        return Math.Max((long)next, (long)tsc + 1);
+    }
+
+    public byte Read(int port, ulong tsc) => port switch
+    {
+        0x40 => ReadCount(Channel0, tsc),
+        0x42 => ReadCount(Channel2, tsc),
+        0x61 => (byte)((Port61 & 0x0F)
+            | (((clock.PitTicks(tsc) / 18) & 1) != 0 ? 0x10 : 0)
+            | (Out(Channel2, tsc, (Port61 & 1) != 0) ? 0x20 : 0)),
+        _ => throw new ArgumentOutOfRangeException(nameof(port)),
+    };
+
+    // ラッチした状態 → ラッチしたカウント → 現在のカウントの順。下位→上位の読み出しは 2 バイトを同じカウントから返す。
+    byte ReadCount(Channel channel, ulong tsc)
+    {
+        if (channel.StatusLatched >= 0)
+        {
+            var status = (byte)channel.StatusLatched;
+            channel.StatusLatched = -1;
+            return status;
+        }
+        var count = channel.Latched >= 0 ? channel.Latched : Count(channel, tsc);
+        switch (channel.Access)
+        {
+            case 1: channel.Latched = -1; return (byte)count;
+            case 2: channel.Latched = -1; return (byte)(count >> 8);
+            default:
+                if (channel.ReadPhase == 0)
+                {
+                    channel.Latched = count;
+                    channel.ReadPhase = 1;
+                    return (byte)count;
+                }
+                channel.ReadPhase = 0;
+                channel.Latched = -1;
+                return (byte)(count >> 8);
+        }
+    }
+
+    public void Write(int port, byte value, ulong tsc)
     {
         switch (port)
         {
-            case 0x61: // システム制御ポートB(NMI/PIT ch2 ゲート・スピーカ)
-                // bit4 = リフレッシュタイマ(読むたびにトグルさせて DRAM リフレッシュ
-                //         監視のディレイループを進める)。
-                // bit5 = PIT ch2 の OUT。ゲート有効かつ ch2 がプログラム済みなら、
-                //         数回読んだ後に High にして TSC 校正のウェイトを抜けさせる。
-                Refresh ^= 0x10;
-                byte out2 = 0;
-                if ((Port61 & 1) != 0 && Channel2Armed)
-                {
-                    if (Channel2Wait > 0) Channel2Wait--;
-                    else out2 = 0x20;
-                }
-                return (byte)((Port61 & 0x0F) | Refresh | out2);
-            case 0x42: // PIT チャネル2 データ(読み出しはラッチ値を返す)
-                byte c2 = (byte)(Channel2ReadPhase == 0 ? Channel2Counter : Channel2Counter >> 8);
-                Channel2ReadPhase ^= 1;
-                return c2;
-            case 0x40: // PIT チャネル0
-                // リードバックでステータスがラッチされていれば、まずそれを返す。
-                //   0x36 = OUT=0, NULL COUNT=0(カウント有効), lo/hi アクセス, モード3, 二進
-                // Linux の i8254 エントロピー読み(KASLR)は NULL COUNT ビットが
-                // 落ちるまでポーリングするため、これがないと無限ループになる。
-                if (StatusPending)
-                {
-                    StatusPending = false;
-                    return 0x36;
-                }
-                byte b = (byte)(ReadPhase == 0 ? Latched : Latched >> 8);
-                ReadPhase ^= 1;
-                return b;
+            case 0x43: Control(value, tsc); break;
+            case 0x40: Load(Channel0, value, tsc); Changed = true; break;
+            case 0x42: Load(Channel2, value, tsc); break;
+            case 0x61:
+                if ((value & 1) != 0 && (Port61 & 1) == 0) Channel2.Started = tsc; // ゲートが開いたところから数える
+                Port61 = (byte)(value & 0x0F);
+                break;
             default: throw new ArgumentOutOfRangeException(nameof(port));
         }
     }
 
-    public void Write(int port, byte val)
+    // 制御語: bit7-6 チャネル(3 = リードバック)、bit5-4 アクセス(0 = カウントのラッチ)、bit3-1 モード、bit0 BCD(無視)。
+    void Control(byte value, ulong tsc)
     {
-        switch (port)
+        var select = value >> 6;
+        if (select == 3)
         {
-            case 0x43: // PIT コントロール: ラッチ/リードバックでカウンタを捕捉し時刻を進める
-                //   カウンタラッチ  : bit5-4 = 00
-                //   リードバック    : bit7-6 = 11。bit5=0 でカウント、bit4=0 でステータスをラッチ
-                int channel = (val >> 6) & 3;
-                if (channel == 2)
-                {
-                    // ch2 のプログラム開始。lo/hi 書き込みの位相をリセットする。
-                    Channel2WritePhase = 0;
-                    Channel2Armed = false;
-                    break;
-                }
-                bool readback = (val & 0xC0) == 0xC0;
-                bool latch = (val & 0x30) == 0 || (readback && (val & 0x20) == 0);
-                if (latch)
-                {
-                    Latched = Counter;
-                    ReadPhase = 0;
-                    Counter -= 0x100; // 経過時間の代用として下向きに減算する
-                }
-                if (readback && (val & 0x10) == 0)
-                    StatusPending = true;
-                break;
-            case 0x42: // PIT チャネル2 カウント(lo→hi)。全部書けたら「短時間で満了」として武装する。
-                if (Channel2WritePhase == 0) { Channel2Counter = val; Channel2WritePhase = 1; }
-                else
-                {
-                    Channel2Counter = (ushort)((Channel2Counter & 0xFF) | (val << 8));
-                    Channel2WritePhase = 0;
-                    Channel2Armed = true;
-                    Channel2Wait = 2; // 数回 0x61 を読んだら OUT2 を立てる(ウェイトを抜けさせる)
-                }
-                break;
-            case 0x61: // システム制御ポートB。低位ビット(ゲート/スピーカ)を保持する。
-                Port61 = val;
-                if ((val & 1) == 0) Channel2Armed = false; // ゲート断で武装解除
-                break;
-            default: throw new ArgumentOutOfRangeException(nameof(port));
+            // リードバック: bit5=0 でカウント、bit4=0 で状態をラッチ。bit1 = チャネル 0、bit3 = チャネル 2。
+            if ((value & 0x02) != 0) ReadBack(Channel0, value, tsc, gate: true);
+            if ((value & 0x08) != 0) ReadBack(Channel2, value, tsc, gate: (Port61 & 1) != 0);
+            return;
         }
+        var channel = select == 0 ? Channel0 : select == 2 ? Channel2 : null;
+        if (channel == null) return;
+        var access = (value >> 4) & 3;
+        if (access == 0) { Latch(channel, tsc); return; }
+        channel.Access = (byte)access;
+        var mode = (value >> 1) & 7;
+        channel.Mode = (byte)(mode >= 6 ? mode - 4 : mode);
+        channel.WritePhase = 0;
+        channel.ReadPhase = 0;
+        if (channel == Channel0) Changed = true;
+    }
+
+    void ReadBack(Channel channel, byte value, ulong tsc, bool gate)
+    {
+        if ((value & 0x20) == 0) Latch(channel, tsc);
+        if ((value & 0x10) == 0 && channel.StatusLatched < 0)
+            channel.StatusLatched = (Out(channel, tsc, gate) ? 0x80 : 0) | (channel.Access << 4) | (channel.Mode << 1);
+    }
+
+    void Latch(Channel channel, ulong tsc)
+    {
+        if (channel.Latched < 0) channel.Latched = Count(channel, tsc);
+        channel.ReadPhase = 0;
+    }
+
+    // 再装填値の書き込み。書き終えたところからカウントを始める(1 回だけのモードの再設定もここで始め直す)。
+    void Load(Channel channel, byte value, ulong tsc)
+    {
+        switch (channel.Access)
+        {
+            case 1: channel.Reload = value; break;
+            case 2: channel.Reload = (ushort)(value << 8); break;
+            default:
+                if (channel.WritePhase == 0)
+                {
+                    channel.Pending = value;
+                    channel.WritePhase = 1;
+                    return;
+                }
+                channel.Reload = (ushort)(channel.Pending | (value << 8));
+                channel.WritePhase = 0;
+                break;
+        }
+        channel.Started = tsc;
+        channel.Programmed = true;
+        channel.Latched = -1;
     }
 }

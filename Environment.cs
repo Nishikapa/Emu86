@@ -169,6 +169,7 @@ static public class Mmu
             env.Translations.OnWrite(addr);
             env.Ram[addr] = val;
         }
+        else if (EnvLfbOffset(env, addr, 1, out var offset)) env.Vga.WriteLfb(offset, val);
     }
 
     static internal void EnvWriteWord(EmuEnvironment env, uint addr, ushort value) =>
@@ -216,6 +217,19 @@ static public class Mmu
                 memory[addr + 3] = (byte)(value >> 24);
             }
         }
+        else if (EnvLfbOffset(env, addr, size, out var offset))
+        {
+            // VGA の線形フレームバッファ(PCI BAR0): RAM と同じ並びで書く。
+            var lfb = env.Vga.Lfb;
+            lfb[offset] = (byte)value;
+            lfb[offset + 1] = (byte)(value >> 8);
+            if (size == 4)
+            {
+                lfb[offset + 2] = (byte)(value >> 16);
+                lfb[offset + 3] = (byte)(value >> 24);
+            }
+            env.Vga.Dirty = true;
+        }
         else
         {
             for (var byteIndex = 0; byteIndex < size; byteIndex++)
@@ -223,6 +237,8 @@ static public class Mmu
                 var physical = addr + (uint)byteIndex;
                 if (physical < (uint)memory.Length)
                     memory[physical] = (byte)(value >> (8 * byteIndex));
+                else if (EnvLfbOffset(env, physical, 1, out var lfbOffset))
+                    env.Vga.WriteLfb(lfbOffset, (byte)(value >> (8 * byteIndex)));
             }
         }
     }
@@ -235,9 +251,18 @@ static public class Mmu
         return addr < (uint)env.Ram.Length ? env.Ram[addr] : EnvReadOutsideRam(env, addr);
     }
 
-    // RAM 外の読み出し: PCI の拡張 ROM 窓(VGA BIOS)なら ROM の内容、それ以外はオープンバス 0xFF。
+    // RAM 外の読み出し: VGA の線形フレームバッファ(PCI BAR0)、PCI の拡張 ROM 窓(VGA BIOS)の内容、それ以外はオープンバス 0xFF。
     static byte EnvReadOutsideRam(EmuEnvironment env, uint addr) =>
-        env.Pci.RomContains(addr) ? env.Pci.RomRead(addr) : (byte)0xFF;
+        EnvLfbOffset(env, addr, 1, out var offset) ? env.Vga.Lfb[offset]
+        : env.Pci.RomContains(addr) ? env.Pci.RomRead(addr) : (byte)0xFF;
+
+    // PCI の VGA BAR0(線形フレームバッファ)の中なら、その先頭からのオフセット(size バイト全部が収まる場合)。
+    static bool EnvLfbOffset(EmuEnvironment env, uint addr, int size, out uint offset)
+    {
+        var lfb = env.Pci.LfbBase;
+        offset = addr - lfb;
+        return lfb != 0 && offset <= (uint)(VgaDevice.LfbSize - size);
+    }
 
     static internal ushort EnvGetMemoryData16(EmuEnvironment env, uint addr)
     {
@@ -249,8 +274,9 @@ static public class Mmu
         }
         addr = EnvAlias(addr);
         if (VgaDevice.Contains(addr)) return (ushort)(env.Vga.Read(addr) | (env.Vga.Read(addr + 1) << 8));
-        return addr + 2 <= (uint)env.Ram.Length ? BitConverter.ToUInt16(env.Ram, (int)addr)
-            : (ushort)(EnvReadOutsideRam(env, addr) | (EnvReadOutsideRam(env, addr + 1) << 8));
+        if (addr + 2 <= (uint)env.Ram.Length) return BitConverter.ToUInt16(env.Ram, (int)addr);
+        if (EnvLfbOffset(env, addr, 2, out var offset)) return BitConverter.ToUInt16(env.Vga.Lfb, (int)offset);
+        return (ushort)(EnvReadOutsideRam(env, addr) | (EnvReadOutsideRam(env, addr + 1) << 8));
     }
 
     static internal uint EnvGetMemoryData32(EmuEnvironment env, uint addr)
@@ -267,9 +293,10 @@ static public class Mmu
         addr = EnvAlias(addr);
         if (VgaDevice.Contains(addr))
             return (uint)(env.Vga.Read(addr) | (env.Vga.Read(addr + 1) << 8) | (env.Vga.Read(addr + 2) << 16) | (env.Vga.Read(addr + 3) << 24));
-        return addr + 4 <= (uint)env.Ram.Length ? BitConverter.ToUInt32(env.Ram, (int)addr)
-            : (uint)(EnvReadOutsideRam(env, addr) | (EnvReadOutsideRam(env, addr + 1) << 8)
-                | (EnvReadOutsideRam(env, addr + 2) << 16) | (EnvReadOutsideRam(env, addr + 3) << 24));
+        if (addr + 4 <= (uint)env.Ram.Length) return BitConverter.ToUInt32(env.Ram, (int)addr);
+        if (EnvLfbOffset(env, addr, 4, out var offset)) return BitConverter.ToUInt32(env.Vga.Lfb, (int)offset);
+        return (uint)(EnvReadOutsideRam(env, addr) | (EnvReadOutsideRam(env, addr + 1) << 8)
+            | (EnvReadOutsideRam(env, addr + 2) << 16) | (EnvReadOutsideRam(env, addr + 3) << 24));
     }
 }
 
@@ -1061,7 +1088,9 @@ public partial class EmuEnvironment : IDisposable
                 throw new ArgumentException("BIOS must fit in the first megabyte of RAM", nameof(bios));
             bios.CopyTo(Ram, 0x100000 - bios.Length);
         }
-        CmosRtc = new CmosDevice(Ram.Length);
+        CmosRtc = new CmosDevice(Ram.Length, Clock);
+        Pit = new PitDevice(Clock);
+        Acpi = new AcpiPmDevice(Clock);
         Translations = new TranslationCache(Ram.Length);
         Ata = ata;
     }
@@ -1078,6 +1107,9 @@ public partial class EmuEnvironment : IDisposable
 
     // PCI ホスト(コンフィグ機構 #1)。ata_piix を bind させるため PIIX3 IDE を露出する。
     public PciHost Pci = new();
+
+    // ゲストの時計(1 秒 = N 命令。docs/adr/0004)。スナップショットに保存する。
+    public readonly GuestClock Clock = new();
 
     // 物理メモリ(RamSize バイト。BIOS は先頭 1MB の末尾に置く)。VGA ウィンドウや ROM 窓はこの外で扱う。
     public byte[] Ram;

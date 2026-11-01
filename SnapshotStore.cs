@@ -6,7 +6,7 @@ namespace Emu86;
 public static class SnapshotStore
 {
     const string Magic = "EMU86SNP";
-    internal const int Version = 10;
+    internal const int Version = 12;
     const int HashSize = 32;
 
     public static void Save(string path, long count, CPU cpu, EmuEnvironment env)
@@ -81,8 +81,8 @@ public static class SnapshotStore
         cpu.LoadRuntimeState(reader, version);
         if (version >= 7)
         {
-            env.LoadDeviceState(reader);
-            if (version >= 8) env.Vga.LoadState(reader);
+            env.LoadDeviceState(reader, version);
+            if (version >= 8) env.Vga.LoadState(reader, version);
             else env.Vga.Reset();
             if (version >= 9) env.Mouse.LoadState(reader);
             if (version >= 10) { env.Com1.LoadState(reader); env.Com2.LoadState(reader); }

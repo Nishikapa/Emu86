@@ -1,20 +1,19 @@
 namespace Emu86;
 
 // CMOS RAM(128 バイト)と RTC(MC146818 互換)。
-// 時計はゲストの時刻(命令数: 100 万命令 = 1 秒、ランナーが Tsc に入れる)で進む。Data の時刻レジスタ(0/2/4/7/8/9/0x32)は
+// 時計はゲストの時刻(命令数。GuestClock が秒に換算する。ランナーが Tsc に入れる)で進む。Data の時刻レジスタ(0/2/4/7/8/9/0x32)は
 // 「Tsc = 0 のときの時刻」を常に BCD・24 時間制で保持し(電池で動く時計の初期値に相当)、読むときに Tsc 秒を足して
 // 状態 B の形式(BCD/二進、24/12 時間)で返し、書くときは Tsc 秒を引いて戻す。状態は CMOS RAM だけで持てるので、
 // スナップショットの再開でも時刻は連続する。曜日(6)は日付から求める。アラーム・周期割り込み(IRQ8)は未実装。
-internal sealed class CmosDevice
+internal sealed class CmosDevice(GuestClock clock)
 {
     public byte[] Data = new byte[128];
     public int Index;
 
     const int StatusA = 0x0A, StatusB = 0x0B, StatusC = 0x0C, StatusD = 0x0D, Century = 0x32;
-    const uint InstructionsPerSecond = 1_000_000;
     static readonly DateTime Default = new(2000, 1, 1, 0, 0, 0);
 
-    public CmosDevice(int memorySize)
+    public CmosDevice(int memorySize, GuestClock clock) : this(clock)
     {
         int baseKB = Math.Min(memorySize / 1024, 640);
         int extKB = Math.Clamp((memorySize - 0x100000) / 1024, 0, 15 * 1024);
@@ -75,14 +74,14 @@ internal sealed class CmosDevice
     // 時計を合わせる: time を「tsc の時点の時刻」として、Tsc = 0 の時刻を Data に保持する。
     public void SetClock(DateTime time, ulong tsc)
     {
-        var at0 = time.AddSeconds(-(double)(tsc / InstructionsPerSecond));
+        var at0 = time.AddSeconds(-(double)clock.Seconds(tsc));
         Data[0] = Bcd(at0.Second); Data[2] = Bcd(at0.Minute); Data[4] = Bcd(at0.Hour);
         Data[6] = Bcd((int)at0.DayOfWeek + 1);
         Data[7] = Bcd(at0.Day); Data[8] = Bcd(at0.Month); Data[9] = Bcd(at0.Year % 100); Data[Century] = Bcd(at0.Year / 100);
     }
 
     // 現在時刻 = Data の時刻(Tsc = 0)+ Tsc 秒。
-    public DateTime Current(ulong tsc) => Base().AddSeconds(tsc / InstructionsPerSecond);
+    public DateTime Current(ulong tsc) => Base().AddSeconds(clock.Seconds(tsc));
 
     DateTime Base() => Replace(Default, Bcd(Data[Century]) * 100 + Bcd(Data[9]), Bcd(Data[8]), Bcd(Data[7]), Bcd(Data[4]), Bcd(Data[2]), Bcd(Data[0]));
 

@@ -1,11 +1,12 @@
 namespace Emu86;
 
-internal sealed class AcpiPmDevice
+internal sealed class AcpiPmDevice(GuestClock clock)
 {
     public ushort Pm1Sts, Pm1En, Pm1Cnt;
     public ushort Gpe0Sts, Gpe0En;
 
-    public static uint Timer(ulong tsc) => (uint)(tsc * 3579545UL / 1_000_000UL) & 0xFFFFFF;
+    // PM タイマ(3.579545 MHz、24 ビット)はゲストの時計で進む。
+    public uint Timer(ulong tsc) => (uint)clock.PmTicks(tsc) & 0xFFFFFF;
 
     public uint ReadWord(int port, ulong tsc)
     {

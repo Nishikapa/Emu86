@@ -114,6 +114,9 @@ static class RunnerTests
         var cpu = new CPU { eip = 0x100, code32 = true, stack32 = true, esp = 0x8000, eflags = 2 };
         byte[] code = [0x40, 0x83, 0xC3, 0x03, 0xEB, 0xFA];
         code.CopyTo(env.Ram, 0x100);
+        // golden の時計: 1 ティック = 1 命令、PIT チャネル 0 を 10,000 命令周期に(期待値を採った当時の IRQ0 の位置と同じ)。
+        env.Clock.InstructionsPerSecond = GuestClock.PitHz;
+        Ports.EnvOutPort(env, 0x43, 0x34); Ports.EnvOutPort(env, 0x40, 0x10); Ports.EnvOutPort(env, 0x40, 0x27);
         setup?.Invoke(cpu, env);
         using var output = new StringWriter();
         using var trace = new StringWriter();

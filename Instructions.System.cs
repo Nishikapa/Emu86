@@ -102,6 +102,15 @@ static partial class Instructions
         from _ in SetLog("Nop_90")
         select unit;
 
+    // 0F 18 (PREFETCHh) と 0F 19-0F 1F (予約 NOP。0F 1F /0 = NOP r/m16/32: アセンブラが整列に使う多バイト NOP
+    // 「66 2E 0F 1F 84 00 00 00 00 00」)。ModRM・SIB・変位を読み進めるだけで、メモリには触れずフラグも変えない。
+    // Debian の librsvg(lightdm-gtk-greeter から)がこれを実行し、#UD だと SIGILL で greeter が落ちていた。
+    static State<Unit> HintNop_0F18_1F =>
+        from _1 in SetLog("HintNop_0F18_1F")
+        from m in ModRegRm()
+        from _2 in GetMemOrRegOffset(m.mod, m.rm)
+        select unit;
+
     // HLT: 印を立てるだけ。待機(次の割り込みまで仮想時間を進める)はランナーが行う。
     static State<Unit> Hlt_F4 =>
         from _1 in SetLog("Hlt_F4")

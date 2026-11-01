@@ -9,8 +9,8 @@ ADR やコードコメントで使う語の定義。「現状」は 2026-10-12 �
 | **CPU 固有状態** | 実機では CPU ごとに独立している状態: ページング状態、TLB、TSC、MSR、DR0-7、Local APIC | TSC/MSR/DR/TLB/ページング状態は `EmuEnvironment` にある(要移動) |
 | **環境(EmuEnvironment)** | 物理メモリ、I/O ポート、デバイス群、ディスクなど、全 vCPU が共有するもの | `EmuEnvironment` |
 | **実行ループ** | vCPU を進め、割り込みを配送し、デバイスをポンプし、停止条件を見る中枢 | `EmulationRunner.Run` |
-| **量子(クォンタム)** | 時分割方式で 1 つの vCPU を連続実行する命令数 | 未定義(候補: `IrqPeriod` = 1 万命令) |
-| **ゲスト時刻** | ゲストが観測する時間。TSC、PIT、ACPI PM タイマ、IRQ0 周期の基準 | 実行済み命令数(100 万命令 = 1 秒) |
+| **量子(クォンタム)** | 時分割方式で 1 つの vCPU を連続実行する命令数 | 未定義(候補: `ServicePeriod` = 1 万命令) |
+| **ゲスト時刻** | ゲストが観測する時間。TSC、PIT、ACPI PM タイマ、IRQ0 周期の基準 | 実行済み命令数(`GuestClock`: 既定で 5,000 万命令 = 1 秒、`--ips`。PIT は再装填値どおりの周期) |
 | **ホスト時刻** | 実時間(Stopwatch)。進捗表示のみに使用 | `swatch` |
 | **PIC** | 8259 割り込みコントローラ(マスタ/スレーブ)。単一 CPU 向け | `env.PicMaster*`/`PicSlave*` |
 | **Local APIC(LAPIC)** | CPU ごとの割り込みコントローラ。IPI 送信(ICR)、ローカルタイマ、EOI。MMIO 0xFEE00000 | 未実装 |

@@ -520,6 +520,7 @@ static class VgaTests
     static void BootMenuAutomation()
     {
         using var env = new EmuEnvironment(memory: new byte[0x100000]);
+        env.Clock.InstructionsPerSecond = 1_000_000; // KeyInterval = 0.2 秒 = 200,000 命令
         void Line(int row, string text, bool highlighted = false)
         {
             for (var column = 0; column < 80; column++)
@@ -562,6 +563,7 @@ static class VgaTests
     static void BootMenuTimeouts()
     {
         using var env = new EmuEnvironment(memory: new byte[0x100000]);
+        env.Clock.InstructionsPerSecond = 1_000_000;
         void Line(int row, string text, bool highlighted = false)
         {
             for (var column = 0; column < 80; column++)
@@ -629,7 +631,10 @@ static class VgaTests
         Equal("1e9e,1f9f,1c9c", string.Join(",", BootAutomation.Scancodes("as\n").Select(Convert.ToHexString)).ToLowerInvariant(), "unshifted keys");
         Equal("2a35b5aa,2a0c8caa,2a1e9eaa", string.Join(",", BootAutomation.Scancodes("?_A").Select(Convert.ToHexString)).ToLowerInvariant(), "shifted keys");
         Equal(0, BootAutomation.Scancodes("é").Count(), "unknown characters are skipped");
+        Equal("e050e0d0,2dad,1d2dad9d,383cbcb8,2a0f8faa,2a33b3aa,2cac,2cac,382cacb8", string.Join(",", BootAutomation.Scancodes("<down>x<c-x><a-f2><s-tab><zz<alt-z>").Select(Convert.ToHexString)).ToLowerInvariant(),
+            "special keys: <name>, modifiers c-/a-/s-, unknown names type '<' literally");
         using var env = new EmuEnvironment(memory: new byte[0x10000]);
+        env.Clock.InstructionsPerSecond = 1_000_000;
         using var output = new StringWriter();
         void Show(int row, string text) { for (var column = 0; column < 80; column++) env.Vga.Vram[row * 80 + column] = (byte)(column < text.Length ? text[column] : ' '); }
         Show(0, "Welcome to the shell");
@@ -643,6 +648,29 @@ static class VgaTests
         Equal(true, automation.Completed && automation.StopWhenCompleted, "typing completed and stops the run");
         Equal("26 A6 1F 9F 1C 9C", string.Join(" ", env.Keyboard.Injected.Select(scancode => scancode.ToString("X2"))), "injected scancodes for ls + Enter");
         Equal(true, output.ToString().Contains("[screen]  (initramfs)") && output.ToString().Contains("typing completed"), "screen dump and completion log");
+
+        // プロンプトの代わりの待ち: <graphics>(表示モード)と <2s>(ゲスト時間)。グラフィックモードでは画面を文字として出さない。
+        using var modes = new StringWriter();
+        while (env.Keyboard.Injected.TryDequeue(out _)) { }
+        var grub = BootAutomation.Typing(["<graphics>=>e", "<2s>=><down><end>"]);
+        grub.Step(env, 0, modes);
+        Equal(0, env.Keyboard.Injected.Count, "nothing typed in text mode");
+        env.Vga.Graphics[6] |= 1;
+        grub.Step(env, 50_000, modes);
+        Equal("12 92", string.Join(" ", env.Keyboard.Injected.Select(scancode => scancode.ToString("X2"))), "'e' typed once the display switches to graphics");
+        Equal(true, modes.ToString().Contains("[screen] (graphics mode)"), "graphics mode is not dumped as text");
+        while (env.Keyboard.Injected.TryDequeue(out _)) { }
+        env.Ram[0x41A] = 0x1E; env.Ram[0x41C] = 0x20; // BIOS のキーバッファにキーが残っている → KeyInterval まで待ってから打つ
+        var typed = 50_000L;
+        while (env.Keyboard.Injected.IsEmpty && typed < 10_000_000) { typed += 10_000; grub.Step(env, typed, modes); }
+        Equal(50_000 + 50_000 + 1_000_000 + 2_000_000 + 200_000, typed, "second step waits a quarter interval after 'e', the 1 s settle, 2 guest seconds, then a key interval for the full BIOS buffer");
+        Equal("E0 50 E0 D0", string.Join(" ", env.Keyboard.Injected.Select(scancode => scancode.ToString("X2"))), "<down> sent first");
+        while (env.Keyboard.Injected.TryDequeue(out _)) { }
+        env.Ram[0x41C] = 0x1E; // バッファが空いた → 次のキーは 1/4 間隔で続く
+        grub.Step(env, typed + 40_000, modes);
+        Equal(0, env.Keyboard.Injected.Count, "next key waits a quarter interval");
+        grub.Step(env, typed + 50_000, modes);
+        Equal("E0 4F E0 CF", string.Join(" ", env.Keyboard.Injected.Select(scancode => scancode.ToString("X2"))), "<end> follows once the BIOS buffer is empty");
     }
 
     static void Palette()
@@ -729,6 +757,88 @@ static class VgaTests
         Equal(0, image.GetPixel(12, 8).ToArgb() & 0xFFFFFF, "a cell holding character 0 is black");
     }
 
+    // Bochs VBE: 16 ビットレジスタ(0x1CE/0x1CF)、ID の交渉、有効化でフレームバッファを消す(NOCLEARMEM で残す)、PCI BAR0 の割り当てと
+    // RAM 外アクセスの振り分け(バイト・ワード・dword、末尾をまたぐ書き込み、範囲外はオープンバス)、Bank で切り替わるレガシー窓、
+    // 32/16/8 ビットの描画(VIRT_WIDTH と Y_OFFSET)。
+    static void Vbe()
+    {
+        using var env = new EmuEnvironment(memory: new byte[0x10000]);
+        var vga = env.Vga;
+        void Index(int index) => EnvOutPortN(env, 0x1CE, 2, (uint)index);
+        uint Data() => EnvInPortN(env, 0x1CF, 2);
+        void Set(int index, int value) { Index(index); EnvOutPortN(env, 0x1CF, 2, (uint)value); }
+        Index(0);
+        Equal(0xB0C5u, Data(), "DISPI ID");
+        Set(0, 0xB0C2); Equal(0xB0C2u, Data(), "ID negotiation keeps a supported version");
+        Set(0, 0x1234); Equal(0xB0C5u, Data(), "unsupported ID falls back to the latest");
+        Index(10); Equal(256u, Data(), "video memory in 64KB units (16MB)");
+        Set(10, 1); Equal(256u, Data(), "video memory is read-only");
+        Set(4, 2); Index(1); Equal(2560u, Data(), "GETCAPS: maximum width"); Index(3); Equal(32u, Data(), "GETCAPS: maximum depth");
+        Set(4, 0);
+        Set(1, 640); Set(2, 480); Set(3, 32); Set(6, 1024);
+        Equal(false, vga.GraphicsMode, "VBE registers alone do not switch the display");
+        vga.Lfb[0] = 0xAA;
+        Set(4, 0x41); // 有効 + LFB
+        Equal(true, vga.VbeEnabled && vga.GraphicsMode, "enable switches to the framebuffer");
+        Equal((byte)0, vga.Lfb[0], "enabling clears the framebuffer");
+        Equal((640, 480), vga.Resolution(), "resolution from XRES/YRES");
+        Equal("640x480 32 bpp (VBE)", vga.ModeDescription(), "mode description");
+        Set(4, 0); vga.Lfb[0] = 0xBB; Set(4, 0xC1);
+        Equal((byte)0xBB, vga.Lfb[0], "NOCLEARMEM keeps the framebuffer");
+        // PCI BAR0 の割り当てと、RAM 外のアクセスの振り分け。
+        void Config(int reg, uint value) { EnvOutPortN(env, 0xCF8, 4, 0x80000000u | (2u << 11) | (uint)reg); EnvOutPortN(env, 0xCFC, 4, value); }
+        uint ConfigRead(int reg) { EnvOutPortN(env, 0xCF8, 4, 0x80000000u | (2u << 11) | (uint)reg); return EnvInPortN(env, 0xCFC, 4); }
+        Equal(0x00000008u, ConfigRead(0x10), "BAR0: prefetchable memory, unassigned");
+        Equal(0u, env.Pci.LfbBase, "unassigned BAR0 maps nothing");
+        Equal((byte)0xFF, EnvGetMemoryData8(env, 0xFD000000), "no framebuffer before assignment");
+        Config(0x10, 0xFFFFFFFF);
+        Equal(0xFF000008u, ConfigRead(0x10), "BAR0 size query: 16MB");
+        Config(0x10, 0xFD000000);
+        Equal(0xFD000000u, env.Pci.LfbBase, "BAR0 assigned");
+        EnvWriteDword(env, 0xFD000010, 0x44332211);
+        EnvWriteWord(env, 0xFD000014, 0x6655);
+        EnvWriteByte(env, 0xFD000016, 0x77);
+        Equal("11,22,33,44,55,66,77", string.Join(",", vga.Lfb.Skip(16).Take(7).Select(value => value.ToString("x2"))), "writes land in the framebuffer");
+        Equal(0x44332211u, EnvGetMemoryData32(env, 0xFD000010), "dword read");
+        Equal((ushort)0x6655, EnvGetMemoryData16(env, 0xFD000014), "word read");
+        Equal((byte)0x77, EnvGetMemoryData8(env, 0xFD000016), "byte read");
+        Equal(0x77665544u, EnvGetMemoryData32(env, 0xFD000013), "unaligned dword read");
+        EnvWriteDword(env, 0xFDFFFFFE, 0x99887766); // 末尾をまたぐ: 収まる 2 バイトだけ書かれる
+        Equal("66,77", string.Join(",", vga.Lfb.Skip(VgaDevice.LfbSize - 2).Take(2).Select(value => value.ToString("x2"))), "write at the end of the framebuffer");
+        Equal(0xFFFF7766u, EnvGetMemoryData32(env, 0xFDFFFFFE), "read past the end is open bus");
+        Equal((byte)0xFF, EnvGetMemoryData8(env, 0xFE000000), "beyond the framebuffer");
+        // Bank で選んだ 64KB がレガシー窓(0xA0000-0xAFFFF)に映る。
+        Set(5, 3); vga.Lfb[3 * 0x10000 + 0x123] = 0x5A;
+        Equal((byte)0x5A, EnvGetMemoryData8(env, 0xA0123), "legacy window shows the selected bank");
+        EnvWriteByte(env, 0xA0124, 0x3C);
+        Equal((byte)0x3C, vga.Lfb[3 * 0x10000 + 0x124], "legacy window writes into the bank");
+        Equal((byte)0, vga.Vram[0x124], "planar VRAM untouched");
+        // 描画: 32 ビット(先頭の画素、VIRT_WIDTH と Y_OFFSET)、16 ビット、8 ビット(DAC)。
+        var pixels = new uint[640 * 480];
+        Array.Clear(vga.Lfb);
+        vga.Lfb[0] = 0x10; vga.Lfb[1] = 0x20; vga.Lfb[2] = 0x30; vga.Lfb[3] = 0xFF; // B G R x
+        vga.Render(pixels);
+        Equal(0xFF302010u, pixels[0], "32 bpp pixel (xRGB)");
+        Equal(0xFF000000u, pixels[1], "black elsewhere");
+        Set(9, 1); // Y_OFFSET = 1: 行 0 は仮想幅 1024 画素ぶん先から
+        vga.Lfb[1024 * 4 + 4] = 0x01; vga.Lfb[1024 * 4 + 5] = 0x02; vga.Lfb[1024 * 4 + 6] = 0x03;
+        vga.Render(pixels);
+        Equal(0xFF030201u, pixels[1], "Y_OFFSET and VIRT_WIDTH pick the row");
+        Set(9, 0); Set(6, 0); Set(3, 16);
+        vga.Lfb[0] = 0xE0; vga.Lfb[1] = 0xFF; // 0xFFE0 = R 31、G 63、B 0
+        vga.Render(pixels);
+        Equal(0xFFFFFF00u, pixels[0], "16 bpp RGB565");
+        Set(3, 8);
+        vga.Lfb[0] = 1; // DAC 1 = 青(00,00,2A → 00,00,AA)
+        vga.Render(pixels);
+        Equal(0xFF0000AAu, pixels[0], "8 bpp through the DAC");
+        Equal(false, vga.Dirty, "render clears the dirty flag");
+        EnvWriteByte(env, 0xFD000000, 2);
+        Equal(true, vga.Dirty, "framebuffer writes mark the display dirty");
+        Set(4, 0);
+        Equal(false, vga.GraphicsMode, "disable returns to the VGA core");
+    }
+
     // 名前付きのケース(ランナーが順に実行し、失敗したケース名を報告する)。
     public static (string Name, Action Run)[] Cases =>
     [
@@ -741,6 +851,7 @@ static class VgaTests
         ("bios-stub", BiosStub),
         ("bios-services", BiosServices),
         ("capture", Capture),
+        ("vbe", Vbe),
         ("pci-rom", PciRom),
         ("iret-privilege", IretPrivilegeCheck),
         ("mouse", Mouse),

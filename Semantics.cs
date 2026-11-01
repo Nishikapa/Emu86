@@ -614,6 +614,7 @@ public static class Semantics
             >= 0x88 and <= 0x8B => (op & 2) != 0 ? Move(Reg(), Read(Rm(), type), type, length) : Move(Rm(), Read(Reg(), type), type, length),
             0x8D when instruction.ModRm is { Mod: not 3 } => Move(Reg(), _ => new AddressExpr(instruction.ModRm.Value, instruction.AddressSize32, prefixes, false), typeW, length),
             0x90 => Advance(length),
+            >= 0x0F18 and <= 0x0F1F => Advance(length), // PREFETCHh と予約/多バイト NOP: ModRM を持つが何もしない
             >= 0x91 and <= 0x97 => Exchange(Acc(), Place.Register(op & 7), typeW, length),
             0x98 => operand32 ? MoveExtended(0, Acc(), 1, true, 2, length) : MoveExtended(0, Acc(), 0, true, 1, length),
             0x99 => Move(Place.Register(2), Read(Acc(), typeW).Select(value => (Expr)new SignFillExpr(value, typeW)), typeW, length),

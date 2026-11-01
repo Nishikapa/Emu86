@@ -9,14 +9,16 @@ namespace Emu86;
 //     2. テキスト VRAM に「Windows Advanced Options Menu」が出たら F8 をやめ、残っているキーを BDA のバッファから捨て、
 //        ハイライト行を見ながら ↓ を押して「Debugging Mode」を選び Enter。
 //     3. OS 選択メニュー(「Please select the operating system」)が出たら Enter。
-//   Typing (--type): 「プロンプト=>キー列」の手順を順に。画面の最後の行がプロンプトで終わるのを待ってキー列を打ち(\n は Enter)、
-//     最後の手順のプロンプトが戻ったら画面を出力して完了する(ランナーはそこで止まる)。ヘッドレスでゲストのシェルを調べる用。
+//   Typing (--type): 「プロンプト=>キー列」の手順を順に。画面の最後の行がプロンプトで終わるのを待ってキー列を打ち(\n は Enter、
+//     <down> <end> <c-x>(Ctrl+x)<a-f2>(Alt+F2)などの特殊キーは <名前>)、最後の手順のプロンプトが戻ったら画面を出力して完了する
+//     (ランナーはそこで止まる)。プロンプトの代わりに <graphics>/<text>(表示モードの切り替わりを待つ)、<2s>(ゲスト時間で待つ)も書ける。
+//     ヘッドレスでゲストのシェルや GRUB のメニューを操作する用。キーの間隔はゲストの時計(GuestClock)で 0.2 秒。
 public sealed class BootAutomation
 {
     // 手順書の 1 ステップが待つ条件。真を返したら次のステップへ進む。
     delegate bool Wait();
 
-    const long KeyInterval = 200_000; // 命令数(仮想時間で 0.2 秒)
+    long KeyInterval => env.Clock.InstructionsPerSecond / 5; // 命令数(ゲスト時間で 0.2 秒)
     const int MaxDownPresses = 40;
 
     readonly IEnumerator<Wait> script;
@@ -114,6 +116,7 @@ public sealed class BootAutomation
 
     // --type の手順: 各手順は「プロンプト=>キー列」(プロンプト省略可)。プロンプトは画面の最後の空でない行の末尾と比べる
     // (シェルがコマンドを終えてプロンプトを出し直したことの判定)。打った直後はまだエコーが出ていないので、少し待ってから見る。
+    // プロンプトの代わりに <graphics>/<text>(表示モードが切り替わるまで)、<2s>(ゲスト時間で 2 秒)も書ける。
     IEnumerable<Wait> TypingScript(IReadOnlyList<string> steps)
     {
         Status = "Type";
@@ -123,20 +126,34 @@ public sealed class BootAutomation
             var separator = step.IndexOf("=>", StringComparison.Ordinal);
             if (separator >= 0) prompt = step[..separator].Trim();
             var keys = Unescape(separator >= 0 ? step[(separator + 2)..] : step);
-            if (prompt.Length > 0) yield return Until(() => PromptShown(prompt), poll: KeyInterval / 4);
+            if (prompt.Length > 0) yield return PromptWait(prompt);
             DumpScreen(env, output);
             Log($"typing \"{keys.Replace("\n", "\\n")}\"");
             foreach (var key in Scancodes(keys))
             {
+                // BIOS 経由でキーを読むゲスト(GRUB など)は 1 キーの処理が遅く、BIOS のバッファ(16 キー)が溢れて取りこぼすので、
+                // バッファが空くまで待ってから打つ。保護モードの OS は BDA を使わないので、上限(KeyInterval)で先へ進む。
+                var deadline = count + KeyInterval;
+                yield return Until(() => BiosKeyBufferEmpty(env) || count >= deadline, poll: KeyInterval / 16);
                 env.Keyboard.Inject(key);
                 yield return Delay(KeyInterval / 4);
             }
             yield return Delay(KeyInterval * 5);
         }
-        if (prompt.Length > 0) yield return Until(() => PromptShown(prompt), poll: KeyInterval / 4);
+        if (prompt.Length > 0) yield return PromptWait(prompt);
         else yield return Delay(KeyInterval * 10);
         DumpScreen(env, output);
         Log("typing completed");
+    }
+
+    Wait PromptWait(string prompt)
+    {
+        if (prompt.Equals("<graphics>", StringComparison.OrdinalIgnoreCase)) return Until(() => env.Vga.GraphicsMode, poll: KeyInterval / 4);
+        if (prompt.Equals("<text>", StringComparison.OrdinalIgnoreCase)) return Until(() => !env.Vga.GraphicsMode, poll: KeyInterval / 4);
+        if (prompt.Length > 3 && prompt[0] == '<' && prompt.EndsWith("s>", StringComparison.OrdinalIgnoreCase)
+            && double.TryParse(prompt[1..^2], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var seconds))
+            return Delay((long)(seconds * env.Clock.InstructionsPerSecond));
+        return Until(() => PromptShown(prompt), poll: KeyInterval / 4);
     }
 
     bool PromptShown(string prompt) =>
@@ -154,16 +171,68 @@ public sealed class BootAutomation
         0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x1A, 0x1B, 0x27, 0x28, 0x29, 0x2B, 0x33, 0x34, 0x35, 0x39, 0x1C, 0x0F,
     ];
 
-    // 1 文字分のスキャンコード列(メイク/ブレーク、シフトが要る文字はシフトで挟む)。配列に無い文字は飛ばす。
+    // 特殊キーのメイクコード(<名前> で書く。E0 プレフィックス付きはそのまま 2 バイト)。
+    static readonly Dictionary<string, byte[]> SpecialKeys = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["esc"] = [0x01], ["bs"] = [0x0E], ["tab"] = [0x0F], ["enter"] = [0x1C], ["space"] = [0x39],
+        ["f1"] = [0x3B], ["f2"] = [0x3C], ["f3"] = [0x3D], ["f4"] = [0x3E], ["f5"] = [0x3F], ["f6"] = [0x40],
+        ["f7"] = [0x41], ["f8"] = [0x42], ["f9"] = [0x43], ["f10"] = [0x44], ["f11"] = [0x57], ["f12"] = [0x58],
+        ["home"] = [0xE0, 0x47], ["up"] = [0xE0, 0x48], ["pgup"] = [0xE0, 0x49], ["left"] = [0xE0, 0x4B], ["right"] = [0xE0, 0x4D],
+        ["end"] = [0xE0, 0x4F], ["down"] = [0xE0, 0x50], ["pgdn"] = [0xE0, 0x51], ["ins"] = [0xE0, 0x52], ["del"] = [0xE0, 0x53],
+    };
+
+    // 1 キー分のスキャンコード列(メイク/ブレーク、シフトが要る文字はシフトで挟む)。配列に無い文字は飛ばす。
+    // <名前> は特殊キー(<down>、<f2>)か修飾キー付き(<c-x> = Ctrl+x、<a-f2> = Alt+F2、<s-tab> = Shift+Tab)。名前が無ければ '<' は文字として打つ。
     public static IEnumerable<byte[]> Scancodes(string text)
     {
-        foreach (var character in text)
+        for (var position = 0; position < text.Length; position++)
         {
+            var character = text[position];
+            if (character == '<')
+            {
+                var close = text.IndexOf('>', position + 1);
+                if (close > position && TryParseKey(text[(position + 1)..close], out var sequence))
+                {
+                    yield return sequence;
+                    position = close;
+                    continue;
+                }
+            }
             var index = Unshifted.IndexOf(character);
             if (index >= 0) { var code = UnshiftedCodes[index]; yield return [code, (byte)(code | 0x80)]; continue; }
             index = Shifted.IndexOf(character);
             if (index >= 0) { var code = UnshiftedCodes[index]; yield return [0x2A, code, (byte)(code | 0x80), 0xAA]; }
         }
+    }
+
+    // "c-a-del" のように修飾キー(c = Ctrl 0x1D、a = Alt 0x38、s = Shift 0x2A)を '-' でつなぎ、最後がキー名か配列にある 1 文字。
+    static bool TryParseKey(string name, out byte[] sequence)
+    {
+        sequence = null;
+        var parts = name.Split('-');
+        var modifiers = new List<byte>();
+        foreach (var part in parts[..^1])
+        {
+            switch (part.ToLowerInvariant())
+            {
+                case "c" or "ctrl": modifiers.Add(0x1D); break;
+                case "a" or "alt": modifiers.Add(0x38); break;
+                case "s" or "shift": modifiers.Add(0x2A); break;
+                default: return false;
+            }
+        }
+        var key = parts[^1];
+        byte[] make;
+        if (SpecialKeys.TryGetValue(key, out var special)) make = special;
+        else if (key.Length == 1 && Unshifted.IndexOf(key[0]) is var index && index >= 0) make = [UnshiftedCodes[index]];
+        else return false;
+        var bytes = new List<byte>(modifiers);
+        bytes.AddRange(make);
+        bytes.AddRange(make[..^1]);
+        bytes.Add((byte)(make[^1] | 0x80));
+        for (var index = modifiers.Count - 1; index >= 0; index--) bytes.Add((byte)(modifiers[index] | 0x80));
+        sequence = bytes.ToArray();
+        return true;
     }
 
     // 現在の命令数から interval 命令数だけ待つ。
@@ -219,12 +288,17 @@ public sealed class BootAutomation
     // 画面の空でない行を出力する(自動操作の経過確認用)。選択行には印を付ける。
     public static void DumpScreen(EmuEnvironment env, TextWriter output)
     {
+        if (env.Vga.GraphicsMode) { output.WriteLine("[screen] (graphics mode)"); return; }
         foreach (var (text, highlighted) in ScreenLines(env))
         {
             var trimmed = text.TrimEnd();
             if (trimmed.Length > 0) output.WriteLine($"[screen]{(highlighted ? ">" : " ")} {trimmed}");
         }
     }
+
+    // BIOS のキーバッファ(BDA 0x41A = 先頭、0x41C = 末尾)が空。
+    static bool BiosKeyBufferEmpty(EmuEnvironment env) =>
+        BitConverter.ToUInt16(env.Ram, 0x41A) == BitConverter.ToUInt16(env.Ram, 0x41C);
 
     static void ClearBiosKeyBuffer(EmuEnvironment env)
     {

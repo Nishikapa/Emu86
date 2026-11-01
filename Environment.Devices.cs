@@ -5,9 +5,9 @@ public partial class EmuEnvironment
     internal CmosDevice CmosRtc { get; }
     internal PicDevice PicMaster { get; } = new(0x08, "master");
     internal PicDevice PicSlave { get; } = new(0x70, "slave");
-    internal PitDevice Pit { get; } = new();
+    internal PitDevice Pit { get; }
     internal KeyboardController Keyboard { get; } = new();
-    internal AcpiPmDevice Acpi { get; } = new();
+    internal AcpiPmDevice Acpi { get; }
     public VgaDevice Vga { get; } = new();
     // COM1(0x3F8, IRQ4)と COM2(0x2F8, IRQ3)。ホスト側(名前付きパイプ)は起動時の指定で接続する。
     public Uart16550 Com1 { get; } = new();
@@ -28,17 +28,18 @@ public partial class EmuEnvironment
     public bool PicSlaveIcw4 { get => PicSlave.Icw4; set => PicSlave.Icw4 = value; }
     public byte PicSlaveIsr { get => PicSlave.Isr; set => PicSlave.Isr = value; }
 
-    public ushort PitCounter { get => Pit.Counter; set => Pit.Counter = value; }
-    public ushort PitLatched { get => Pit.Latched; set => Pit.Latched = value; }
-    public int PitReadPhase { get => Pit.ReadPhase; set => Pit.ReadPhase = value; }
     public byte Port61 { get => Pit.Port61; set => Pit.Port61 = value; }
-    public byte Port61Refresh { get => Pit.Refresh; set => Pit.Refresh = value; }
-    public ushort Pit2Counter { get => Pit.Channel2Counter; set => Pit.Channel2Counter = value; }
-    public int Pit2WritePhase { get => Pit.Channel2WritePhase; set => Pit.Channel2WritePhase = value; }
-    public int Pit2ReadPhase { get => Pit.Channel2ReadPhase; set => Pit.Channel2ReadPhase = value; }
-    public bool Pit2Armed { get => Pit.Channel2Armed; set => Pit.Channel2Armed = value; }
-    public int Pit2Wait { get => Pit.Channel2Wait; set => Pit.Channel2Wait = value; }
-    public bool PitStatusPending { get => Pit.StatusPending; set => Pit.StatusPending = value; }
+    // v10 以前のスナップショット形式に残る旧 PIT の項目。保存形式を変えないために値を持つだけで、PIT の状態は v11 の項目(チャネル 0/2)にある。
+    public ushort PitCounter { get; set; } = 0xFFFF;
+    public ushort PitLatched { get; set; } = 0xFFFF;
+    public int PitReadPhase { get; set; }
+    public byte Port61Refresh { get; set; }
+    public ushort Pit2Counter { get; set; } = 0xFFFF;
+    public int Pit2WritePhase { get; set; }
+    public int Pit2ReadPhase { get; set; }
+    public bool Pit2Armed { get; set; }
+    public int Pit2Wait { get; set; }
+    public bool PitStatusPending { get; set; }
 
     public Queue<byte> KbdOut => Keyboard.Output;
     public MouseDevice Mouse => Keyboard.Mouse;
@@ -51,5 +52,5 @@ public partial class EmuEnvironment
     public ushort Pm1Cnt { get => Acpi.Pm1Cnt; set => Acpi.Pm1Cnt = value; }
     public ushort Gpe0Sts { get => Acpi.Gpe0Sts; set => Acpi.Gpe0Sts = value; }
     public ushort Gpe0En { get => Acpi.Gpe0En; set => Acpi.Gpe0En = value; }
-    public uint PmTimer => AcpiPmDevice.Timer(Tsc);
+    public uint PmTimer => Acpi.Timer(Tsc);
 }

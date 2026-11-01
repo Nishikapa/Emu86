@@ -24,6 +24,7 @@ internal sealed class RunDiagnostics
     readonly List<Func<Step, bool>> breakpoints = [];
     readonly List<Func<Step, bool>> traps = [];
     int udLogLeft = 40;
+    int faultLogLeft = 200;
     bool wasInRange;
 
     public RunDiagnostics(DiagnosticOptions options, EmuEnvironment env, CPU cpu, TextWriter output, TextWriter trace, long count)
@@ -183,8 +184,27 @@ internal sealed class RunDiagnostics
                 WriteMemoryLog();
                 return true;
             default:
+                // --faultlog: #GP/#SS/#NP/#TS などの配送を、命令のバイト列とスタックの先頭(IRET なら復帰フレーム)付きで残す。
+                if (options.FaultLogMin is long faultMinimum && count >= faultMinimum && fault.IdtReady(cpu) && faultLogLeft > 0)
+                {
+                    faultLogLeft--;
+                    output.WriteLine($"[fault] {count} {fault.Name} {fault.Describe()} at {cpu.cs:x4}:{cpu.eip:x8} opcode {OpcodeBytes()} esp={cpu.esp:x8} stack={StackDwords(6)}");
+                }
                 return false;
         }
+    }
+
+    // ss:esp から dword を count 個(読めなければそこまで)。
+    string StackDwords(int count)
+    {
+        var values = new List<string>();
+        try
+        {
+            for (var index = 0; index < count; index++)
+                values.Add(EnvGetMemoryData32(env, cpu.ss_base + cpu.esp + (uint)(4 * index)).ToString("x8"));
+        }
+        catch (CpuFaultException) { values.Add("(unmapped)"); }
+        return string.Join(" ", values);
     }
 
     string OpcodeBytes()

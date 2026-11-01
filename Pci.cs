@@ -54,7 +54,11 @@ public class PciHost
 
     public void SaveState(BinaryWriter writer) => Layout.Save(writer, this);
 
-    public void LoadState(BinaryReader reader) => Layout.Load(reader, this, SnapshotStore.Version);
+    public void LoadState(BinaryReader reader)
+    {
+        Layout.Load(reader, this, SnapshotStore.Version);
+        UpdateLfbBase();
+    }
 
     // PIIX3 IDE のバスマスタ I/O ベース(BAR4)。SeaBIOS/OS が割り当て直す。
     public uint IdeBmBase
@@ -102,12 +106,21 @@ public class PciHost
         cfg[(1 << 3) | 3] = pm;
         // 00:02.0 VGA 互換ディスプレイ(QEMU の標準 VGA と同じ 1234:1111)。SeaBIOS はこのクラスのデバイスを
         // 見つけると拡張 ROM BAR(0x30)から VGA BIOS を 0xC0000 へ取り込んで実行し、画面出力を有効にする。
-        // ROM は VgaBiosStub(64KB 窓、実体は 2KB)。メモリ BAR は持たない(vga.sys は旧来の VGA 窓を使う)。
+        // ROM は VgaBiosStub(64KB 窓、実体は 2KB)。BAR0 は Bochs VBE の線形フレームバッファ(16MB、プリフェッチ可能なメモリ空間。
+        // SeaBIOS/OS が番地を割り当て、Environment は RAM 外のアクセスをこの範囲で VgaDevice.Lfb へ振り分ける)。
+        // XP の vga.sys は旧来の VGA 窓を使い、Linux の bochs_drm はこの BAR を使う。
         cfg[VgaKey] = Make(0x1234, 0x1111, baseClass: 0x03, subClass: 0x00, progIf: 0x00, header: 0x00);
+        BinaryPrimitives.WriteUInt32LittleEndian(cfg[VgaKey].AsSpan(0x10), 0x00000008); // bit3 = プリフェッチ可能
+        barMask[(VgaKey, 0x10)] = 0xFF000000; // 16MB
         barMask[(VgaKey, 0x30)] = 0xFFFF0001; // 64KB、bit0 = ROM デコード有効
     }
 
     public const int VgaKey = 2 << 3;
+
+    // VGA の BAR0(線形フレームバッファ)の物理アドレス(0 = 未割り当て)。コンフィグ書き込みと状態の読み込みで更新する。
+    public uint LfbBase { get; private set; }
+
+    void UpdateLfbBase() => LfbBase = BinaryPrimitives.ReadUInt32LittleEndian(cfg[VgaKey].AsSpan(0x10)) & 0xFF000000;
 
     // VGA の拡張 ROM BAR が有効なら、その 64KB 窓の物理アドレス範囲に VgaBiosStub.Rom を見せる。
     public bool RomContains(uint physical)
@@ -195,5 +208,6 @@ public class PciHost
             if (idx < 0x04) continue;                         // ベンダ/デバイス ID は不変
             c[idx] = (byte)(val >> (8 * i));
         }
+        if (KeyOf() == VgaKey) UpdateLfbBase();
     }
 }

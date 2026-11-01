@@ -449,7 +449,7 @@ rm sample.avhdx; ./bin/Release/net10.0/Emu86.exe --notrace --entrylog 7c90e47c 7
   `[bx+si]` 等のレジスタ和と disp8/disp16 の加算を `(ushort)` で折り返すように修正(DecodeTests の期待値も同様に)。
 - 修正後、COM2 に KD パケット(`30 30 30 30` リーダー、`31 30` LoadSymbols 状態変化)が 288 バイト周期で届く。
 - 既知の制限: `--boot-debug` は XP の「Debugging Mode」の既定(COM2/19200)に依存。boot.ini を編集すれば `/debugport=com1 /baudrate=115200`
-  も使える。KD のタイムアウトはゲストの仮想時間(100 万命令 = 1 秒)で進む。
+  も使える。KD のタイムアウトはゲストの仮想時間(2026-11-01 からは `GuestClock`: 既定で 5,000 万命令 = 1 秒、`--ips`)で進む。
 
 
 ### HLT のアイドル待機(2026-10-22)
@@ -526,4 +526,74 @@ rm sample.avhdx; ./bin/Release/net10.0/Emu86.exe --notrace --entrylog 7c90e47c 7
   250 万命令 = 1 秒)、TSC は命令数そのもの(較正で約 3.5 MHz に見える)。ゲストから見た CPU は 1〜3.5 MHz 相当で、1 モジュールのロードが
   20 秒以上に、udev の 30 秒待ちは 3,000 万〜1 億命令に、systemd の 90 秒は 1〜3 億命令になる。root が見つからなかったのも、udev が
   ata_piix に辿り着く前に initramfs が待ちを諦めたため。対処は時計の設計(「1 秒 = N 命令」を 1 か所で決め、PIT の周期・PM タイマ・RTC・
-  HLT の待ちを揃える)で、別の ADR で扱う。
+  HLT の待ちを揃える)で、[ADR-0004](adr/0004-guest-clock.md) で扱う(2026-11-01 に採用・実装。下記)。
+
+### ゲストの時計(ADR-0004 段階 1)と Debian の systemd(2026-11-01)
+- [ADR-0004](adr/0004-guest-clock.md) を採用し、`GuestClock`(1 秒 = 5,000 万命令、`--ips`)から PIT・ACPI PM タイマ・RTC・ポート 0x61 の
+  リフレッシュを導くようにした。PIT はチャネル 0/2 を再装填値とモードどおりに数え、IRQ0 の周期は PIT の設定から決まる(XP の 100 Hz = 50 万命令ごと、
+  Linux の 250 Hz = 20 万命令ごと、BIOS の 18.2 Hz = 274 万命令ごと)。スナップショット v11 に時計と PIT の状態を保存する。
+- XP(冷起動、300 億命令、352 秒): ミニセットアップの GUI(使用許諾契約)に到達。アイドルの HLT で飛ばした量が 160 億命令(53.5%)。
+- Debian(冷起動、400 億命令、975 秒): 手で `modprobe` しなくても進むようになった。
+  - 120 億命令(ゲスト時間 240 秒): udev がモジュールをロードし(`bochs_drm` は「less than 4 MB video memory, ignoring device」で辞退)、root が
+    見つかって `/dev/sda1: clean, 63921/987360 files`。
+  - 140 億命令: systemd のサービスが `[ OK ]` で進む(Set the console keyboard layout、Found device Emu86_Virtual_Disk 5、swap、Local File Systems、
+    AppArmor、Show Plymouth Boot Screen、Network Time Synchronization、Raise network interfaces が開始)。旧時計で見えていた 90 秒のタイムアウトは出ない。
+  - 160 億命令以降: 文字 VRAM が空で画面が真っ黒(カーソルだけ)。CPU はユーザーモード(cs=0073)で忙しいまま(アイドル 0.5〜3%)。400 億命令の
+    スナップショットから再開して Enter を送っても 10 億命令(20 秒)では何も出ない。「Show Plymouth Boot Screen」の直後なので、Plymouth が
+    コンソールを(KD_GRAPHICS への切り替えで vgacon が VRAM を消す形で)奪ったまま、ログインプロンプトまで進んでいない可能性が高い。
+  - 次の手: GRUB のメニューで `--type` を使ってカーネル行に `plymouth.enable=0 systemd.show_status=1`(または `console=ttyS0` で COM1 のパイプへ)を足し、
+    ログインプロンプトが出るか、何がユーザーモードで忙しいのかを見る。`[outside]` では x87 の `dd a3`/`dd 70`(FST/FSTP m64)が各 20 万回ほど
+    参照コアに落ちており、Debian のユーザーモードでは IR に無い FPU 命令の下げも候補。
+
+### Bochs VBE の線形フレームバッファと Debian の LightDM(2026-11-01)
+- Debian の画面が真っ黒になる原因は Plymouth ではなく **LightDM** だった(`init=/bin/bash` で起動して syslog を読んだ: `plymouth-quit-wait.service: Succeeded`
+  の後、`lightdm.service` が `Main process exited, code=exited, status=1/FAILURE` → 100ms 後に再起動、を 200 回以上繰り返す)。LightDM が起動する X が
+  tty7 に切り替えて VRAM を消し、再起動の繰り返しが CPU を使い切っていた(ユーザーモードで忙しい・アイドル 0.5%)。GRUB のカーネル行に
+  `plymouth.enable=0` を足して起動すると tty1 に `debian login:` が出る(189 億命令)が、やはりその後 X が tty7 を取る。
+- `--type` の拡張: 特殊キー(`<down>` `<end>` `<c-x>` `<a-f2>` など)、プロンプトの代わりの `<graphics>`/`<text>`/`<4s>`、キー間隔をゲストの時計で 0.2 秒に、
+  BIOS 経由でキーを読むゲスト(GRUB の gfxterm は 1 キーの描画が遅い)のために BIOS のキーバッファが空くまで待つ。これで GRUB のメニューで `e` →
+  カーネル行の編集 → Ctrl+X がヘッドレスでできる(20 回の ↓ と 3 回の ↑ で `linux` 行へ。編集 1 回に約 80 億命令かかるのは gfxterm の描画が VGA の
+  プレーナ書き込みで遅いため)。`init=/bin/bash` で root のシェルに入り、`/var/log` を読む手順を確立した。root のパスワードは overlay 内で `emu86` にした。
+- X が起動できなかった理由は表示デバイス: `bochs_drm` が「less than 4 MB video memory, ignoring device」で辞退し、/dev/fb0 も DRM も無い。そこで
+  QEMU の標準 VGA と同じ **Bochs VBE(DISPI)** を実装した: ポート 0x1CE/0x1CF の 16 ビットレジスタ(ID、XRES/YRES/BPP、ENABLE、BANK、VIRT_WIDTH/HEIGHT、
+  X/Y_OFFSET、VIDEO_MEMORY_64K)、PCI の VGA デバイスの BAR0 に 16MB の線形フレームバッファ(`Environment` が RAM 外のアクセスを `PciHost.LfbBase` で
+  振り分ける)、32/24/16/15/8 ビットの描画、Bank で切り替わるレガシー窓。スナップショット v12。
+- 結果: `bochs_drm` がデバイスを受け入れ、135 億命令で **fbcon が 1024×768 のフレームバッファに起動メッセージを描く**(画面保存で確認)。200 億命令では
+  画面が黒一色(X の modesetting が起動したあと LightDM が落ち続けているとみられる)。XP は BAR0 が増えても同じ命令数で同じ画面(GUI)に到達する。
+- 注意: fbcon が動くと Debian のコンソールはグラフィックになり、`--type` のプロンプト検出(文字 VRAM)が効かない。文字モードで調べたいときは
+  カーネル行に `nomodeset` を足す。
+- LightDM の調査(`nomodeset init=/bin/bash` で起動してログを読む):
+  - X は modesetting で正常に起動する(`Output Virtual-1 using initial mode 1024x768`)。LightDM は X の準備完了後に lightdm-gtk-greeter を起動し、
+    VT 7 を有効にしたあと、**greeter が自分で終了コード 1 で終わる**(`Session pid=439: Exited with return value 1` → `Stopping; failed to start a greeter`)。
+    再起動の次の回は X が 1 秒で起動に失敗し(`greeter display server failed to start`)、この 2 つが交互に繰り返される。
+  - 「Error getting user list from org.freedesktop.Accounts: ...ServiceUnknown」は accountsservice が入っていないだけで無害(passwd から利用者を読む)。
+  - `--ips 200000000`(ゲストから見て 200 MHz)でも同じ: greeter は約 5 秒(50 MHz では約 22 秒)、どちらも約 10 億命令で終了する。時間切れではなく
+    決まった量の処理のあとに終わっている。greeter のログ(`seat0-greeter.log`)は最新の回では空(stdout のバッファを吐かずに終わっている)。
+  - `/proc/cpuinfo` の flags は `fpu pse tsc msr pae cx8 cmov cpuid pti` で、MMX/SSE/FXSR は無い(Debian i386 の基準 i686 には足りているはず)。
+- 8042: キーボードのリセット(0xFF)で注入済み未送信のスキャンコードを捨て、自己診断(0xAA)で出力バッファを空にするようにした(GRUB が読み残したキーが
+  次の OS に届かないように。実機のキーボードも BAT で捨てる)。`init=/bin/bash` 直後のプロンプトに `!` が 1 文字残る現象は別で、Enter で消える。
+- XP の 2 コア一致(今日の変更すべてを含む): 冷起動 65 億命令を翻訳あり(396 秒)と `--no-translate`(1,416 秒)で走らせ、スナップショットの状態部分
+  (285,543,643 バイト。RAM・デバイス・VGA とフレームバッファ)が一致。スナップショット末尾の overlay 複製(VHDX のメタデータ)だけが異なる。
+- `greeter-wrapper`(/usr/local/bin/greeter-wrap: 終了状態と stderr を lightdm の書ける /var/lib/lightdm に記録)で greeter の死因が分かった:
+  **`Illegal instruction`、終了状態 132(SIGILL)**。LightDM が記録していた「終了コード 1」は session-child の値。エミュレータの `[cpu] #UD` ログは
+  Debian の走行で 1 件も出ていないので、未実装命令の #UD ではなく、カーネルが SIGILL を送る別の経路(IRET の失敗 = `do_iret_error` → ILL_BADSTK など)の疑い。
+  kern.log の `traps:` 行で `trap invalid opcode ip:... in librsvg-2.so.2.44.10` と分かり、エミュレータの標準出力(`[cpu] #UD at 0073:... opcode 66 2e 0f 1f 84 00`)と
+  一致した。**原因は多バイト NOP `0F 1F /0`(`nopw %cs:0(%eax,%eax,1)`、アセンブラが関数の整列に使う)が未実装**だったこと。`#UD` のログは標準エラーではなく
+  標準出力に出るので、見落としていた。
+- `0F 18`(PREFETCHh)と `0F 19`〜`0F 1F`(予約 NOP・多バイト NOP)を両コアに追加した(ModRM・SIB・変位を消費するだけ)。`--faultlog [min]` も追加
+  (#GP/#SS/#NP/#TS の配送を命令のバイト列とスタック先頭付きで記録。IRET の失敗を疑ったときに作ったが、今回は不要だった)。
+- **結果: Debian 10 の LightDM(GTK greeter)のログイン画面が 1024×768 のフレームバッファに表示された**(冷起動 240 億命令、約 8 分。
+  壁紙・ログインボックス・上部パネルの時計まで描ける)。X の modesetting、GTK3、cairo/pixman、librsvg(アイコン)が全部この CPU で動いている。
+  残る観察: 最初の greeter は描画の直後に `Gdk-Message: Fatal IO error 25 on X server` で X を見失って終わり(終了値 0)、LightDM が X と greeter を
+  起動し直してから 2 回目の greeter が表示されている。
+- 最初の X の終わり方(Xorg.0.log.old): **`Segmentation fault at address 0xff00`、`Caught signal 11`**。バックトレースは `fbGlyphs` → libpixman
+  (`pixman_rasterize_edges+0x18fc6` 付近)で、greeter が文字を描いた直後(ゲスト時間 321.7 秒 ≈ 161 億命令)。0xff00 はピクセルのチャネルマスクの値で、
+  ポインタであるべきレジスタにマスク計算の結果が入っている形。実機の pixman は落ちないので CPU エミュレーションの誤り(IR か両コア共通)を疑い、
+  決定性を使って切り分ける: 同じ overlay を冷起動して 150 億命令でスナップショット → 翻訳ありと `--no-translate` で 170 億命令まで進めると状態は一致
+  (IR 固有ではない、またはこの系統ではこの区間に落ちていない)。`--upflog` でユーザーモードの #PF を記録しても 240 億命令まで小さい番地(cr2 < 0x10000)への
+  フォルトは無く、この overlay 系統では X は落ちていない。落ちた系統(greeter-wrapper 入り)を同じ RTC で再現して探す。
+- **XFCE のデスクトップにログインできた**(`docs/debian-xfce.png`): `init=/bin/bash` で利用者 nishikapa のパスワードを設定し、通常起動して 260 億命令で
+  `--type '<520s>=>nishikapa
+' --type '<10s>=>emu86
+'`(グラフィック画面なのでプロンプト待ちではなく時間待ちで打つ)。400 億命令で壁紙・デスクトップ
+  アイコン(Trash、File System、Home)・起動中のパネルが描かれ、アイドル(HLT)が 25%。greeter はユーザー名の欄が先(users は隠す設定)。

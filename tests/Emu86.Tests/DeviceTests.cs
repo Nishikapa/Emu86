@@ -28,20 +28,38 @@ static class DeviceTests
             EnvOutPort(env, port, 0x20);
             Equal((byte)0, EnvInPort(env, port), "PIC nonspecific EOI");
         }
-        EnvOutPort(env, 0x43, 0xC0);
-        Equal((byte)0x36, EnvInPort(env, 0x40), "PIT status first");
-        Equal((byte)0xFF, EnvInPort(env, 0x40), "PIT latched low");
-        Equal((byte)0xFF, EnvInPort(env, 0x40), "PIT latched high");
-        Equal((ushort)0xFEFF, env.PitCounter, "PIT counter progress");
-        EnvOutPort(env, 0x43, 0xB6);
-        EnvOutPort(env, 0x42, 0x34);
-        EnvOutPort(env, 0x42, 0x12);
-        EnvOutPort(env, 0x61, 1);
-        Equal((byte)0x11, EnvInPort(env, 0x61), "PIT wait 1");
-        Equal((byte)0x01, EnvInPort(env, 0x61), "PIT wait 2");
-        Equal((byte)0x31, EnvInPort(env, 0x61), "PIT OUT2");
+        // PIT: 1 ティック = 1 命令にして数えやすくする。未設定は下位→上位・モード 3(65536)で、前半は OUT=1。
+        env.Clock.InstructionsPerSecond = GuestClock.PitHz;
+        env.Tsc = 0;
+        EnvOutPort(env, 0x43, 0xE2);                               // リードバック: チャネル 0 の状態をラッチ
+        Equal((byte)0xB6, EnvInPort(env, 0x40), "PIT status: OUT=1, lo/hi, mode 3");
+        EnvOutPort(env, 0x43, 0x34);                               // チャネル 0 下位→上位 モード 2
+        EnvOutPort(env, 0x40, 0xE8); EnvOutPort(env, 0x40, 0x03);  // 1000
+        env.Tsc = 250;
+        EnvOutPort(env, 0x43, 0x00);                               // ラッチ
+        Equal((byte)0xEE, EnvInPort(env, 0x40), "PIT latched low (1000 - 250 = 0x2EE)");
+        Equal((byte)0x02, EnvInPort(env, 0x40), "PIT latched high");
+        Equal(1000L, env.Pit.NextTimerIrq(250), "IRQ0 at the end of the first period");
+        Equal(2000L, env.Pit.NextTimerIrq(1000), "IRQ0 every reload ticks");
+        env.Tsc = 1000;
+        EnvOutPort(env, 0x43, 0x30);                               // チャネル 0 モード 0(1 回だけ)
+        EnvOutPort(env, 0x40, 0x64); EnvOutPort(env, 0x40, 0x00);  // 100
+        Equal(1100L, env.Pit.NextTimerIrq(1000), "one-shot IRQ0 at the terminal count");
+        Equal(long.MaxValue, env.Pit.NextTimerIrq(1100), "one-shot fires once");
+        Equal(0xFFCE, env.Pit.Count(env.Pit.Channel0, 1150), "one-shot keeps counting through zero");
+        env.Tsc = 2000;
+        EnvOutPort(env, 0x43, 0xB0);                               // チャネル 2 下位→上位 モード 0
+        EnvOutPort(env, 0x42, 0x0A); EnvOutPort(env, 0x42, 0x00);  // 10
+        EnvOutPort(env, 0x61, 1);                                  // ゲートを開く
+        env.Tsc = 2005;
+        Equal((byte)0x11, EnvInPort(env, 0x61), "channel 2 still counting (refresh bit set)");
+        env.Tsc = 2010;
+        Equal((byte)0x31, EnvInPort(env, 0x61), "channel 2 OUT high at the terminal count");
+        env.Tsc = 2016;
+        Equal((byte)0x21, EnvInPort(env, 0x61), "refresh bit toggles every 18 ticks");
         EnvOutPort(env, 0x61, 0);
-        Equal(false, env.Pit2Armed, "PIT gate disabled");
+        Equal((byte)0x00, EnvInPort(env, 0x61) & 0x20, "gate closed: a one-shot channel 2 reads OUT low");
+        env.Tsc = 0;
         EnvOutPort(env, 0x64, 0x60);
         EnvOutPort(env, 0x60, 0x47);
         EnvOutPort(env, 0x64, 0x20);
@@ -56,6 +74,7 @@ static class DeviceTests
         Equal(0x1234F07Fu, EnvInPortN(env, 0xB000, 4), "PM W1C and enable");
         EnvOutPortN(env, 0xAFE0, 4, 0x5678F00F);
         Equal(0x56780FF0u, EnvInPortN(env, 0xAFE0, 4), "GPE W1C and enable");
+        env.Clock.InstructionsPerSecond = 1_000_000;
         env.Tsc = 1_000_000;
         Equal(3579545u, EnvInPortN(env, 0xB008, 4), "PM timer");
         EnvOutPortN(env, 0x1FFFF, 2, 0x1234);
@@ -78,6 +97,7 @@ static class DeviceTests
         try
         {
             env.PicMaster.Log = env.PicSlave.Log = true;
+            env.Clock.InstructionsPerSecond = 1_000_000;
             int[] ports = [0x20, 0x21, 0xA0, 0xA1, 0x40, 0x42, 0x43, 0x60, 0x61, 0x64, 0x70, 0x71, 0xB2,
                 0xAFE0, 0xAFE1, 0xAFE2, 0xAFE3, 0xB000, 0xB001, 0xB002, 0xB003, 0xB004, 0xB005, 0xB008, 0xB100, 0xCF8, 0xCFC, 0xFFFF];
             for (var value = 0; value < 256; value++)
@@ -102,7 +122,7 @@ static class DeviceTests
             writer.Write(diagnostics.ToString().Replace("\r\n", "\n"));
             writer.Flush();
             var hash = Convert.ToHexString(SHA256.HashData(stream.ToArray()));
-            Equal("C0102B8392C2C42742FFF4F69EAA0922E726A81344AD54130E7FD1E1D27018D2", hash, "device behavior (PCI VGA 2026-10-09, PS/2 mouse and 8042 A7/A8/FE 2026-10-10, RTC 2026-10-28)");
+            Equal("3D658E830951AA214A8C3A52C6BF37FEBB742E7071CADCFE06248C997062A41B", hash, "device behavior (PCI VGA 2026-10-09, PS/2 mouse and 8042 A7/A8/FE 2026-10-10, RTC 2026-10-28, PIT counting as programmed 2026-11-01, VGA BAR0 for the Bochs VBE framebuffer and 8042 reset flush 2026-11-01)");
             Console.WriteLine($"Device compatibility SHA256={hash}");
         }
         finally
@@ -126,8 +146,14 @@ static class DeviceTests
         Equal((byte)0x03, EnvInPort(env, 0x60), "output port read");
         EnvOutPort(env, 0x60, 0xF2);
         Equal("FA,AB,83", string.Join(",", Enumerable.Range(0, 3).Select(_ => EnvInPort(env, 0x60).ToString("X2"))), "keyboard ID reply");
+        env.Keyboard.Inject(0x1E, 0x9E); // 注入済みで未送信のキーはリセットで捨てられる(GRUB が読み残したキーが次の OS に届かない)
         EnvOutPort(env, 0x60, 0xFF);
         Equal("FA,AA", string.Join(",", Enumerable.Range(0, 2).Select(_ => EnvInPort(env, 0x60).ToString("X2"))), "keyboard reset reply");
+        Equal(false, env.Keyboard.Pump(), "reset flushed the injected scancodes");
+        env.Keyboard.Inject(0x1E); env.Keyboard.Pump();
+        EnvOutPort(env, 0x64, 0xAA);
+        Equal((byte)0x55, EnvInPort(env, 0x60), "self test clears the output buffer first");
+        Equal((byte)0x14, (byte)(EnvInPort(env, 0x64) & 0x01 | 0x14), "nothing left after the self test reply");
         EnvOutPort(env, 0x60, 0xED);
         Equal("FA", EnvInPort(env, 0x60).ToString("X2"), "other keyboard commands are acknowledged only");
         EnvOutPort(env, 0x64, 0xD4); EnvOutPort(env, 0x60, 0xF4);
@@ -147,6 +173,7 @@ static class DeviceTests
     static void RealTimeClock()
     {
         using var env = new EmuEnvironment(memory: new byte[0x10000]);
+        env.Clock.InstructionsPerSecond = 1_000_000; // この検査は 100 万命令 = 1 秒で書いてある
         var start = new DateTime(2026, 10, 28, 12, 34, 56);
         env.CmosRtc.SetClock(start, 0);
         string Clock(ulong tsc, params int[] registers)

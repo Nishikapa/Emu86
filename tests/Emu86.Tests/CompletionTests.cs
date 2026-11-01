@@ -110,6 +110,15 @@ static class CompletionTests
 
     // HLT: 配送できる割り込みが無ければ次のタイマ周期まで仮想時間を進め、タイマ割り込みで起きる(ハンドラは EOI を送る)。
     // IF=0 のときは待てないので従来どおり次の命令へ進む。
+    // PIT チャネル 0 を「1 ティック = 1 命令」で reload 命令ごとの周期にする(IRQ0 の時刻をテストから決める)。
+    static void TimerEvery(EmuEnvironment env, int reload)
+    {
+        env.Clock.InstructionsPerSecond = GuestClock.PitHz;
+        Ports.EnvOutPort(env, 0x43, 0x34);
+        Ports.EnvOutPort(env, 0x40, (byte)reload);
+        Ports.EnvOutPort(env, 0x40, (byte)(reload >> 8));
+    }
+
     static void HaltWaitsForInterrupts()
     {
         using var env = new EmuEnvironment(memory: new byte[0x10000]);
@@ -117,6 +126,7 @@ static class CompletionTests
         byte[] handler = [0xFE, 0x06, 0x00, 0x05, 0xB0, 0x20, 0xE6, 0x20, 0xCF];        // inc byte [0x500] ; mov al,20h ; out 20h,al ; iret
         idle.CopyTo(env.Ram, 0x100); handler.CopyTo(env.Ram, 0x200);
         BitConverter.GetBytes(0x00000200u).CopyTo(env.Ram, 8 * 4);          // IVT 8(タイマ)-> 0000:0200
+        TimerEvery(env, 10000);                                               // PIT: IRQ0 を 10,000 命令ごとに
         var cpu = new CPU { eip = 0x100, esp = 0x8000, eflags = 2 };
         using var error = new StringWriter();
         var count = EmulationRunner.Run(RunOptions.Parse(["--limit", "45000", "--notrace"]), env, cpu, 0, null, TextWriter.Null, error);

@@ -35,10 +35,10 @@ static class PortMap
     [
         Port("CMOS index", 0x70, write: (env, _, v) => env.CmosRtc.Select(v)),
         Port("CMOS data", 0x71, read: (env, _) => env.CmosRtc.Read(env.Tsc), write: (env, _, v) => env.CmosRtc.Write(v, env.Tsc)),
-        Port("PIT counter 0", 0x40, read: (env, p) => env.Pit.Read(p)),
-        Port("PIT counter 2", 0x42, read: (env, p) => env.Pit.Read(p), write: (env, p, v) => env.Pit.Write(p, v)),
-        Port("PIT control", 0x43, write: (env, p, v) => env.Pit.Write(p, v)),
-        Port("PIT gate/speaker", 0x61, read: (env, p) => env.Pit.Read(p), write: (env, p, v) => env.Pit.Write(p, v)),
+        Port("PIT counter 0", 0x40, read: (env, p) => env.Pit.Read(p, env.Tsc), write: (env, p, v) => env.Pit.Write(p, v, env.Tsc)),
+        Port("PIT counter 2", 0x42, read: (env, p) => env.Pit.Read(p, env.Tsc), write: (env, p, v) => env.Pit.Write(p, v, env.Tsc)),
+        Port("PIT control", 0x43, write: (env, p, v) => env.Pit.Write(p, v, env.Tsc)),
+        Port("PIT gate/speaker", 0x61, read: (env, p) => env.Pit.Read(p, env.Tsc), write: (env, p, v) => env.Pit.Write(p, v, env.Tsc)),
         Port("debug console", 0x402, write: (_, _, v) => Console.Error.Write((char)v)),
         Port("PIC master command", 0x20, read: (env, _) => env.PicMaster.Isr, write: (env, _, v) => env.PicMaster.WriteCommand(v)),
         Port("PIC master data", 0x21, read: (env, _) => env.PicMaster.Mask, write: (env, _, v) => env.PicMaster.WriteData(v)),
@@ -64,6 +64,8 @@ static class PortMap
         Range("VGA", 0x3C0, 0x3CF, read: (env, p) => env.Vga.ReadPort(p, env.Tsc), write: (env, p, v) => env.Vga.WritePort(p, v)),
         Range("VGA (color CRTC)", 0x3D4, 0x3D5, read: (env, p) => env.Vga.ReadPort(p, env.Tsc), write: (env, p, v) => env.Vga.WritePort(p, v)),
         Port("VGA (color status)", 0x3DA, read: (env, p) => env.Vga.ReadPort(p, env.Tsc), write: (env, p, v) => env.Vga.WritePort(p, v)),
+        // Bochs VBE(DISPI): 0x1CE インデックス、0x1CF データ。16 ビット幅で読み書きする。
+        new("Bochs VBE", 0x1CE, 0x1CF, ReadWide: (env, p, size) => env.Vga.VbeRead(p) & Mask(size), WriteWide: (env, p, _, v) => env.Vga.VbeWrite(p, (ushort)v)),
         Range("COM1", 0x3F8, 0x3FF, read: (env, p) => env.Com1.Read(p - 0x3F8), write: (env, p, v) => env.Com1.Write(p - 0x3F8, v)),
         Range("COM2", 0x2F8, 0x2FF, read: (env, p) => env.Com2.Read(p - 0x2F8), write: (env, p, v) => env.Com2.Write(p - 0x2F8, v)),
         // ATA データポート: 16/32 ビットアクセスでデバイスバッファから連続バイトを転送する(隣接ポートへは波及しない)。

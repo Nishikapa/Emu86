@@ -6,7 +6,8 @@ namespace Emu86;
 
 internal static class EmulationRunner
 {
-    const long IrqPeriod = 10_000;
+    // サービス周期(キーボードの Pump、停止要求の確認、自動操作)。時間ではなく命令数の区切り。タイマ IRQ の周期は PIT が決める。
+    const long ServicePeriod = 10_000;
     static long NextSnapshot(long count, long interval) => interval > long.MaxValue - count ? long.MaxValue : count + interval;
     const long SnapshotInterval = 100_000_000;
 
@@ -36,17 +37,17 @@ internal static class EmulationRunner
         Dictionary<ushort, long> outsideReference = [];
         long translatedCount = 0;
         long haltSkipped = 0, halts = 0;
-        if (env.NextIrq == 0) env.NextIrq = count + IrqPeriod;
+        if (env.NextIrq == 0 || env.Pit.Changed) { env.NextIrq = env.Pit.NextTimerIrq((ulong)count); env.Pit.Changed = false; }
         // 定期保存なし(間隔 = long.MaxValue)のときは、再開後の count との加算が溢れないように飽和させる。
         long nextSnapshot = NextSnapshot(count, snapshotInterval);
-        long nextService = count + IrqPeriod;
+        long nextService = count + ServicePeriod;
         while (count < options.Limit)
         {
             // ホストから注入されたスキャンコードを 8042 の出力バッファへ移し、表示ウィンドウが
             // 閉じられたなどの停止要求もタイマ周期で確認する(命令ごとに見るほどの精度は要らない)。
             if (count >= nextService)
             {
-                nextService = count + IrqPeriod;
+                nextService = count + ServicePeriod;
                 env.Keyboard.Pump();
                 env.Com1.Pump();
                 env.Com2.Pump();
@@ -80,9 +81,11 @@ internal static class EmulationRunner
             // BDA ティックを進め、プロテクトモードは IDT 経由で Linux の jiffies が進む。
             if (!options.NoIrq)
             {
+                // PIT チャネル 0 の設定が変わっていたら次の IRQ0 の時刻を取り直す(ポート書き込みはブロックの終端なので Step の境界で見える)。
+                if (env.Pit.Changed) { env.NextIrq = env.Pit.NextTimerIrq((ulong)count); env.Pit.Changed = false; }
                 if (count >= env.NextIrq)
                 {
-                    env.NextIrq = count + IrqPeriod;
+                    env.NextIrq = env.Pit.NextTimerIrq((ulong)count);
                     env.TimerIrqPending = true;
                 }
                 // ハードウェア割り込み(タイマ・キーボード・シリアル・マウス・ATA)の配送。IF・PIC のマスク・

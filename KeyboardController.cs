@@ -68,7 +68,7 @@ internal sealed class KeyboardController
         [0xA7] = kc => kc.CommandByte |= 0x20,            // AUX 禁止
         [0xA8] = kc => kc.CommandByte &= 0xDF,            // AUX 許可
         [0xA9] = kc => kc.Output.Enqueue(0x00),           // マウスポート試験 OK
-        [0xAA] = kc => kc.Output.Enqueue(0x55),           // 自己診断 OK
+        [0xAA] = kc => { kc.Output.Clear(); kc.Output.Enqueue(0x55); }, // 自己診断 OK(出力バッファは空になる)
         [0xAB] = kc => kc.Output.Enqueue(0x00),           // インタフェース試験 OK
         [0xD0] = kc => kc.Output.Enqueue(0x03),           // 出力ポート読み(A20 有効・リセット非活性)
         [0xD1] = kc => kc.PendingCommand = 0xD1,          // 出力ポート書き込み(引数)
@@ -106,6 +106,9 @@ internal sealed class KeyboardController
                 if (Arguments.TryGetValue(PendingCommand, out var argument)) argument(this, val);
                 else
                 {
+                    // リセット(0xFF)はキーボードのバッファを空にする: 注入済みでまだ送っていないスキャンコード(GRUB が読み残したキーなど)は
+                    // 次の OS に届かない(実機のキーボードも BAT で捨てる)。
+                    if (val == 0xFF) { Injected.Clear(); Output.Clear(); }
                     Output.Enqueue(0xFA);
                     if (KeyboardReplies.TryGetValue(val, out var replies))
                         foreach (var reply in replies) Output.Enqueue(reply);

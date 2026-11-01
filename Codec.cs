@@ -45,6 +45,10 @@ internal sealed class Codec<T>
     public Codec<T> Bytes(Func<T, byte[]> get, int since = 0) =>
         Add(since, (writer, target) => writer.Write(get(target)), (reader, target, _) => reader.BaseStream.ReadExactly(get(target)));
 
+    public Codec<T> U16s(Func<T, ushort[]> get, int since = 0) => Add(since,
+        (writer, target) => { foreach (var value in get(target)) writer.Write(value); },
+        (reader, target, _) => { var values = get(target); for (var index = 0; index < values.Length; index++) values[index] = reader.ReadUInt16(); });
+
     public Codec<T> U32s(Func<T, uint[]> get, int since = 0) => Add(since,
         (writer, target) => { foreach (var value in get(target)) writer.Write(value); },
         (reader, target, _) => { var values = get(target); for (var index = 0; index < values.Length; index++) values[index] = reader.ReadUInt32(); });

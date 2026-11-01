@@ -47,11 +47,11 @@ dotnet run -c Release -- --window --notrace --limit max --snapshot-interval 1000
 windbgx -k com:pipe,port=\\.\pipe\emu86-com2,baud=19200,resets=0,reconnect
 ```
 
-ゲストの時計は命令数ベース（100 万命令 = 1 秒）なので、KD のタイムアウトもその基準で進みます。パイプの送信は専用タスクが行い、WinDbg が未接続のあいだの送信は捨てられます（カーネルは応答が無ければ再送しつつ起動を続け、後から接続した WinDbg の Break で止まります）。
+ゲストの時計は命令数ベース（既定で 5,000 万命令 = 1 秒、`--ips` で変更）なので、KD のタイムアウトもその基準で進みます。パイプの送信は専用タスクが行い、WinDbg が未接続のあいだの送信は捨てられます（カーネルは応答が無ければ再送しつつ起動を続け、後から接続した WinDbg の Break で止まります）。
 
-下部の「中断」ボタンで実行を一時停止でき（タイマ周期である 1 万命令の境界で止まります）、「再開」ボタンで続行します。押せるのは実行中は「中断」、中断中は「再開」だけです。中断中と停止後は「レジスタ表示」で CPU レジスタ（汎用・EIP/EFLAGS・セグメントと基底・CR0〜CR4・GDTR/IDTR/TR/LDTR・FPU）を示すダイアログを開けます。ダイアログは中断のたびに最新の状態へ更新されます。
+下部の「中断」ボタンで実行を一時停止でき（サービス周期である 1 万命令の境界で止まります）、「再開」ボタンで続行します。押せるのは実行中は「中断」、中断中は「再開」だけです。中断中と停止後は「レジスタ表示」で CPU レジスタ（汎用・EIP/EFLAGS・セグメントと基底・CR0〜CR4・GDTR/IDTR/TR/LDTR・FPU）を示すダイアログを開けます。ダイアログは中断のたびに最新の状態へ更新されます。
 
-本物の VGA BIOS は同梱していませんが、PCI バスに VGA 互換デバイス（00:02.0、1234:1111）を置き、その拡張 ROM BAR に最小限の VGA BIOS スタブ（`VgaBiosStub`）を見せています。SeaBIOS は POST 中にこの ROM を `0xC0000` へ取り込んで実行するので、SeaBIOS のバナーや「Booting from Hard Disk...」が画面に出ます。スタブの `INT 10h` はモード設定（3/12h/13h）、文字出力、カーソル、モード取得などを C# 側で処理し、Windows の bootvid/vga.sys が V86 モードで行う BIOS 呼び出しにも応えます。フォントが VRAM（プレーン 2）に読み込まれていないときは、ホストの等幅フォントから生成した 8×16 のフォントで描画します。
+本物の VGA BIOS は同梱していませんが、PCI バスに VGA 互換デバイス（00:02.0、1234:1111。QEMU の標準 VGA と同じ ID で、BAR0 に Bochs VBE の 16MB 線形フレームバッファを持つ）を置き、その拡張 ROM BAR に最小限の VGA BIOS スタブ（`VgaBiosStub`）を見せています。SeaBIOS は POST 中にこの ROM を `0xC0000` へ取り込んで実行するので、SeaBIOS のバナーや「Booting from Hard Disk...」が画面に出ます。スタブの `INT 10h` はモード設定（3/12h/13h）、文字出力、カーソル、モード取得などを C# 側で処理し、Windows の bootvid/vga.sys が V86 モードで行う BIOS 呼び出しにも応えます。フォントが VRAM（プレーン 2）に読み込まれていないときは、ホストの等幅フォントから生成した 8×16 のフォントで描画します。
 
 ### 回帰テスト
 
@@ -115,10 +115,10 @@ SeaBIOS を起動し、ディスクイメージから OS を読み込んで、�
 
 **Debian（`sample.vhdx`、4.19 686-pae）**
 
-1. GRUB → カーネル展開 → PAE ページング → メモリ初期化 → PCI/デバイス初期化 → initcall → initramfs 展開 → systemd-udevd などのユーザーモードプロセスが動き、約 150 億命令で initramfs の BusyBox シェル（`(initramfs)` プロンプト）に到達します（`--screen` で画面を確認）。
-2. root ファイルシステムは見つかっていません（「ALERT! UUID=… does not exist. Dropping to a shell!」）。ATA ディスクの検出（libata / ata_piix）かモジュールのロードのどこで止まっているかの調査が次の課題です。コンソールには「MPTABLE: no processors registered!」「mce: Unable to init MCE device」「soft lockup」の警告も出ています（後二者は命令数ベースの時刻の影響とみられます）。
+1. GRUB → カーネル展開 → PAE ページング → メモリ初期化 → PCI/デバイス初期化 → initcall → initramfs 展開 → udev が `ata_piix` などのモジュールをロードし、root（`/dev/sda1`）をマウントして systemd が起動。約 140 億命令でサービスが `[ OK ]` で進みます（ゲストの時計を ADR-0004 で直す前は、udev がモジュールをロードする前に initramfs が root 待ちを諦めて BusyBox のシェルに落ちていました）。
+2. udev が `bochs_drm` をロードすると fbcon が 1024×768 のフレームバッファ（Bochs VBE）に切り替わり、X（modesetting）と LightDM が起動して **GTK のログイン画面が表示され、`--type` でユーザー名とパスワードを打つと XFCE のデスクトップが表示されます**（冷起動で約 240 億命令でログイン画面、400 億命令でデスクトップ。`docs/debian-lightdm.png`、`docs/debian-xfce.png`）。それまでの黒画面は、greeter が多バイト NOP `0F 1F /0` の未実装で SIGILL になり LightDM が再起動を繰り返していたためでした。ある走行で最初の X が pixman の文字描画中に SEGV（アドレス 0xff00）で落ちて起動し直されており、その再現と原因の特定が次の課題です（`docs/boot-progress.md`）。
 
-1 命令ずつ解釈するインタプリタのため、Release ビルドで毎秒数百万〜約 900 万命令です。実機で数秒の処理に数十分かかるので、OS のブート確認はスナップショットからの再開（`--resume`）を併用します。
+IR への翻訳（ADR-0003）ありの Release ビルドで、カーネルのコードでは毎秒 1 億命令前後、ライブラリの多いユーザーモードのコードでは毎秒 3,000 万命令前後です（XP の冷起動 65 億命令で約 3 分半、Debian の 400 億命令で約 16 分）。ゲストから見た CPU は `GuestClock` の既定で 50 MHz 相当なので、実機で数秒の処理に数十秒〜数分かかります。OS のブート確認はスナップショットからの再開（`--resume`）と `--type` によるヘッドレス操作を併用します。
 
 ## アーキテクチャ
 
@@ -197,7 +197,7 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | `EmulationRunner.cs` | 命令実行ループ、例外配送、デバイスのポンプ、定期保存の呼び出し。 |
 | `IrqDelivery.cs` | ハードウェア割り込みの選択（優先順・IF・PIC のマスクと in-service・IDT の準備）と、配送・in-service 設定・要求取り下げの `State`。 |
 | `EmulationControl.cs` | UI スレッドからの中断・再開要求と、中断中・停止後の CPU 状態の公開。 |
-| `BootAutomation.cs` | 画面（テキスト VRAM）を見ながらキーを注入する自動操作。`--boot-debug` の NTLDR 起動メニュー操作と、`--type "プロンプト=>キー列"`（画面の最後の行がプロンプトで終わるのを待ってキー列を打ち、最後のプロンプトが戻ったら画面を出力して止まる。ヘッドレスでゲストのシェルを調べる用。`
+| `BootAutomation.cs` | 画面（テキスト VRAM）を見ながらキーを注入する自動操作。`--boot-debug` の NTLDR 起動メニュー操作と、`--type "プロンプト=>キー列"`（画面の最後の行がプロンプトで終わるのを待ってキー列を打ち、最後のプロンプトが戻ったら画面を出力して止まる。`<down>` `<end>` `<c-x>` `<a-f2>` などの特殊キー、プロンプトの代わりの `<graphics>`/`<text>`/`<2s>` の待ち。キーの間隔はゲストの時計で 0.2 秒。ヘッドレスでゲストのシェルや GRUB のメニューを操作する用。`
 ` は Enter、US 配列でシフトが要る文字はシフトで挟む）。手順はイテレータ（コルーチン）の `Script` に上から順に書き、`yield` した待ち条件（画面の文字列、命令数）が満たされるまで `Step` は進まない。画面の読み取りは行ごとの LINQ クエリ。 |
 | `RunDiagnostics.cs` / `WindowsDiagnostics.cs` | トレース・監視点・停止診断と、Windows 固有の構造体・スタック解析。停止条件はオプションから組み立てた規則のリスト（命令の前のブレークポイント、後の監視点・トラップ・分岐履歴・トレース）を順に試す。後者はゲストメモリの Reader `Guest<T>`（`Dword`/`Byte`/`Ascii`/連結リストの `Walk`/例外を既定値にする `Or`）をクエリ構文で合成して、フレームチェーンや入口の引数・IRP・デバッグ文字列を読む。 |
 | `EnvironmentFactory.cs` / `DiskConfiguration.cs` | 埋め込み BIOS の読み込み、ディスク探索・明示的なパス設定、通常起動用の環境生成。 |
@@ -209,10 +209,11 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | `MemoryDiagnostics.cs` | デバッグ用の記録: 物理アドレスのウォッチポイント（`--watch`）、物理範囲への書き込みログ（`--wlog`）、プロテクトモード割り込み配送のログ（`--intlog`）。`EmuEnvironment.Diagnostics` はどれも無効なら null で、メモリ書き込みの経路は null 検査 1 回で素通りする。 |
 | `PortMap.cs` | I/O ポートの表。1 項 = ポート範囲とデバイスの読み書き（1 バイト、幅付きを自分で扱う項、デバイスの有無や PCI の BAR で決まる範囲の条件）。起動時にポート番号ごとの配列に展開し、入出力は該当する項を表の順に試すだけ。該当がなければ 64 KB の `IoPort` 配列を素通し。 |
 | `Environment.Devices.cs` | 環境ごとのデバイス所有と、既存の状態名への転送プロパティ。保存形式のバイト順・バージョンは変更しない。 |
+| `GuestClock.cs` | ゲストの時計（1 秒 = N 命令、既定 5,000 万）。PIT（1.193182 MHz）・ACPI PM タイマ（3.579545 MHz）・RTC の換算を 1 か所で行う。 |
 | `PicDevice.cs` / `PitDevice.cs` / `CmosDevice.cs` / `KeyboardController.cs` / `MouseDevice.cs` / `AcpiPmDevice.cs` | PIC・PIT・CMOS・8042・PS/2 マウス・ACPI 電源管理の状態と入出力処理。PIC のマスタ/スレーブは共通実装の独立したインスタンス（`--piclog` は各インスタンスの `Log`）。8042 とマウスのコマンドは表（コマンド → 応答と動作、引数を取るものは次のバイトの処理）で、引数待ちの状態はスナップショットに残る `PendingCommand` のまま。 |
-| `Pci.cs` | PCI コンフィグ空間（0xCF8/0xCFC）。i440FX ホストブリッジ、PIIX4 ISA/IDE/電源管理、VGA 互換デバイスと拡張 ROM BAR。 |
+| `Pci.cs` | PCI コンフィグ空間（0xCF8/0xCFC）。i440FX ホストブリッジ、PIIX4 ISA/IDE/電源管理、VGA 互換デバイスと拡張 ROM BAR。。VGA の BAR0 は Bochs VBE の線形フレームバッファ（16MB）で、`LfbBase` を `Environment` が RAM 外アクセスの振り分けに使う |
 | `SerialPort.cs` | 16550 互換 UART と、ホストの名前付きパイプへの橋渡し（送受信は専用タスク）。レジスタはオフセット 0〜7 の `Register`（読み出しと書き込みの Lens）の表。 |
-| `VgaDevice.cs` / `VgaBiosStub.cs` | VGA のレジスタ・VRAM ウィンドウ・描画と、拡張 ROM として見せる最小 VGA BIOS（INT 10h を C# 側で処理）。レジスタは「ポート → `Register`（読み出しと書き込みの Lens）」の表で、インデックス/データのポート対（Sequencer/Graphics/CRTC/Attribute）は `Indexed` が作る（範囲外の要素、CRTC の保護、Attribute のフリップフロップ）。INT 10h は「AH → State」の表（AL/BL で分かれる機能は入れ子の表）で、レジスタの出し入れは `Accessor` の `Get`/`Set` で書く。 |
+| `VgaDevice.cs` / `VgaBiosStub.cs` | VGA のレジスタ・VRAM ウィンドウ・描画と、拡張 ROM として見せる最小 VGA BIOS（INT 10h を C# 側で処理）。レジスタは「ポート → `Register`（読み出しと書き込みの Lens）」の表で、インデックス/データのポート対（Sequencer/Graphics/CRTC/Attribute）は `Indexed` が作る（範囲外の要素、CRTC の保護、Attribute のフリップフロップ）。INT 10h は「AH → State」の表（AL/BL で分かれる機能は入れ子の表）で、レジスタの出し入れは `Accessor` の `Get`/`Set` で書く。 Bochs VBE（DISPI。ポート 0x1CE/0x1CF、PCI BAR0 の 16MB 線形フレームバッファ、8/15/16/24/32 ビットの描画、Bank で切り替わるレガシー窓）も持ち、Linux の `bochs_drm` と X の modesetting がこれで動く。 |
 | `RomBuilder.cs` | オプション ROM のバイト列ビルダ（Writer）。ラベルで `jmp short` の変位やポインタを解決し、末尾でチェックサムを埋める。 |
 | `Operand.cs` / `Registers.cs` | 静的クラス `Operands`。オペランド Lens `Lens<T>`（読み出す State と書き戻す関数。`Operand` = `Lens<Data>`、`Real` = `Lens<double>` は `GlobalUsings.cs` の別名）と `Reg`/`Rm`/`Const`/`Stack`、その上の `Move`/`Swap`（型を問わない）と `Binary`/`Test`（Data 用）。d ビットで向きが決まる命令はオペランドを入れ替えるだけで書く。 |
 | `VgaWindow.cs` / `RegisterDialog.cs` | Windows Forms の表示ウィンドウ（描画、キー入力とマウス捕捉、中断・再開ボタン）とレジスタ表示ダイアログ。 |
@@ -238,7 +239,7 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | 制御転送 | `Jcc`（rel8/rel16/rel32）、`JMP`/`CALL`/`RET`（near/far/間接。far は外側特権レベルへの復帰を含む）、`LOOP`/`LOOPE`/`LOOPNE`、`JCXZ`/`JECXZ` |
 | 文字列 | `MOVS`/`STOS`/`LODS`/`CMPS`/`SCAS`/`INS`/`OUTS` + `REP`/`REPE`/`REPNE`（16/32 ビットアドレッシング、源 DS:SI のセグメントオーバーライド、ページフォルト後の途中再開） |
 | 割り込み・例外 | `INT`/`INT3`/`INTO`/`IRET`（`IRETD`）。リアルモードは IVT、プロテクトモードは IDT の割り込み/トラップゲート経由で、リング遷移（TSS の SS0/ESP0）と V86 モードへの出入り（`IRETD` での突入、V86 内 `INT n` の #GP 反射、セグメントレジスタ付きフレーム）に対応。#PF/#UD/#GP を命令開始時の状態から配送 |
-| フラグ/その他 | `CLC`/`STC`/`CMC`/`CLD`/`STD`/`CLI`/`STI`、`SAHF`/`LAHF`、`NOP`/`HLT`（配送できる割り込みが無ければ次の割り込みまで仮想時間を進める）、`IN`/`OUT`、`WAIT` |
+| フラグ/その他 | `CLC`/`STC`/`CMC`/`CLD`/`STD`/`CLI`/`STI`、`SAHF`/`LAHF`、`NOP`（`90` と、ModRM を消費するだけの多バイト NOP `0F 1F /0`・予約 NOP `0F 19`〜`0F 1E`・`PREFETCHh` `0F 18`）/`HLT`（配送できる割り込みが無ければ次の割り込みまで仮想時間を進める）、`IN`/`OUT`、`WAIT` |
 | システム | `LGDT`/`LIDT`/`SGDT`/`SIDT`、`LLDT`/`LTR`/`SLDT`/`STR`（セレクタの保持のみ）、`MOV CRn`/`DRn`、`CPUID`（EAX=0/1）、`RDTSC`、`RDMSR`/`WRMSR`（汎用ストア）、`INVLPG`、`INVD`/`WBINVD`、プロテクトモード遷移、ページング（2 レベル、PSE、PAE、CR0.WP、Accessed/Dirty 更新）、V86 モード |
 | x87 FPU | ロード/ストア（f32/f64/f80/int16/32/64）、四則演算（全方向・P 付き）、比較（`FCOM`/`FUCOM`/`FCOMI` 系、`FTST`/`FXAM`）、`FCMOVcc`、`FXCH`/`FCHS`/`FABS`/定数ロード、`FSIN`/`FCOS`/`FSINCOS`/`FPTAN`/`FPATAN`/`F2XM1`/`FYL2X`/`FYL2XP1`、`FSQRT`/`FRNDINT`/`FSCALE`/`FPREM`/`FPREM1`/`FXTRACT`、制御語/状態語、`FNSAVE`/`FRSTOR`/`FNSTENV`/`FNINIT` |
 
@@ -248,12 +249,12 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 |---------|--------|---------|
 | CMOS/RTC | 0x70（インデックス）/ 0x71（データ） | 128 バイトの汎用レジスタ。メモリサイズ（0x15-0x18, 0x30-0x31, 0x34-0x35）を SeaBIOS 用に設定済み。RTC の時計（秒・分・時・曜日・日・月・年・世紀、状態 A〜D、BCD/二進と 24/12 時間制）はゲストの時刻（命令数）で進み、冷起動時にホストの時刻に合わせる。アラーム・周期割り込み（IRQ8）は未実装。 |
 | 8259 PIC（マスタ/スレーブ） | 0x20/0x21、0xA0/0xA1 | ICW1〜ICW4 の初期化とベクタベース、マスク、in-service と EOI（非特定/特定）。配送できるまで要求を保留し、IRQ0/1/3/4/12/14 を配送（スレーブ経由はカスケードの in-service も立てる）。 |
-| 8254 PIT | 0x40、0x42、0x43、0x61 | チャネル 0 のラッチ読み出しと、チャネル 2（ポート 0x61 のゲート、SeaBIOS/Windows の遅延ループ用）。タイマー割り込みは実時間ではなく 1 万命令ごと。 |
-| 8042 キーボードコントローラ | 0x60/0x64 | コマンドバイトの読み書き、AUX の許可/禁止、自己診断、出力ポート書き込みと 0xFE パルスによるシステムリセット、マウスへの転送（0xD4）。ホストのキー入力はセット 1 スキャンコードとして IRQ1 で配送。 |
+| 8254 PIT | 0x40、0x42、0x43、0x61 | チャネル 0（IRQ0）と 2（ポート 0x61 のゲートと OUT、TSC 較正）を再装填値とモードどおりにゲストの時計で数える（`GuestClock.cs`、`docs/adr/0004`）。1 回だけのモード（0/1/4/5）と周期モード（2/3）、ラッチ、リードバック、0x61 のリフレッシュビット（18 ティックごと）。 |
+| 8042 キーボードコントローラ | 0x60/0x64 | コマンドバイトの読み書き、AUX の許可/禁止、自己診断（出力バッファを空にする）、キーボードのリセット 0xFF（注入済みで未送信のキーも捨てる。GRUB が読み残したキーが次の OS に届かない）、出力ポート書き込みと 0xFE パルスによるシステムリセット、マウスへの転送（0xD4）。ホストのキー入力はセット 1 スキャンコードとして IRQ1 で配送。 |
 | PS/2 マウス | （8042 の AUX ポート） | リセット/ID/サンプルレート/解像度/有効化などのコマンド応答、IntelliMouse（ホイール、4 バイトパケット）、IRQ12。 |
 | 16550 UART ×2 | 0x3F8-0x3FF（COM1、IRQ4）、0x2F8-0x2FF（COM2、IRQ3） | レジスタ一式と MCR ループバック、受信データあり/送信ホールディング空の割り込み。`--com1`/`--com2` で名前付きパイプへ橋渡し。 |
-| VGA | 0x3B4/0x3B5/0x3BA、0x3C0-0x3CF、0x3D4/0x3D5/0x3DA、VRAM 0xA0000-0xBFFFF | Sequencer/Graphics Controller/CRTC/Attribute/DAC、4 プレーン・奇偶・チェイン 4、書き込みモード 0〜3、テキスト/mode 12h/mode 13h の描画。PCI 00:02.0 の拡張 ROM に最小 VGA BIOS スタブ。 |
-| PCI | 0xCF8/0xCFC | i440FX ホストブリッジ（00:00.0）、PIIX4 ISA（00:01.0）、PIIX4 IDE（00:01.1。BAR4 のバスマスタレジスタは常に非活性）、PIIX4 電源管理（00:01.3）、VGA 互換デバイス（00:02.0）。 |
+| VGA | 0x3B4/0x3B5/0x3BA、0x3C0-0x3CF、0x3D4/0x3D5/0x3DA、VRAM 0xA0000-0xBFFFF | Sequencer/Graphics Controller/CRTC/Attribute/DAC、4 プレーン・奇偶・チェイン 4、書き込みモード 0〜3、テキスト/mode 12h/mode 13h の描画。PCI 00:02.0 の拡張 ROM に最小 VGA BIOS スタブ。。Bochs VBE（0x1CE/0x1CF、PCI BAR0 の線形フレームバッファ 16MB） |
+| PCI | 0xCF8/0xCFC | i440FX ホストブリッジ（00:00.0）、PIIX4 ISA（00:01.0）、PIIX4 IDE（00:01.1。BAR4 のバスマスタレジスタは常に非活性）、PIIX4 電源管理（00:01.3）、VGA 互換デバイス（00:02.0）。。VGA の BAR0（16MB、プリフェッチ可能）は Bochs VBE のフレームバッファ |
 | ATA（プライマリ） | 0x1F0-0x1F7、0x3F6 | IDENTIFY DEVICE、READ/WRITE SECTORS（EXT/MULTIPLE は単一セクタ扱い）、ソフトウェアリセット、各種設定コマンド。コマンド完了・データ準備で IRQ14。スレーブ・セカンダリコントローラ・DMA・ATAPI は非対応（IDENTIFY も DMA 非対応を報告）。 |
 | ACPI 電源管理（PIIX4） | 0xB000-0xB03F、0xAFE0-0xAFE3、0xB2、0xCF9 | PM1 ステータス/イネーブル/コントロール、PM タイマー（命令数ベース）、GPE0、APM コマンドによる SCI_EN の切り替え、0xCF9 によるシステムリセット。SMBus（0xB100）はデバイス無し。 |
 | デバッグコンソール | 0x402 | SeaBIOS のデバッグ出力を標準エラー出力へそのまま転送。 |
@@ -266,6 +267,6 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 - TSS によるハードウェアタスクスイッチ・タスクゲート（NMI、#DF）・コールゲート・LDT は未実装です（`LLDT`/`LTR` はセレクタを保持するだけ）。#PF 配送中の再フォルトはダブルフォルトとして停止します。
 - SSE/MMX、`SYSENTER`/`SYSEXIT`、`FXSAVE`/`FXRSTOR` は未実装で、`CPUID` でも報告しません。
 - `HLT` は、配送できる割り込みが無ければ次のイベント（タイマ周期・サービス周期・保存・上限）まで命令数（= ゲストの時刻）を進めます。IF=0 と `--noirq` のときは待てないので次の命令へ進みます。スキップした量は終了時に `[halt]` として標準エラー出力に出ます。`LOCK` プレフィックスは無視します。
-- ゲストの時刻は命令数ベース（100 万命令 = 1 秒、IRQ0 は 1 万命令ごと、TSC・ACPI PM タイマー・RTC も同じ基準）で、実時間とは一致しません。RTC は冷起動時にホストの時刻から始まり、以後はゲストの時刻で進みます。 ゲストから見た CPU は 1〜3.5 MHz 相当になり、Debian の udev/systemd がタイムアウトする原因になっています。「1 秒 = N 命令」を 1 か所で決めて PIT を設定どおりに数える案は `docs/adr/0004-guest-clock.md`（提案、判断待ち）。
+- ゲストの時刻は命令数ベースです（`GuestClock`: 既定で 5,000 万命令 = 1 秒、`--ips` で変更。PIT の周期・ACPI PM タイマー・RTC・ポート 0x61 のリフレッシュを同じ換算で進め、TSC は命令数そのもの）。決定性のため実時間とは一致しませんが、ゲストから見た CPU はおおむね 50 MHz 相当になります。RTC は冷起動時にホストの時刻から始まり、以後はゲストの時刻で進みます。スナップショットは環境ごとの値を保存します（v11。`docs/adr/0004-guest-clock.md`）。v12 で Bochs VBE のレジスタとフレームバッファも保存します。
 - ATA はマスタドライブ・PIO 転送のみ。DMA・ATAPI・セカンダリコントローラは非対応です。VHD 形式への直接書き込みは非対応（差分書き込みは常に AVHDX オーバーレイに限定）。
 - 自動回帰テストはありますが、OS の長時間ブート確認は別途手動で行います。

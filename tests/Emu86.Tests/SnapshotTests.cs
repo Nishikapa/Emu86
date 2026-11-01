@@ -121,6 +121,10 @@ static class SnapshotTests
         env.Port61 = 3; env.Port61Refresh = 0x10;
         env.Pit2Counter = 0x8765; env.Pit2WritePhase = 1; env.Pit2ReadPhase = 1;
         env.Pit2Armed = true; env.Pit2Wait = 2; env.PitStatusPending = true;
+        env.Clock.InstructionsPerSecond = 7_654_321;
+        env.Pit.Channel0.Reload = 0x2E9C; env.Pit.Channel0.Mode = 2; env.Pit.Channel0.Access = 3; env.Pit.Channel0.Started = 1234567; env.Pit.Channel0.Programmed = true;
+        env.Pit.Channel0.Latched = 0x1234; env.Pit.Channel0.StatusLatched = 0x34; env.Pit.Channel0.ReadPhase = 1; env.Pit.Channel0.WritePhase = 1; env.Pit.Channel0.Pending = 0x9C;
+        env.Pit.Channel2.Reload = 0xFFFF; env.Pit.Channel2.Mode = 0; env.Pit.Channel2.Access = 3; env.Pit.Channel2.Started = 7654321; env.Pit.Channel2.Programmed = true;
         env.KbdOut.Enqueue(0xFA); env.KbdOut.Enqueue(0xAA);
         env.KbdLast = 0x55; env.KbdCmdByte = 0x67; env.KbdPendingCmd = 0x60;
         env.Pm1Sts = 1; env.Pm1En = 2; env.Pm1Cnt = 3; env.Gpe0Sts = 4; env.Gpe0En = 5;
@@ -128,7 +132,7 @@ static class SnapshotTests
         env.Pci.Address = 0x80000920; env.Pci.DataWrite(0, 4, 0xD001);
         cpu.fpu_top = 3; cpu.fpu_valid = 0xF8; cpu.fpu_st[3] = 1.25;
         cpu.tr = 0x28; cpu.ldtr = 0x30;
-        env.Vga.Vram[0x12345] = 0x5A; env.Vga.Crtc[0x0E] = 0x12;
+        env.Vga.Vram[0x12345] = 0x5A; env.Vga.Crtc[0x0E] = 0x12; env.Vga.Lfb[7] = 0x77; env.Vga.Vbe[5] = 2;
         EnvOutPort(env, 0x3C8, 7); EnvOutPort(env, 0x3C9, 0x3F);
         EnvOutPort(env, 0x3C4, 2); EnvOutPort(env, 0x3C5, 0x05);
     }
@@ -179,6 +183,7 @@ static class SnapshotTests
         Equal("250,170", string.Join(",", restored.KbdOut), "keyboard queue restored");
         Equal((byte)0x5A, restored.Vga.Vram[0x12345], "VRAM restored");
         Equal((byte)0x12, restored.Vga.Crtc[0x0E], "CRTC restored");
+        Equal("77,2", $"{restored.Vga.Lfb[7]:x2},{restored.Vga.Vbe[5]}", "VBE framebuffer and bank restored");
         Equal((byte)0x3F, restored.Vga.Dac[21], "DAC restored");
         Equal("7,1,2,5", $"{restored.Vga.DacWriteIndex},{restored.Vga.DacWritePhase},{restored.Vga.SequencerIndex},{restored.Vga.Sequencer[2]}", "VGA indices restored");
         Equal(true, restored.Vga.Dirty, "restored display marked dirty");
@@ -271,6 +276,7 @@ static class SnapshotTests
         env.Msrs[0x1B] = 0xFEE00900; env.Dr[7] = 0x401;
         env.Vga.Vram[1] = 0x11; env.Vga.Vram[0x10001] = 0x22; env.Vga.Vram[0x20001] = 0x33; env.Vga.Vram[0x30001] = 0x44;
         env.Vga.Read(0xB8002); // ラッチを読み込む
+        env.Vga.Vbe[1] = 1024; env.Vga.Vbe[2] = 768; env.Vga.Vbe[3] = 32; env.Vga.Vbe[4] = 0x41; env.Vga.VbeIndex = 6; env.Vga.Lfb[0x123456] = 0x9C;
         EnvOutPort(env, 0x3C0, 0x11); EnvOutPort(env, 0x3C0, 0x09); EnvOutPort(env, 0x3C0, 0x14);
         EnvOutPort(env, 0x3C2, 0xE3); EnvOutPort(env, 0x3C6, 0x3F); EnvOutPort(env, 0x3C7, 5); EnvInPort(env, 0x3C9);
         EnvOutPort(env, 0x3CE, 4); EnvOutPort(env, 0x3CF, 2); EnvOutPort(env, 0x3D4, 0x13); EnvOutPort(env, 0x3D5, 0x28);
@@ -292,7 +298,7 @@ static class SnapshotTests
 
     static string Sha256(byte[] data) => Convert.ToHexString(SHA256.HashData(data));
 
-    // v10 形式のバイト列を固定する。直列化の実装を差し替えても、同じ状態からは同じバイト列が出ること。
+    // v12 形式のバイト列を固定する。直列化の実装を差し替えても、同じ状態からは同じバイト列が出ること。
     static void Layout()
     {
         var env = Environment(); var cpu = Cpu(); PopulateAll(env, cpu);
@@ -302,13 +308,13 @@ static class SnapshotTests
             cpu.WriteTo(writer); env.SaveState(writer); env.SaveRuntimeState(writer); cpu.SaveRuntimeState(writer);
             env.SaveDeviceState(writer); env.Vga.SaveState(writer); env.Mouse.SaveState(writer); env.Com1.SaveState(writer); env.Com2.SaveState(writer);
         }
-        Equal(396430L, stream.Length, "v10 state length");
-        Equal("8D3A11DE9561C91B38A1C89400429347267F1691DA614404369C483BCE3BB32E", Sha256(stream.ToArray()), "v10 state layout (CMOS defaults with the RTC, 2026-10-28)");
+        Equal(396488L + 24 + VgaDevice.LfbSize, stream.Length, "v12 state length");
+        Equal("5753F35DB0B84616363FCA0649510EEBFFFC2ADCDF47DE1ABD102A0DEADA6FB3", Sha256(stream.ToArray()), "v12 state layout (RTC 2026-10-28, guest clock and PIT channels 2026-11-01, Bochs VBE 2026-11-01)");
         var restored = Environment();
         using (var reader = new BinaryReader(new MemoryStream(stream.ToArray()), Encoding.UTF8))
         {
             var loaded = CPU.ReadFrom(reader); restored.LoadState(reader); restored.LoadRuntimeState(reader, 10, 0); loaded.LoadRuntimeState(reader, 10);
-            restored.LoadDeviceState(reader); restored.Vga.LoadState(reader); restored.Mouse.LoadState(reader); restored.Com1.LoadState(reader); restored.Com2.LoadState(reader);
+            restored.LoadDeviceState(reader, SnapshotStore.Version); restored.Vga.LoadState(reader); restored.Mouse.LoadState(reader); restored.Com1.LoadState(reader); restored.Com2.LoadState(reader);
             Equal(reader.BaseStream.Length, reader.BaseStream.Position, "load consumes the whole state");
             using var again = new MemoryStream();
             using var rewriter = new BinaryWriter(again, Encoding.UTF8, leaveOpen: true);
@@ -319,7 +325,7 @@ static class SnapshotTests
         }
         Close(restored.Ata); Close(env.Ata); env.Ata = null;
         SnapshotStore.Save("layout.snap", 777, cpu, env);
-        Equal("24DCFB693EEB7B5DA326A8E928DA9C48A02C0836E1E39CA6B73AA69F8DA84D64", Sha256(File.ReadAllBytes("layout.snap")), "v10 file layout");
+        Equal("833051301119CD457664CC31F4BCA81F4737A3E81FA79414AF1606BF15583EE4", Sha256(File.ReadAllBytes("layout.snap")), "v12 file layout");
     }
 
     // フォルトの統一経路: #GP は例外として命令開始時の状態へ戻り、Raise が #PF/#UD と同じ形で IDT 経由で配送する。
