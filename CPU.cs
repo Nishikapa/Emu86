@@ -24,7 +24,7 @@ static public class CpuStates
         SetCpu(cpu => acc.setter(cpu)(update(acc.getter(cpu))));
 
     static public State<Unit> IpInc(int inc) =>
-        SetCpu(cpu => { cpu.eip = (uint)(cpu.eip + inc); return cpu; });
+        Effect(cpu => cpu.eip = (uint)(cpu.eip + inc));
 
     static public State<Unit> SetCpu(Func<CPU, CPU> func) =>
         (env, cpu, opcodes) => (true, unit, func(cpu), string.Empty);
@@ -38,6 +38,10 @@ static public class CpuStates
     // 環境への副作用だけを起こす(ポート出力・MSR・TLB・画面など)。CPU は変えない。
     static public State<Unit> Effect(Action<EmuEnvironment, CPU> action) =>
         (env, cpu, opcodes) => { action(env, cpu); return (true, unit, cpu, string.Empty); };
+
+    // CPU をその場で書き換える(戻り値のない動作。SetCpu(cpu => { ...; return cpu; }) の省略形)。
+    static public State<Unit> Effect(Action<CPU> action) =>
+        (env, cpu, opcodes) => { action(cpu); return (true, unit, cpu, string.Empty); };
 
     static public State<Unit> SetCpu<T>(params (Accessor<CPU, T> acc, T value)[] arr) =>
         (env, cpu, opcodes) =>
@@ -195,30 +199,18 @@ static public class AluStates
     static public State<Unit> update_eflags(uint value) => update_eflags(value.ToTypeData());
 
     static public State<Unit> update_eflags(Data data) =>
-        SetCpu(cpu =>
-        {
-            SetLogicFlags(cpu, data.type, data.Value);
-            return cpu;
-        });
+        Effect(cpu => SetLogicFlags(cpu, data.type, data.Value));
 
     // 減算 left - right(type の幅)のフラグ。CMP/NEG/CMPS/SCAS。
     static public State<Unit> update_eflags_sub(int type, uint left, uint right) =>
-        SetCpu(cpu =>
-        {
-            SetSubtractionFlags(cpu, type, left, right);
-            return cpu;
-        });
+        Effect(cpu => SetSubtractionFlags(cpu, type, left, right));
 
     static public State<Unit> update_eflags_inc(Data data) => update_eflags_incdec(data, +1);
 
     static public State<Unit> update_eflags_dec(Data data) => update_eflags_incdec(data, -1);
 
     static State<Unit> update_eflags_incdec(Data data, int delta) =>
-        SetCpu(cpu =>
-        {
-            SetIncDecFlags(cpu, data.type, data.Value, delta);
-            return cpu;
-        });
+        Effect(cpu => SetIncDecFlags(cpu, data.type, data.Value, delta));
 }
 
 
@@ -325,6 +317,7 @@ public partial class CPU
     // EFLAGS。bit1 は実 CPU では常に 1(PUSHF/トラップフレーム経由で見える。難読化コードが
     // フラグ値を演算に使うことがあるため、読み書きの両方で強制する)。
     public uint eflags { get => field | 2; set => field = value | 2; } = 2;
+    static public readonly Accessor<CPU, uint> _eflags = new(c => c.eflags, c => v => { c.eflags = v; return c; });
 
     private const uint CF = 1;
     private const uint PF = 4;

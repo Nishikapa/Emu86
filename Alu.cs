@@ -100,6 +100,30 @@ static public class Alu
     // PF: 結果の下位 8 ビットの 1 の個数が偶数なら 1。
     static public bool Par(uint v) => (System.Numerics.BitOperations.PopCount(v & 0xFF) & 1) == 0;
 
+    // value を type の幅の符号付き整数として読む。
+    static internal int SignExtend(uint value, int type) => type switch { 0 => (sbyte)value, 1 => (short)value, _ => (int)value };
+
+    // 符号付き乗算の積と、type の幅に収まらなければ立てる CF=OF(1 オペランドの IMUL は倍幅へ、2/3 オペランドは下位だけを書く)。
+    static internal (long product, bool overflow) SignedMultiply(int type, long a, long b)
+    {
+        var product = a * b;
+        var overflow = type switch
+        {
+            0 => product < sbyte.MinValue || product > sbyte.MaxValue,
+            1 => product < short.MinValue || product > short.MaxValue,
+            _ => product < int.MinValue || product > int.MaxValue,
+        };
+        return (product, overflow);
+    }
+
+    // 倍幅の結果を書く: 8 ビットは AX、16 ビットは DX:AX、32 ビットは EDX:EAX(MUL/IMUL と、RDTSC/RDMSR の EDX:EAX)。
+    static internal void WriteWide(CPU cpu, int type, ulong value)
+    {
+        if (type == 0) cpu.ax = (ushort)value;
+        else if (type == 1) { cpu.ax = (ushort)value; cpu.dx = (ushort)(value >> 16); }
+        else { cpu.eax = (uint)value; cpu.edx = (uint)(value >> 32); }
+    }
+
     // DIV/IDIV: AX/AL、DX:AX/AX、EDX:EAX/EAX を商と剰余で上書きする。0 除算は例外(ランナーが停止する)。
     static internal void Divide(CPU c, int type, uint divisor, bool signed)
     {

@@ -19,7 +19,7 @@ static partial class Instructions
         from _1 in SetLog(name)
         from type in width
         from address in port
-        from value in GetDataFromEnvCpu((env, _) => EnvInPortN(env, address, Bits(type) / 8))
+        from value in GetDataFromEnvCpu((env, _) => EnvInPortN(env, address, Bytes(type)))
         from _2 in SetRegData(0, value.ToTypeData(type))
         select unit;
 
@@ -28,7 +28,7 @@ static partial class Instructions
         from type in width
         from address in port
         from acc in GetRegData(0, type)
-        from _2 in Effect((env, _) => EnvOutPortN(env, address, Bits(type) / 8, acc.Value))
+        from _2 in Effect((env, _) => EnvOutPortN(env, address, Bytes(type), acc.Value))
         select unit;
 
     static State<int> ByteOrWord => Opecodes.Select(opecode => opecode[0] & 0x01);

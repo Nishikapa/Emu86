@@ -34,13 +34,14 @@ static partial class Instructions
     // SAHF (0x9E): AH の下位8bit を FLAGS の下位8bit(SF/ZF/AF/PF/CF)へ転送する。
     static State<Unit> Sahf_9E =>
         from _1 in SetLog("Sahf_9E")
-        from _2 in SetCpu(cpu => { Sahf(cpu); return cpu; })
+        from _2 in Effect(Sahf)
         select unit;
 
     // LAHF (0x9F): FLAGS の下位8bit を AH へ転送する。
     static State<Unit> Lahf_9F =>
         from _1 in SetLog("Lahf_9F")
-        from _2 in SetCpu(cpu => { cpu.ah = (byte)(cpu.eflags & 0xFF); return cpu; })
+        from flags in _eflags.Get()
+        from _2 in _ah.Set((byte)flags)
         select unit;
 
     static State<Unit> Clc_F8 =>

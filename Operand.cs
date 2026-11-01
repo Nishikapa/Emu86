@@ -4,10 +4,11 @@ using static Emu86.AluStates;
 
 namespace Emu86;
 
-// オペランド(Lens): 読み出す State と書き戻す関数の組。汎用レジスタ、ModRM で決まる r/m(メモリまたはレジスタ)、
-// 読み出した即値などを同じ形で扱う。d ビットで向きが決まる命令(ALU の 00-3B、MOV の 88-8B)は、
+// オペランド(Lens): 読み出す State と書き戻す関数の組。整数命令は Data(Operand)、FPU は double(Real)で同じ形を使う
+// (GlobalUsings の別名)。汎用レジスタ、ModRM で決まる r/m(メモリまたはレジスタ)、読み出した即値、スタックトップ、
+// FPU の ST(i) とメモリ形式を同じ形で扱う。d ビットで向きが決まる命令(ALU の 00-3B、MOV の 88-8B)は、
 // オペランドを入れ替えるだけで書ける。
-public readonly record struct Operand(State<Data> Read, Func<Data, State<Unit>> Write);
+public readonly record struct Lens<T>(State<T> Read, Func<T, State<Unit>> Write);
 
 static public partial class Operands
 {
@@ -28,7 +29,7 @@ static public partial class Operands
         new(Pop(type), Push);
 
     // dst <- src
-    static public State<Unit> Move(Operand dst, Operand src) =>
+    static public State<Unit> Move<T>(Lens<T> dst, Lens<T> src) =>
         from value in src.Read
         from _ in dst.Write(value)
         select Unit.unit;
@@ -50,7 +51,7 @@ static public partial class Operands
         select Unit.unit;
 
     // x <-> y
-    static public State<Unit> Swap(Operand x, Operand y) =>
+    static public State<Unit> Swap<T>(Lens<T> x, Lens<T> y) =>
         from a in x.Read
         from b in y.Read
         from _1 in x.Write(b)

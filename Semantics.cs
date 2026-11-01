@@ -839,13 +839,9 @@ public static class Semantics
         return Expression.Add(offset, Expression.Field(s.Cpu, segment));
     }
 
-    static string SegmentOf(Prefix prefixes) =>
-        (prefixes & Prefix.Es) != 0 ? nameof(CPU.es_base) :
-        (prefixes & Prefix.Cs) != 0 ? nameof(CPU.cs_base) :
-        (prefixes & Prefix.Ss) != 0 ? nameof(CPU.ss_base) :
-        (prefixes & Prefix.Ds) != 0 ? nameof(CPU.ds_base) :
-        (prefixes & Prefix.Fs) != 0 ? nameof(CPU.fs_base) :
-        (prefixes & Prefix.Gs) != 0 ? nameof(CPU.gs_base) : null;
+    // セグメントオーバーライドの基底フィールド名(ES CS SS DS FS GS の順)。無ければ null。
+    static readonly string[] SegmentBaseFields = [nameof(CPU.es_base), nameof(CPU.cs_base), nameof(CPU.ss_base), nameof(CPU.ds_base), nameof(CPU.fs_base), nameof(CPU.gs_base)];
+    static string SegmentOf(Prefix prefixes) => OverrideSegment(prefixes) is int sreg ? SegmentBaseFields[sreg] : null;
 
     static Expression CompileLoad(Scope s, Expression address, int type) =>
         type == 2 ? Call(nameof(Load32), s.Env, address) : Expression.Convert(Call(type == 0 ? nameof(Load8) : nameof(Load16), s.Env, address), typeof(uint));
@@ -1051,36 +1047,31 @@ public static class Semantics
         return (0u - value) & Mask(type);
     }
 
-    // 2 オペランド IMUL(16/32 ビット): 下位の積を返し、CF=OF=上位への溢れ。
+    // 2 オペランド IMUL(16/32 ビット): 下位の積を返し、CF=OF=上位への溢れ(規則は Alu.SignedMultiply。通常コアと共有)。
     public static uint MultiplySigned(CPU cpu, int type, uint left, uint right)
     {
-        var product = type == 1 ? (long)(short)(ushort)left * (short)(ushort)right : (long)(int)left * (int)right;
-        var overflow = type == 1 ? product < short.MinValue || product > short.MaxValue : product < int.MinValue || product > int.MaxValue;
+        var (product, overflow) = SignedMultiply(type, SignExtend(left, type), SignExtend(right, type));
         cpu.cf = overflow; cpu.of = overflow;
         return (uint)product & Mask(type);
     }
 
-    // 1 オペランド MUL/IMUL: AL*v -> AX、AX*v -> DX:AX、EAX*v -> EDX:EAX。CF=OF=上位が有効か。
+    // 1 オペランド MUL/IMUL: AL*v -> AX、AX*v -> DX:AX、EAX*v -> EDX:EAX。CF=OF=上位が有効か(規則は Alu と共有)。
     public static void Multiply(CPU cpu, int type, uint value, bool signed)
     {
-        if (!signed)
+        var accumulator = ReadRegister(cpu, 0, type);
+        ulong product;
+        bool overflow;
+        if (signed)
         {
-            uint upper;
-            if (type == 0) { var p = (uint)(cpu.al * value); upper = (p >> 8) & 0xFF; cpu.ax = (ushort)p; }
-            else if (type == 1) { var p = cpu.ax * value; upper = (p >> 16) & 0xFFFF; cpu.ax = (ushort)p; cpu.dx = (ushort)(p >> 16); }
-            else { var p = (ulong)cpu.eax * value; upper = (uint)(p >> 32); cpu.eax = (uint)p; cpu.edx = (uint)(p >> 32); }
-            cpu.cf = upper != 0; cpu.of = upper != 0;
-            return;
+            (var signedProduct, overflow) = SignedMultiply(type, SignExtend(accumulator, type), SignExtend(value, type));
+            product = (ulong)signedProduct;
         }
-        var product = type == 0 ? (sbyte)cpu.al * (sbyte)(byte)value
-                    : type == 1 ? (short)cpu.ax * (short)(ushort)value
-                    : (long)(int)cpu.eax * (int)value;
-        var overflow = type == 0 ? product < sbyte.MinValue || product > sbyte.MaxValue
-                     : type == 1 ? product < short.MinValue || product > short.MaxValue
-                     : product < int.MinValue || product > int.MaxValue;
-        if (type == 0) cpu.ax = (ushort)(short)product;
-        else if (type == 1) { cpu.ax = (ushort)product; cpu.dx = (ushort)(product >> 16); }
-        else { cpu.eax = (uint)product; cpu.edx = (uint)(product >> 32); }
+        else
+        {
+            product = (ulong)accumulator * value;
+            overflow = product >> Bits(type) != 0;
+        }
+        WriteWide(cpu, type, product);
         cpu.cf = overflow; cpu.of = overflow;
     }
 
@@ -1098,7 +1089,7 @@ public static class Semantics
     // LEAVE: (E)SP <- (E)BP; (E)BP <- pop。読み取りを先に行い、フォルト時には何も変えない。
     public static void Leave(EmuEnvironment env, CPU cpu, int type)
     {
-        var size = type == 1 ? 2 : 4;
+        var size = Bytes(type);
         var pointer = cpu.stack32 ? cpu.ebp : cpu.bp;
         var value = EnvReadN(env, cpu.ss_base + pointer, size);
         if (cpu.stack32) cpu.esp = pointer + (uint)size; else cpu.sp = (ushort)(pointer + size);
@@ -1289,11 +1280,7 @@ public static class Semantics
 
     public static void PortOut(EmuEnvironment env, int type, uint port, uint value) => EnvOutPortN(env, (int)port, Bytes(type), value);
 
-    public static void Rdtsc(EmuEnvironment env, CPU cpu)
-    {
-        cpu.eax = (uint)env.Tsc;
-        cpu.edx = (uint)(env.Tsc >> 32);
-    }
+    public static void Rdtsc(EmuEnvironment env, CPU cpu) => WriteWide(cpu, 2, env.Tsc);
 
     public static void Cpuid(CPU cpu) => (cpu.eax, cpu.ebx, cpu.ecx, cpu.edx) = Instructions.CpuidLeaf(cpu.eax);
 

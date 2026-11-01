@@ -355,9 +355,7 @@ public static class Disassembler
 
     static string SegmentPrefix(Instruction instruction, string defaultSegment)
     {
-        var prefixes = instruction.Prefixes;
-        var segment = (prefixes & Prefix.Es) != 0 ? "es" : (prefixes & Prefix.Cs) != 0 ? "cs" : (prefixes & Prefix.Ss) != 0 ? "ss"
-            : (prefixes & Prefix.Ds) != 0 ? "ds" : (prefixes & Prefix.Fs) != 0 ? "fs" : (prefixes & Prefix.Gs) != 0 ? "gs" : null;
+        var segment = OverrideSegment(instruction.Prefixes) is int sreg ? Seg[sreg] : null;
         return segment == null || segment == defaultSegment ? "" : segment + ":";
     }
 

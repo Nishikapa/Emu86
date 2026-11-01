@@ -1,4 +1,3 @@
-using System.Text;
 using static Emu86.Conversions;
 using static Emu86.GuestMemory;
 using static Emu86.Ports;
@@ -31,16 +30,11 @@ internal static class GuestMemory
 
     // NUL 終端までの ASCII 文字列(最大 length 文字、表示できない文字は '.')。
     public static Guest<string> Ascii(uint pointer, int length) => env =>
-    {
-        var text = new StringBuilder();
-        for (var offset = 0; offset < length; offset++)
-        {
-            var character = EnvGetMemoryData8(env, pointer + (uint)offset);
-            if (character == 0) break;
-            text.Append(character is >= 0x20 and < 0x7f ? (char)character : '.');
-        }
-        return text.ToString();
-    };
+        string.Concat(Enumerable.InfiniteSequence(pointer, 1u)
+            .Take(length)
+            .Select(address => EnvGetMemoryData8(env, address))
+            .TakeWhile(character => character != 0)
+            .Select(character => character is >= 0x20 and < 0x7f ? (char)character : '.'));
 
     // 連結リストをたどる: start から step で (値, 次) を読み、次が 0 になるか limit 回まで。
     // 途中で読めなくなったら、そこまでの値と faulted=true を返す。

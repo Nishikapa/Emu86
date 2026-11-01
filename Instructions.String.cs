@@ -86,7 +86,7 @@ static partial class Instructions
         // 反復は数百万回になる(rep insw のディスク読み込み)ので、各 State は 1 度だけ組み立てて Then で連ねる。
         State<Unit> instruction = (e, c, _) => state(e, c, [op]);
         var decrement = a32 ? _ecx.Modify(ecx => ecx - 1) : _cx.Modify(cx => (ushort)(cx - 1));
-        var commit = SetCpu(c => { c.Decode.CommitRepeat(c); stop = checkZf && c.zf != repZf.Value; return c; });
+        var commit = Effect(c => { c.Decode.CommitRepeat(c); stop = checkZf && c.zf != repZf.Value; });
         return While(c => !stop && (a32 ? c.ecx : c.cx) != 0, instruction.Then(decrement).Then(commit))(env, cpu2, ope);
     };
 

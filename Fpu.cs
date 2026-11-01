@@ -2,6 +2,7 @@ using static Emu86.CPU;
 using static Emu86.Unit;
 using static Emu86.Conversions;
 using static Emu86.States;
+using static Emu86.Operands;
 using static Emu86.Ports;
 using static Emu86.Mmu;
 using static Emu86.CpuStates;
@@ -154,20 +155,15 @@ static public class Fpu
     // --- FNSTENV/FLDENV/FNSAVE/FRSTOR(32 ビット保護モード形式) ----------------
     // env: cw(4) sw(4) tag(4) fip(4) fcs(4) fdp(4) fds(4) = 28 バイト
     // save: env + ST(0)..ST(7) の 80 ビット値 ×8 = 108 バイト
-    static uint FpuTagWord(CPU c)
-    {
-        uint tag = 0;
-        for (var j = 0; j < 8; j++)
-        {
-            uint t;
-            if ((c.fpu_valid & (1 << j)) == 0) t = 3;                       // empty
-            else if (c.fpu_st[j] == 0) t = 1;                               // zero
-            else if (double.IsNaN(c.fpu_st[j]) || double.IsInfinity(c.fpu_st[j])) t = 2; // special
-            else t = 0;                                                     // valid
-            tag |= t << (2 * j);
-        }
-        return tag;
-    }
+    // 物理レジスタ j のタグ: 0 valid、1 zero、2 special(NaN/Inf)、3 empty。
+    static uint FpuTag(CPU c, int j) =>
+        (c.fpu_valid & (1 << j)) == 0 ? 3u
+        : c.fpu_st[j] == 0 ? 1u
+        : double.IsNaN(c.fpu_st[j]) || double.IsInfinity(c.fpu_st[j]) ? 2u
+        : 0u;
+
+    static uint FpuTagWord(CPU c) =>
+        Enumerable.Range(0, 8).Aggregate(0u, (tag, j) => tag | FpuTag(c, j) << (2 * j));
 
     static void FpuStEnv(EmuEnvironment env, CPU c, uint a)
     {
@@ -187,10 +183,7 @@ static public class Fpu
         c.fpu_sw = (ushort)(sw & 0xC7FF);
         c.fpu_top = (int)((sw >> 11) & 7);
         var tag = EnvGetMemoryData32(env, a + 8);
-        c.fpu_valid = 0;
-        for (var j = 0; j < 8; j++)
-            if (((tag >> (2 * j)) & 3) != 3)
-                c.fpu_valid |= (byte)(1 << j);
+        c.fpu_valid = (byte)Enumerable.Range(0, 8).Where(j => ((tag >> (2 * j)) & 3) != 3).Sum(j => 1 << j); // empty 以外を有効に
     }
 
     static void FpuSave(EmuEnvironment env, CPU c, uint a)
@@ -217,40 +210,36 @@ static public class Fpu
     }
 
     // --- 命令の記述: オペランド(Lens)と操作 ------------------------------------
-    // Real は double として読む State と書き戻す関数の組(整数命令の Operand と同じ考え方)。ST(i) とメモリ形式
+    // Real は double を読み書きする Lens(整数命令の Operand と同じ Lens<T>。Move/Swap も共有)。ST(i) とメモリ形式
     // (f32/f64/int16/int32/int64/f80)を同じ形で扱うので、命令は「どこから読み、どこへ書き、何を計算するか」だけで書ける。
-    static State<Unit> Apply(Action<CPU> action) => SetCpu(c => { action(c); return c; });
-    static State<Unit> ApplyEnv(Action<EmuEnvironment, CPU> action) => SetCpu((e, c) => { action(e, c); return c; });
-
-    static Real StReal(int i) => new(GetDataFromCpu(c => St(c, i)), v => Apply(c => StSet(c, i, v)));
+    static Real StReal(int i) => new(GetDataFromCpu(c => St(c, i)), v => Effect(c => StSet(c, i, v)));
     static readonly Real St0 = StReal(0), St1 = StReal(1);
     static Real Constant(double value) => new(value.ToState(), _ => throw new InvalidOperationException("constant operand is read-only"));
     static readonly Real Zero = Constant(0.0);
-    static Real F32At(uint a) => new(GetDataFromEnvCpu((e, _) => FpuReadF32(e, a)), v => ApplyEnv((e, _) => FpuWriteF32(e, a, v)));
-    static Real F64At(uint a) => new(GetDataFromEnvCpu((e, _) => FpuReadF64(e, a)), v => ApplyEnv((e, _) => FpuWriteF64(e, a, v)));
-    static Real I16At(uint a) => new(GetDataFromEnvCpu((e, _) => (double)(short)EnvGetMemoryData16(e, a)), v => ApplyEnv((e, c) => EnvWriteWord(e, a, FpuToInt16(c, v))));
-    static Real I32At(uint a) => new(GetDataFromEnvCpu((e, _) => (double)(int)EnvGetMemoryData32(e, a)), v => ApplyEnv((e, c) => EnvWriteDword(e, a, FpuToInt32(c, v))));
-    static Real I64At(uint a) => new(GetDataFromEnvCpu((e, _) => (double)(long)FpuR64(e, a)), v => ApplyEnv((e, c) => FpuW64(e, a, FpuToInt64(c, v))));
+    static Real F32At(uint a) => new(GetDataFromEnvCpu((e, _) => FpuReadF32(e, a)), v => Effect((e, _) => FpuWriteF32(e, a, v)));
+    static Real F64At(uint a) => new(GetDataFromEnvCpu((e, _) => FpuReadF64(e, a)), v => Effect((e, _) => FpuWriteF64(e, a, v)));
+    static Real I16At(uint a) => new(GetDataFromEnvCpu((e, _) => (double)(short)EnvGetMemoryData16(e, a)), v => Effect((e, c) => EnvWriteWord(e, a, FpuToInt16(c, v))));
+    static Real I32At(uint a) => new(GetDataFromEnvCpu((e, _) => (double)(int)EnvGetMemoryData32(e, a)), v => Effect((e, c) => EnvWriteDword(e, a, FpuToInt32(c, v))));
+    static Real I64At(uint a) => new(GetDataFromEnvCpu((e, _) => (double)(long)FpuR64(e, a)), v => Effect((e, c) => FpuW64(e, a, FpuToInt64(c, v))));
     static Real F80At(uint a) => new(GetDataFromEnvCpu((e, _) => F80ToDouble(FpuR64(e, a), EnvGetMemoryData16(e, a + 8))),
-        v => ApplyEnv((e, _) => { var (mant, se) = DoubleToF80(v); FpuW64(e, a, mant); EnvWriteWord(e, a + 8, se); }));
+        v => Effect((e, _) => { var (mant, se) = DoubleToF80(v); FpuW64(e, a, mant); EnvWriteWord(e, a + 8, se); }));
 
     // 何もしない State。State.cs の Pass は別ファイルの静的フィールドなので、表の初期化順に依存しないよう自前で持つ。
     static readonly State<Unit> FpuNop = unit.ToState();
-    static readonly State<Unit> PopSt = Apply(FpuPop);
-    static State<Unit> Pops(int count) => count == 0 ? FpuNop : count == 1 ? PopSt : PopSt.Then(PopSt);
-    static State<Unit> Push(double value) => Apply(c => FpuPush(c, value));
-    static readonly State<Unit> ClearC2 = Apply(c => c.fpu_sw &= unchecked((ushort)~FpuC2));
+    static readonly State<Unit> PopSt = Effect(FpuPop);
+    static State<Unit> Pops(int count) => Enumerable.Repeat(PopSt, count).Aggregate(FpuNop, States.Then);
+    static State<Unit> Push(double value) => Effect(c => FpuPush(c, value));
+    static readonly State<Unit> ClearC2 = Effect(c => c.fpu_sw &= unchecked((ushort)~FpuC2));
 
     // push src
     static State<Unit> Load(Real src) =>
         from v in src.Read
-        from _ in Apply(c => FpuPush(c, v))
+        from _ in Effect(c => FpuPush(c, v))
         select unit;
 
     // dst <- ST0、pop なら続けて pop
     static State<Unit> Store(Real dst, bool pop = false) =>
-        from v in St0.Read
-        from _1 in dst.Write(v)
+        from _1 in Move(dst, St0)
         from _2 in Pops(pop ? 1 : 0)
         select unit;
 
@@ -272,7 +261,7 @@ static public class Fpu
     static State<Unit> Compare(Real other, int pops = 0) =>
         from x in St0.Read
         from y in other.Read
-        from _1 in Apply(c => FpuCompare(c, x, y))
+        from _1 in Effect(c => FpuCompare(c, x, y))
         from _2 in Pops(pops)
         select unit;
 
@@ -280,17 +269,12 @@ static public class Fpu
     static State<Unit> CompareEflags(Real other, int pops = 0) =>
         from x in St0.Read
         from y in other.Read
-        from _1 in Apply(c => FpuCompareEflags(c, x, y))
+        from _1 in Effect(c => FpuCompareEflags(c, x, y))
         from _2 in Pops(pops)
         select unit;
 
     // ST0 <-> ST(i)
-    static State<Unit> Exchange(int i) =>
-        from a in St0.Read
-        from b in StReal(i).Read
-        from _1 in St0.Write(b)
-        from _2 in StReal(i).Write(a)
-        select unit;
+    static State<Unit> Exchange(int i) => Swap(St0, StReal(i));
 
     // 条件が成り立てば ST0 <- ST(i)(FCMOVcc)
     static State<Unit> ConditionalMove(Func<CPU, bool> condition, int i) =>
@@ -362,16 +346,16 @@ static public class Fpu
         var table = new Dictionary<(int op, int reg), Func<uint, State<Unit>>>
         {
             [(0xD9, 0)] = a => Load(F32At(a)), [(0xD9, 2)] = a => Store(F32At(a)), [(0xD9, 3)] = a => Store(F32At(a), pop: true),
-            [(0xD9, 4)] = a => ApplyEnv((e, c) => FpuLdEnv(e, c, a)),                        // FLDENV
-            [(0xD9, 5)] = a => ApplyEnv((e, c) => c.fpu_cw = EnvGetMemoryData16(e, a)),       // FLDCW
-            [(0xD9, 6)] = a => ApplyEnv((e, c) => { FpuStEnv(e, c, a); c.fpu_cw |= 0x3F; }),  // FNSTENV(例外を全マスク)
-            [(0xD9, 7)] = a => ApplyEnv((e, c) => EnvWriteWord(e, a, c.fpu_cw)),             // FNSTCW
+            [(0xD9, 4)] = a => Effect((e, c) => FpuLdEnv(e, c, a)),                        // FLDENV
+            [(0xD9, 5)] = a => Effect((e, c) => c.fpu_cw = EnvGetMemoryData16(e, a)),       // FLDCW
+            [(0xD9, 6)] = a => Effect((e, c) => { FpuStEnv(e, c, a); c.fpu_cw |= 0x3F; }),  // FNSTENV(例外を全マスク)
+            [(0xD9, 7)] = a => Effect((e, c) => EnvWriteWord(e, a, c.fpu_cw)),             // FNSTCW
             [(0xDB, 0)] = a => Load(I32At(a)), [(0xDB, 2)] = a => Store(I32At(a)), [(0xDB, 3)] = a => Store(I32At(a), pop: true),
             [(0xDB, 5)] = a => Load(F80At(a)), [(0xDB, 7)] = a => Store(F80At(a), pop: true),
             [(0xDD, 0)] = a => Load(F64At(a)), [(0xDD, 2)] = a => Store(F64At(a)), [(0xDD, 3)] = a => Store(F64At(a), pop: true),
-            [(0xDD, 4)] = a => ApplyEnv((e, c) => FpuRstor(e, c, a)),                         // FRSTOR
-            [(0xDD, 6)] = a => ApplyEnv((e, c) => FpuSave(e, c, a)),                          // FNSAVE
-            [(0xDD, 7)] = a => ApplyEnv((e, c) => EnvWriteWord(e, a, FpuSw(c))),              // FNSTSW m16
+            [(0xDD, 4)] = a => Effect((e, c) => FpuRstor(e, c, a)),                         // FRSTOR
+            [(0xDD, 6)] = a => Effect((e, c) => FpuSave(e, c, a)),                          // FNSAVE
+            [(0xDD, 7)] = a => Effect((e, c) => EnvWriteWord(e, a, FpuSw(c))),              // FNSTSW m16
             [(0xDF, 0)] = a => Load(I16At(a)), [(0xDF, 2)] = a => Store(I16At(a)), [(0xDF, 3)] = a => Store(I16At(a), pop: true),
             [(0xDF, 5)] = a => Load(I64At(a)), [(0xDF, 7)] = a => Store(I64At(a), pop: true),
         };
@@ -392,7 +376,7 @@ static public class Fpu
         [(0xD9, 4, 0)] = Unary(x => -x),                                              // FCHS
         [(0xD9, 4, 1)] = Unary(Math.Abs),                                             // FABS
         [(0xD9, 4, 4)] = Compare(Zero),                                               // FTST
-        [(0xD9, 4, 5)] = Apply(FpuExamine),                                             // FXAM
+        [(0xD9, 4, 5)] = Effect(FpuExamine),                                             // FXAM
         [(0xD9, 5, 0)] = Push(1.0),                                                   // FLD1
         [(0xD9, 5, 1)] = Push(3.321928094887362),                                     // FLDL2T
         [(0xD9, 5, 2)] = Push(1.4426950408889634),                                    // FLDL2E
@@ -404,23 +388,23 @@ static public class Fpu
         [(0xD9, 6, 1)] = Compute(St1, St1, (x, y) => y * Math.Log2(x), pops: 1),      // FYL2X
         [(0xD9, 6, 2)] = Unary(Math.Tan).Then(Push(1.0)).Then(ClearC2),               // FPTAN
         [(0xD9, 6, 3)] = Compute(St1, St1, (x, y) => Math.Atan2(y, x), pops: 1),      // FPATAN
-        [(0xD9, 6, 4)] = Apply(FpuExtract),                                             // FXTRACT
+        [(0xD9, 6, 4)] = Effect(FpuExtract),                                             // FXTRACT
         [(0xD9, 6, 5)] = Compute(St0, St1, Math.IEEERemainder).Then(ClearC2),         // FPREM1
-        [(0xD9, 6, 6)] = Apply(c => c.fpu_top = (c.fpu_top - 1) & 7),                   // FDECSTP
-        [(0xD9, 6, 7)] = Apply(c => c.fpu_top = (c.fpu_top + 1) & 7),                   // FINCSTP
-        [(0xD9, 7, 0)] = Apply(FpuRemainder),                                           // FPREM
+        [(0xD9, 6, 6)] = Effect(c => c.fpu_top = (c.fpu_top - 1) & 7),                   // FDECSTP
+        [(0xD9, 6, 7)] = Effect(c => c.fpu_top = (c.fpu_top + 1) & 7),                   // FINCSTP
+        [(0xD9, 7, 0)] = Effect(FpuRemainder),                                           // FPREM
         [(0xD9, 7, 1)] = Compute(St1, St1, (x, y) => y * Math.Log2(x + 1.0), pops: 1), // FYL2XP1
         [(0xD9, 7, 2)] = Unary(Math.Sqrt),                                            // FSQRT
-        [(0xD9, 7, 3)] = Apply(FpuSinCos),                                              // FSINCOS
-        [(0xD9, 7, 4)] = Apply(c => StSet(c, 0, FpuRound(c, St(c, 0)))),                // FRNDINT
+        [(0xD9, 7, 3)] = Effect(FpuSinCos),                                              // FSINCOS
+        [(0xD9, 7, 4)] = Effect(c => StSet(c, 0, FpuRound(c, St(c, 0)))),                // FRNDINT
         [(0xD9, 7, 5)] = Compute(St0, St1, (x, y) => x * Math.Pow(2.0, Math.Truncate(y))), // FSCALE
         [(0xD9, 7, 6)] = Unary(Math.Sin).Then(ClearC2),                               // FSIN
         [(0xD9, 7, 7)] = Unary(Math.Cos).Then(ClearC2),                               // FCOS
         [(0xDA, 5, 1)] = Compare(St1, pops: 2),                                       // FUCOMPP
-        [(0xDB, 4, 2)] = Apply(c => c.fpu_sw &= 0x7F00),                                // FNCLEX
-        [(0xDB, 4, 3)] = Apply(FpuInit),                                                // FNINIT
+        [(0xDB, 4, 2)] = Effect(c => c.fpu_sw &= 0x7F00),                                // FNCLEX
+        [(0xDB, 4, 3)] = Effect(FpuInit),                                                // FNINIT
         [(0xDE, 3, 1)] = Compare(St1, pops: 2),                                       // FCOMPP
-        [(0xDF, 4, 0)] = Apply(c => c.ax = FpuSw(c)),                                   // FNSTSW AX
+        [(0xDF, 4, 0)] = Effect(c => c.ax = FpuSw(c)),                                   // FNSTSW AX
     };
 
     // レジスタ形式: (op, reg) → ST(i) の番号から命令を作る。
@@ -443,7 +427,7 @@ static public class Fpu
             [(0xDB, 3)] = i => ConditionalMove(c => !c.pf, i),                    // FCMOVNU
             [(0xDB, 5)] = i => CompareEflags(StReal(i)),                          // FUCOMI
             [(0xDB, 6)] = i => CompareEflags(StReal(i)),                          // FCOMI
-            [(0xDD, 0)] = i => Apply(c => c.fpu_valid &= (byte)~(1 << StIdx(c, i))), // FFREE
+            [(0xDD, 0)] = i => Effect(c => c.fpu_valid &= (byte)~(1 << StIdx(c, i))), // FFREE
             [(0xDD, 2)] = i => Store(StReal(i)),                                  // FST ST(i)
             [(0xDD, 3)] = i => Store(StReal(i), pop: true),                       // FSTP ST(i)
             [(0xDD, 4)] = i => Compare(StReal(i)),                                // FUCOM
@@ -478,6 +462,3 @@ static public class Fpu
         from _ in FpuInstruction(ope[0], m.mod, m.reg, m.rm)
         select unit;
 }
-
-// FPU のオペランド(Lens): double として読む State と書き戻す関数の組。
-public readonly record struct Real(State<double> Read, Func<double, State<Unit>> Write);

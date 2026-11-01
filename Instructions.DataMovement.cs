@@ -40,20 +40,26 @@ static partial class Instructions
         from off in a32 ? GetMemoryDataIp32 : GetMemoryDataIp16.Select(dw => (uint)dw)
         select off;
 
+    // moffs オペランド: オフセットを読み、既定 DS(セグメントオーバーライドで置換)のメモリとして。
+    static State<Operand> Moffs(int type) =>
+        from offset in MoffsOffset
+        from address in MoffsAddress(offset)
+        select Rm(address, type);
+
     // MOV AL/AX/EAX, [moffs] (0xA0/0xA1): 直接アドレス(DS:offset)から読み込む。
     static State<Unit> Mov_A0_A1 =>
         from _1 in SetLog("Mov_A0_A1")
-        from offset in MoffsOffset
         from type in OperandTypeW
-        from _2 in MovAccFromMoffs(type, offset)
+        from moffs in Moffs(type)
+        from _2 in Move(Reg(0, type), moffs)
         select unit;
 
     // MOV [moffs], AL/AX/EAX (0xA2/0xA3): アキュムレータを直接アドレス(DS:offset)へ書き込む。
     static State<Unit> Mov_A2_A3 =>
         from _1 in SetLog("Mov_A2_A3")
-        from offset in MoffsOffset
         from type in OperandTypeW
-        from _2 in MovMoffsFromAcc(type, offset)
+        from moffs in Moffs(type)
+        from _2 in Move(moffs, Reg(0, type))
         select unit;
 
     static State<Unit> Mov_8E =>
@@ -190,9 +196,10 @@ static partial class Instructions
         from _2 in SetMemOrRegData(addr, sreg.ToTypeData())
         select unit;
 
-    // XLAT (0xD7): AL <- [DS:BX + AL]
+    // XLAT (0xD7): AL <- [DS:BX + AL](バイト変換テーブル参照)
     static State<Unit> Xlat_D7 =>
         from _1 in SetLog("Xlat_D7")
-        from _2 in Xlat
+        from table in GetDataFromCpu(cpu => (MemAddr)(true, cpu.ds_base + (ushort)(cpu.bx + cpu.al)))
+        from _2 in Move(Reg(0, 0), Rm(table, 0))
         select unit;
 }

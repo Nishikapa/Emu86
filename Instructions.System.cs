@@ -52,7 +52,7 @@ static partial class Instructions
         from _1 in SetLog("Cpuid_0FA2")
         from leaf in GetRegData32(0) // EAX
         let result = CpuidLeaf(leaf)
-        from _2 in SetCpu(cpu => { (cpu.eax, cpu.ebx, cpu.ecx, cpu.edx) = result; return cpu; })
+        from _2 in Effect(cpu => (cpu.eax, cpu.ebx, cpu.ecx, cpu.edx) = result)
         select unit;
 
     // CPUID の応答 (EAX, EBX, ECX, EDX)。
@@ -105,7 +105,7 @@ static partial class Instructions
     // HLT: 印を立てるだけ。待機(次の割り込みまで仮想時間を進める)はランナーが行う。
     static State<Unit> Hlt_F4 =>
         from _1 in SetLog("Hlt_F4")
-        from _2 in SetCpu(cpu => { cpu.Halted = true; return cpu; })
+        from _2 in Effect(cpu => cpu.Halted = true)
         select unit;
 
     // SGDT/SIDT (0F 01 /0, /1): limit(16bit) + base(32bit) をメモリへ書き出す。
@@ -121,11 +121,10 @@ static partial class Instructions
         from addr in GetMemOrRegAddr(mod, rm)
         from dw in GetMemOrRegData16(addr)
         from dd in GetMemOrRegData32((addr.isMem, addr.addr + 2))
-        from _ in SetCpu(cpu =>
+        from _ in Effect(cpu =>
         {
             if (idt) { cpu.idt_base = dd; cpu.idt_limit = dw; }
             else { cpu.gdt_base = dd; cpu.gdt_limit = dw; }
-            return cpu;
         })
         select unit;
 
@@ -181,7 +180,7 @@ static partial class Instructions
     static State<Unit> LldtLtr((int mod, int reg, int rm) m) =>
         from addr in GetMemOrRegAddr(m.mod, m.rm)
         from sel in GetMemOrRegData16(addr)
-        from _ in SetCpu(cpu => { if (m.reg == 3) cpu.tr = sel; else cpu.ldtr = sel; return cpu; })
+        from _ in Effect(cpu => { if (m.reg == 3) cpu.tr = sel; else cpu.ldtr = sel; })
         select unit;
 
     static State<Unit> Group7_0F01 =>

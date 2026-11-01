@@ -442,34 +442,9 @@ static public class DataAccess
             .Sequence()
             .Ignore();
 
-    // XLAT: AL <- [DS:BX + AL]（バイト変換テーブル参照）。
-    static public State<Unit> Xlat =>
-        SetCpu((env, cpu) =>
-        {
-            var addr = cpu.ds_base + (ushort)(cpu.bx + cpu.al);
-            return _al.setter(cpu)(EnvGetMemoryData8(env, addr));
-        });
-
-    // moffs の物理アドレス。既定 DS(セグメントオーバーライドで置換)+ オフセット。
-    static uint EnvMoffsAddr(CPU cpu, uint offset) =>
-        EnvSegBases(cpu).seg + offset;
-
-    // MOV AL/AX/EAX, [moffs]: 直接アドレス DS:offset から読み、アキュムレータへ書く。
-    static public State<Unit> MovAccFromMoffs(int type, uint offset) =>
-        SetCpu((env, cpu) =>
-        {
-            var addr = EnvMoffsAddr(cpu, offset);
-            return type switch
-            {
-                0 => _al.setter(cpu)(EnvGetMemoryData8(env, addr)),
-                1 => _ax.setter(cpu)(EnvGetMemoryData16(env, addr)),
-                _ => _eax.setter(cpu)(EnvGetMemoryData32(env, addr)),
-            };
-        });
-
-    // MOV [moffs], AL/AX/EAX: アキュムレータを直接アドレス DS:offset へ書く。
-    static public State<Unit> MovMoffsFromAcc(int type, uint offset) =>
-        Effect((env, cpu) => EnvWriteN(env, EnvMoffsAddr(cpu, offset), Bits(type) / 8, cpu.eax));
+    // moffs のメモリアドレス。既定 DS(セグメントオーバーライドで置換)+ オフセット。
+    static public State<MemAddr> MoffsAddress(uint offset) =>
+        GetDataFromCpu(cpu => (MemAddr)(true, EnvSegBases(cpu).seg + offset));
 
     // セグメントレジスタ(ES/CS/SS/DS/FS/GS)を reg 番号で読み出す。
     static public State<ushort> GetSRegData(int reg) =>
@@ -824,7 +799,7 @@ static public class Interrupts
         from _2 in Push16(cs)
         from ip in GetDataFromCpu(cpu => cpu.ip)
         from _3 in Push16(ip)
-        from _if in SetCpu(cpu => { cpu.jf = false; cpu.tf = false; return cpu; })
+        from _if in SetCpu((_jf, false), (_tf, false))
         from newip in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryData16(env, (uint)(vector * 4)))
         from newcs in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryData16(env, (uint)(vector * 4 + 2)))
         from _4 in _ip.Set(newip)
@@ -854,7 +829,7 @@ static public class Interrupts
         let fromVm = cpu0.vm
         let cpl = cpu0.cpl // VM を落とす前に評価する(V86 なら 3)
         let fl = cpu0.eflags
-        from _vm in When(fromVm, SetCpu(cpu => { cpu.eflags &= ~0x20000u; return cpu; }))
+        from _vm in When(fromVm, _eflags.Modify(flags => flags & ~0x20000u))
         from _sw in SwitchToInnerStack(sel, cpl, fromVm)
         from _1 in Push(fl.ToTypeData())
         from cs in GetSRegData(1)
@@ -864,7 +839,8 @@ static public class Interrupts
         // 一部の例外(#PF 等)は EIP の後ろにエラーコードを push する。
         from _e in When(hasError, Push(errorCode.ToTypeData()))
         // 割り込みゲート(型 0xE)は IF をクリアする。トラップゲート(0xF)は保つ。
-        from _if in SetCpu(cpu => { if (gateType == 0xE) cpu.jf = false; cpu.tf = false; return cpu; })
+        from _if in When(gateType == 0xE, _jf.Set(false))
+        from _t in _tf.Set(false)
         from _4 in _eip.Set(offset)
         from _5 in LoadSReg(1, sel)
         select Unit.unit;
@@ -892,13 +868,11 @@ static public class Interrupts
                 select Unit.unit)
             from _3 in Push(((uint)ctx.oldSs).ToTypeData())
             from _4 in Push(ctx.oldEsp.ToTypeData())
-            from _n in When(fromVm, SetCpu(cpu =>
-                {
-                    foreach (var reg in new[] { 0, 3, 4, 5 })
-                        cpu = EnvSetSReg3(0)(reg)(cpu);
-                    return cpu;
-                }))
+            from _n in When(fromVm, new[] { 0, 3, 4, 5 }.Select(NullSelector).Sequence().Ignore()) // ES DS FS GS
             select Unit.unit);
+
+    // セグメントレジスタにヌルセレクタを入れる(記述子は読まない)。
+    static State<Unit> NullSelector(int reg) => SetCpu(EnvSetSReg3(0)(reg));
 
     // 外側の特権レベル(例: ring0 → ring3)へ戻るときは、さらに ESP と SS を pop してスタックを切り替える。
     // V86 モード内の far 復帰はリアルモード同様で、セレクタの下位ビットは特権を意味しない。
@@ -925,12 +899,9 @@ static public class Interrupts
         from cs in Pop16
         from _2 in LoadSReg(1, cs)
         from fl in Pop16
-        from _3 in SetCpu(cpu =>
-        {
-            var keep = cpu.vm ? 0x3000u : 0u;
-            cpu.eflags = (cpu.eflags & (0xFFFF0000 | keep)) | (fl & ~keep);
-            return cpu;
-        })
+        from vm in GetDataFromCpu(cpu => cpu.vm)
+        let keep = vm ? 0x3000u : 0u
+        from _3 in _eflags.Modify(flags => (flags & (0xFFFF0000 | keep)) | (fl & ~keep))
         select Unit.unit;
 
     static State<Unit> Iret32 =>
@@ -946,7 +917,7 @@ static public class Interrupts
                    : (from _0 in ReturnToOuterStack((ushort)cs.dd) // 旧 SS で ESP/SS を pop してから CS をロードする
                       from _1 in _eip.Set(eip.dd)
                       from _2 in LoadSReg(1, (ushort)cs.dd)
-                      from _3 in SetCpu(cpu => { cpu.eflags = fl.dd; return cpu; })
+                      from _3 in _eflags.Set(fl.dd)
                       select Unit.unit)
                select Unit.unit)
         select Unit.unit;
@@ -982,11 +953,11 @@ static public class Interrupts
         from ds in Pop(2)
         from fs in Pop(2)
         from gs in Pop(2)
-        from _f in SetCpu(cpu => { cpu.eflags = flags; return cpu; }) // 以降のセグメントロードは V86 規則
+        from _f in _eflags.Set(flags) // 以降のセグメントロードは V86 規則
         from _1 in _eip.Set(eip)
         from _2 in LoadSReg(1, cs)
         from _3 in LoadSReg(2, (ushort)ss.dd)
-        from _4 in SetCpu(cpu => { cpu.esp = sp.dd; return cpu; })
+        from _4 in _esp.Set(sp.dd)
         from _5 in LoadSReg(0, (ushort)es.dd)
         from _6 in LoadSReg(3, (ushort)ds.dd)
         from _7 in LoadSReg(4, (ushort)fs.dd)

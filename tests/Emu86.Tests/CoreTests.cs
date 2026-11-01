@@ -159,7 +159,7 @@ static class CoreTests
                 try
                 {
                     if (fast) IrStep.Step(env, cpu);
-                    else if (moffs) MovMoffsFromAcc(2, cpu.ebx)(env, cpu, null);
+                    else if (moffs) Operands.Move(Operands.Rm((true, cpu.ds_base + cpu.ebx), 2), Operands.Reg(0, 2))(env, cpu, null);
                     else SetMemOrRegData((true, cpu.ebx), cpu.eax.ToTypeData())(env, cpu, null);
                     throw new Exception("expected page fault");
                 }

@@ -134,7 +134,14 @@ static public partial class Decoder
         return (true, prefixes, pos + length);
     };
 
-    // セグメントオーバーライドの基底。複数あるときは ES > CS > SS > DS > FS > GS の優先順、無ければ null。
+    // セグメントオーバーライドの番号(ES=0 CS=1 SS=2 DS=3 FS=4 GS=5)。複数あるときは ES > CS > SS > DS > FS > GS の優先順、無ければ null
+    // (冷たい経路向け: 逆アセンブラとコンパイラ。毎アクセスの経路は下の OverrideBase)。
+    static readonly (Prefix flag, int sreg)[] SegmentOverrides = [(Prefix.Es, 0), (Prefix.Cs, 1), (Prefix.Ss, 2), (Prefix.Ds, 3), (Prefix.Fs, 4), (Prefix.Gs, 5)];
+
+    static public int? OverrideSegment(Prefix prefixes) =>
+        SegmentOverrides.FirstOrDefault(entry => (prefixes & entry.flag) != 0) is (not Prefix.None, var sreg) ? sreg : null;
+
+    // セグメントオーバーライドの基底。優先順は OverrideSegment と同じ、無ければ null。
     static public uint? OverrideBase(Prefix prefixes, CPU cpu) =>
         (prefixes & Prefix.Es) != 0 ? cpu.es_base :
         (prefixes & Prefix.Cs) != 0 ? cpu.cs_base :

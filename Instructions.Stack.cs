@@ -44,13 +44,13 @@ static partial class Instructions
         from _2 in Enter(alloc, level)
         select unit;
 
-    // LEAVE (0xC9): (E)SP <- (E)BP; (E)BP <- pop()。スタックフレームを破棄する。
+    // LEAVE (0xC9): (E)SP <- (E)BP(幅は SS.B); (E)BP <- pop()(幅はオペランドサイズ)。スタックフレームを破棄する。
     static State<Unit> Leave_C9 =>
         from _1 in SetLog("Leave_C9")
         from type in OperandType(true)
-        from _2 in SetCpu(cpu => { if (cpu.stack32) { cpu.esp = cpu.ebp; } else { cpu.sp = cpu.bp; } return cpu; })
-        from val in Pop(type)
-        from _3 in type == 2 ? _ebp.Set(val.dd) : _bp.Set(val.dw)
+        from stackType in GetDataFromCpu(cpu => cpu.stack32 ? 2 : 1)
+        from _2 in Move(Reg(4, stackType), Reg(5, stackType)) // SP <- BP
+        from _3 in Move(Reg(5, type), Stack(type))            // BP <- pop
         select unit;
 
     // PUSH/POP FS/GS (0F A0/A1/A8/A9)。オペランドサイズ幅で push/pop する。
@@ -145,6 +145,6 @@ static partial class Instructions
         from _1 in SetLog("Popf_9D")
         from type in OperandType(true)
         from fl in Pop(type)
-        from _2 in SetCpu(cpu => { PopFlags(cpu, type, fl.Value); return cpu; }) // CPL>0 の IOPL/IF の保護は Alu.PopFlags(IR と共有)
+        from _2 in Effect(cpu => PopFlags(cpu, type, fl.Value)) // CPL>0 の IOPL/IF の保護は Alu.PopFlags(IR と共有)
         select unit;
 }

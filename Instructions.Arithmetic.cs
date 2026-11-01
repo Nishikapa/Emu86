@@ -75,33 +75,13 @@ static partial class Instructions
               from _w2 in SetMemOrRegData((addr.isMem, addr.addr + 4), cpu.ecx.ToTypeData())
               from _z in _zf.Set(true)
               select unit
-            : from _r in SetCpu(c => { c.eax = lo; c.edx = hi; return c; })
+            : from _r in SetCpu((_eax, lo), (_edx, hi))
               from _z in _zf.Set(false)
               select unit
         select unit;
 
-    // 符号付き乗算の積と、type の幅に収まらなければ立てる CF=OF。
-    static (long product, bool overflow) SignedMultiply(int type, long a, long b)
-    {
-        var product = a * b;
-        var overflow = type switch
-        {
-            0 => product < sbyte.MinValue || product > sbyte.MaxValue,
-            1 => product < short.MinValue || product > short.MaxValue,
-            _ => product < int.MinValue || product > int.MaxValue,
-        };
-        return (product, overflow);
-    }
-
-    // 倍幅の結果を書く: 8 ビットは AX、16 ビットは DX:AX、32 ビットは EDX:EAX(MUL/IMUL と、RDTSC/RDMSR の EDX:EAX)。
-    static State<Unit> SetWide(int type, ulong value) =>
-        SetCpu(cpu =>
-        {
-            if (type == 0) cpu.ax = (ushort)value;
-            else if (type == 1) { cpu.ax = (ushort)value; cpu.dx = (ushort)(value >> 16); }
-            else { cpu.eax = (uint)value; cpu.edx = (uint)(value >> 32); }
-            return cpu;
-        });
+    // 倍幅の結果を書く: 8 ビットは AX、16 ビットは DX:AX、32 ビットは EDX:EAX(規則は Alu.WriteWide。IR と共有)。
+    static State<Unit> SetWide(int type, ulong value) => Effect(cpu => WriteWide(cpu, type, value));
 
     // IMUL r, ...(2/3 オペランド形式): 積の下位を reg へ、収まらなければ CF=OF=1(SF/ZF 等は未定義)。
     static State<Unit> ImulInto(int reg, int type, long a, long b)
@@ -302,11 +282,11 @@ static partial class Instructions
 
     // DIV r/m : 符号なし除算。商と剰余を AL/AH, AX/DX, EAX/EDX へ(規則は Alu.Divide。IR と共有)。
     static State<Unit> Group3_Div(Data data) =>
-        SetCpu(c => { Divide(c, data.type, data.Value, signed: false); return c; });
+        Effect(cpu => Divide(cpu, data.type, data.Value, signed: false));
 
     // IDIV r/m : 符号付き除算。
     static State<Unit> Group3_Idiv(Data data) =>
-        SetCpu(c => { Divide(c, data.type, data.Value, signed: true); return c; });
+        Effect(cpu => Divide(cpu, data.type, data.Value, signed: true));
 
     // INC r/m: type に応じて +1 し、フラグ(CF以外)を更新して書き戻す。
     static State<Unit> IncData(MemAddr addr, Data data) =>
@@ -382,28 +362,20 @@ static partial class Instructions
 
     static State<Unit> Dec_48_4F => IncDecReg("Dec_48_4F", DecData);
 
-    // CBW/CWDE (0x98): オペランドサイズ 16 なら AL→AX、32 なら AX→EAX の符号拡張。
+    // CBW/CWDE (0x98): 1 つ狭い幅のアキュムレータ(AL / AX)を符号拡張して AX / EAX へ。
     static State<Unit> Cbw_98 =>
         from _1 in SetLog("Cbw_98")
         from type in OperandType(true)
-        from _2 in SetCpu(cpu =>
-        {
-            if (type == 2) cpu.eax = (uint)(int)(short)cpu.ax;
-            else cpu.ax = (ushort)(short)(sbyte)cpu.al;
-            return cpu;
-        })
+        from narrow in GetRegData(0, type - 1)
+        from _2 in SetRegData(0, ((uint)narrow.Signed).ToTypeData(type))
         select unit;
 
-    // CWD/CDQ (0x99): オペランドサイズ 16 なら DX:AX、32 なら EDX:EAX の符号拡張。
+    // CWD/CDQ (0x99): DX / EDX を AX / EAX の符号ビットで埋める。
     static State<Unit> Cwd_99 =>
         from _1 in SetLog("Cwd_99")
         from type in OperandType(true)
-        from _2 in SetCpu(cpu =>
-        {
-            if (type == 2) cpu.edx = (int)cpu.eax < 0 ? 0xFFFFFFFF : 0;
-            else cpu.dx = (ushort)((short)cpu.ax < 0 ? 0xFFFF : 0x0000);
-            return cpu;
-        })
+        from acc in GetRegData(0, type)
+        from _2 in SetRegData(2, (acc.Signed < 0 ? Mask(type) : 0u).ToTypeData(type))
         select unit;
 
     // BCD 調整命令群(規則は Alu.AdjustDecimal。IR と共有)。Linux は使わないが、Windows の HAL/NTLDR 等の 16/32bit コードが使う。
@@ -411,14 +383,14 @@ static partial class Instructions
     static State<Unit> AaaAas_37_3F =>
         from _1 in SetLog("AaaAas_37_3F")
         from opecode in Opecodes
-        from _2 in SetCpu(cpu => { AdjustDecimal(cpu, opecode[0] == 0x37 ? 0 : 1, 0); return cpu; })
+        from _2 in Effect(cpu => AdjustDecimal(cpu, opecode[0] == 0x37 ? 0 : 1, 0))
         select unit;
 
     // DAA (0x27) / DAS (0x2F): 加減算後のパック BCD 調整。
     static State<Unit> DaaDas_27_2F =>
         from _1 in SetLog("DaaDas_27_2F")
         from opecode in Opecodes
-        from _2 in SetCpu(cpu => { AdjustDecimal(cpu, opecode[0] == 0x27 ? 2 : 3, 0); return cpu; })
+        from _2 in Effect(cpu => AdjustDecimal(cpu, opecode[0] == 0x27 ? 2 : 3, 0))
         select unit;
 
     // AAM (D4 ib) / AAD (D5 ib): AL を基数 ib で分解 / AH:AL を基数 ib で結合。
@@ -427,6 +399,6 @@ static partial class Instructions
         from opecode in Opecodes
         from imm in GetMemoryDataIp8
         where opecode[0] != 0xD4 || imm != 0 // AAM 0 は #DE
-        from _3 in SetCpu(cpu => { AdjustDecimal(cpu, opecode[0] == 0xD4 ? 4 : 5, imm); return cpu; })
+        from _3 in Effect(cpu => AdjustDecimal(cpu, opecode[0] == 0xD4 ? 4 : 5, imm))
         select unit;
 }
