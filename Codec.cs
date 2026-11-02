@@ -45,17 +45,14 @@ internal sealed class Codec<T>
     public Codec<T> Bytes(Func<T, byte[]> get, int since = 0) =>
         Add(since, (writer, target) => writer.Write(get(target)), (reader, target, _) => reader.BaseStream.ReadExactly(get(target)));
 
-    public Codec<T> U16s(Func<T, ushort[]> get, int since = 0) => Add(since,
-        (writer, target) => { foreach (var value in get(target)) writer.Write(value); },
-        (reader, target, _) => { var values = get(target); for (var index = 0; index < values.Length; index++) values[index] = reader.ReadUInt16(); });
+    // 固定長の配列(要素ごとに書き、既存の配列へ要素ごとに読み込む)。
+    Codec<T> Values<V>(Func<T, V[]> get, Action<BinaryWriter, V> write, Func<BinaryReader, V> read, int since) => Add(since,
+        (writer, target) => { foreach (var value in get(target)) write(writer, value); },
+        (reader, target, _) => { var values = get(target); for (var index = 0; index < values.Length; index++) values[index] = read(reader); });
 
-    public Codec<T> U32s(Func<T, uint[]> get, int since = 0) => Add(since,
-        (writer, target) => { foreach (var value in get(target)) writer.Write(value); },
-        (reader, target, _) => { var values = get(target); for (var index = 0; index < values.Length; index++) values[index] = reader.ReadUInt32(); });
-
-    public Codec<T> F64s(Func<T, double[]> get, int since = 0) => Add(since,
-        (writer, target) => { foreach (var value in get(target)) writer.Write(value); },
-        (reader, target, _) => { var values = get(target); for (var index = 0; index < values.Length; index++) values[index] = reader.ReadDouble(); });
+    public Codec<T> U16s(Func<T, ushort[]> get, int since = 0) => Values(get, (w, v) => w.Write(v), r => r.ReadUInt16(), since);
+    public Codec<T> U32s(Func<T, uint[]> get, int since = 0) => Values(get, (w, v) => w.Write(v), r => r.ReadUInt32(), since);
+    public Codec<T> F64s(Func<T, double[]> get, int since = 0) => Values(get, (w, v) => w.Write(v), r => r.ReadDouble(), since);
 
     // 長さを前置する可変長バイト列(上限付き)。
     public Codec<T> ByteArray(Func<T, byte[]> get, Action<T, byte[]> set, int maximum, int since = 0) => Add(since,
@@ -76,6 +73,10 @@ internal sealed class Codec<T>
             var count = SnapshotStore.ReadCount(reader, maximum);
             for (var index = 0; index < count; index++) queue.Enqueue(reader.ReadByte());
         });
+
+    // 旧版の項目の予約領域: 保存では固定のバイト列を書き、読み込みでは読み飛ばす(形式のバイト順を変えずに状態から外す)。
+    public Codec<T> Reserved(byte[] bytes, int since = 0) =>
+        Add(since, (writer, _) => writer.Write(bytes), (reader, _, _) => reader.ReadBytes(bytes.Length));
 
     // 入れ子の対象(同じ版で読む)。
     public Codec<T> Nested<N>(Func<T, N> get, Codec<N> codec, int since = 0) =>

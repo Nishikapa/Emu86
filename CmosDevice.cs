@@ -13,6 +13,24 @@ internal sealed class CmosDevice(GuestClock clock)
     const int StatusA = 0x0A, StatusB = 0x0B, StatusC = 0x0C, StatusD = 0x0D, Century = 0x32;
     static readonly DateTime Default = new(2000, 1, 1, 0, 0, 0);
 
+    // 時刻レジスタの表(Lens): レジスタ番号と、DateTime から項目を読む/項目を置き換える関数。
+    // 読み出し(Read)・書き込み(Write)・Data との相互変換(SetClock/Base)はすべてこの表から導く。
+    // Base が項目を順に当てはめるので、日の丸め(月の日数)が効くよう年・月・日の順に並べる。
+    readonly record struct ClockField(int Index, Func<DateTime, int> Get, Func<DateTime, int, DateTime> Set);
+
+    static readonly ClockField[] ClockFields =
+    [
+        new(Century, time => time.Year / 100, (time, value) => Replace(time, year: value * 100 + time.Year % 100)),
+        new(9, time => time.Year % 100, (time, value) => Replace(time, year: time.Year / 100 * 100 + value)),
+        new(8, time => time.Month, (time, value) => Replace(time, month: value)),
+        new(7, time => time.Day, (time, value) => Replace(time, day: value)),
+        new(4, time => time.Hour, (time, value) => Replace(time, hour: value)),
+        new(2, time => time.Minute, (time, value) => Replace(time, minute: value)),
+        new(0, time => time.Second, (time, value) => Replace(time, second: value)),
+    ];
+
+    static ClockField? FieldAt(int index) => ClockFields.FirstOrDefault(field => field.Index == index) is { Get: not null } field ? field : null;
+
     public CmosDevice(int memorySize, GuestClock clock) : this(clock)
     {
         int baseKB = Math.Min(memorySize / 1024, 640);
@@ -31,59 +49,37 @@ internal sealed class CmosDevice(GuestClock clock)
 
     public void Select(byte value) => Index = value & 0x7F;
 
-    public byte Read(ulong tsc) => Index switch
-    {
-        0 => Encode(Current(tsc).Second),
-        2 => Encode(Current(tsc).Minute),
-        4 => EncodeHour(Current(tsc).Hour),
-        6 => Encode((int)Current(tsc).DayOfWeek + 1),
-        7 => Encode(Current(tsc).Day),
-        8 => Encode(Current(tsc).Month),
-        9 => Encode(Current(tsc).Year % 100),
-        Century => Encode(Current(tsc).Year / 100),
-        StatusA => (byte)(Data[StatusA] & 0x7F), // UIP: 更新中になることはない
-        StatusC => 0,                            // 割り込み要因なし
-        StatusD => 0x80,
-        _ => Data[Index],
-    };
+    public byte Read(ulong tsc) =>
+        FieldAt(Index) is { } field ? EncodeField(field.Index, field.Get(Current(tsc)))
+        : Index switch
+        {
+            6 => Encode((int)Current(tsc).DayOfWeek + 1),
+            StatusA => (byte)(Data[StatusA] & 0x7F), // UIP: 更新中になることはない
+            StatusC => (byte)0,                      // 割り込み要因なし
+            StatusD => (byte)0x80,
+            _ => Data[Index],
+        };
 
     public void Write(byte value, ulong tsc)
     {
-        switch (Index)
-        {
-            case 0 or 2 or 4 or 7 or 8 or 9 or Century:
-                var current = Current(tsc);
-                var field = Index == 4 ? DecodeHour(value) : Decode(value);
-                SetClock(Index switch
-                {
-                    0 => Replace(current, second: field),
-                    2 => Replace(current, minute: field),
-                    4 => Replace(current, hour: field),
-                    7 => Replace(current, day: field),
-                    8 => Replace(current, month: field),
-                    9 => Replace(current, year: current.Year / 100 * 100 + field),
-                    _ => Replace(current, year: field * 100 + current.Year % 100),
-                }, tsc);
-                break;
-            case 6 or StatusC or StatusD: break;                  // 曜日は日付から、C/D は読み出し専用
-            case StatusA: Data[StatusA] = (byte)(value & 0x7F); break;
-            default: Data[Index] = value; break;
-        }
+        if (FieldAt(Index) is { } field) SetClock(field.Set(Current(tsc), DecodeField(Index, value)), tsc);
+        else if (Index is 6 or StatusC or StatusD) { }                  // 曜日は日付から、C/D は読み出し専用
+        else if (Index == StatusA) Data[StatusA] = (byte)(value & 0x7F);
+        else Data[Index] = value;
     }
 
     // 時計を合わせる: time を「tsc の時点の時刻」として、Tsc = 0 の時刻を Data に保持する。
     public void SetClock(DateTime time, ulong tsc)
     {
         var at0 = time.AddSeconds(-(double)clock.Seconds(tsc));
-        Data[0] = Bcd(at0.Second); Data[2] = Bcd(at0.Minute); Data[4] = Bcd(at0.Hour);
+        foreach (var field in ClockFields) Data[field.Index] = Bcd(field.Get(at0));
         Data[6] = Bcd((int)at0.DayOfWeek + 1);
-        Data[7] = Bcd(at0.Day); Data[8] = Bcd(at0.Month); Data[9] = Bcd(at0.Year % 100); Data[Century] = Bcd(at0.Year / 100);
     }
 
     // 現在時刻 = Data の時刻(Tsc = 0)+ Tsc 秒。
     public DateTime Current(ulong tsc) => Base().AddSeconds(clock.Seconds(tsc));
 
-    DateTime Base() => Replace(Default, Bcd(Data[Century]) * 100 + Bcd(Data[9]), Bcd(Data[8]), Bcd(Data[7]), Bcd(Data[4]), Bcd(Data[2]), Bcd(Data[0]));
+    DateTime Base() => ClockFields.Aggregate(Default, (time, field) => field.Set(time, Bcd(Data[field.Index])));
 
     // 範囲外の値(ゲストが変な値を書いた、BCD でない)は有効な範囲に丸める。
     static DateTime Replace(DateTime time, int? year = null, int? month = null, int? day = null, int? hour = null, int? minute = null, int? second = null)
@@ -102,6 +98,10 @@ internal sealed class CmosDevice(GuestClock clock)
 
     byte Encode(int value) => Binary ? (byte)value : Bcd(value);
     int Decode(byte value) => Binary ? value : Bcd(value);
+
+    // 時(レジスタ 4)だけは 12 時間制の形式がある。
+    byte EncodeField(int index, int value) => index == 4 ? EncodeHour(value) : Encode(value);
+    int DecodeField(int index, byte value) => index == 4 ? DecodeHour(value) : Decode(value);
 
     // 12 時間制: 1-12 に bit7 が PM。0 時は 12 AM。
     byte EncodeHour(int hour)

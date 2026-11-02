@@ -15,9 +15,8 @@ public partial class EmuEnvironment
         .Bytes(e => e.IoPort)
         .Bytes(e => e.Cmos)
         .I32(e => e.CmosIndex, (e, v) => e.CmosIndex = v)
-        .U16(e => e.PitCounter, (e, v) => e.PitCounter = v)
-        .U16(e => e.PitLatched, (e, v) => e.PitLatched = v)
-        .I32(e => e.PitReadPhase, (e, v) => e.PitReadPhase = v)
+        // v10 以前の PIT チャネル 0(カウンタ 0xFFFF、ラッチ 0xFFFF、読み出しフェーズ 0)。v11 からはチャネルの表(Devices)にある。
+        .Reserved([0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00])
         .Custom(
             (writer, e) => { writer.Write(e.Ata != null); e.Ata?.SaveState(writer); },
             (reader, e) =>
@@ -71,13 +70,9 @@ public partial class EmuEnvironment
         .U8(e => e.PicSlaveIsr, (e, v) => e.PicSlaveIsr = v)
         .I64(e => e.NextIrq, (e, v) => e.NextIrq = v)
         .U8(e => e.Port61, (e, v) => e.Port61 = v)
-        .U8(e => e.Port61Refresh, (e, v) => e.Port61Refresh = v)
-        .U16(e => e.Pit2Counter, (e, v) => e.Pit2Counter = v)
-        .I32(e => e.Pit2WritePhase, (e, v) => e.Pit2WritePhase = v)
-        .I32(e => e.Pit2ReadPhase, (e, v) => e.Pit2ReadPhase = v)
-        .Bool(e => e.Pit2Armed, (e, v) => e.Pit2Armed = v)
-        .I32(e => e.Pit2Wait, (e, v) => e.Pit2Wait = v)
-        .Bool(e => e.PitStatusPending, (e, v) => e.PitStatusPending = v)
+        // v10 以前の PIT: リフレッシュ(u8 0)、チャネル 2 のカウンタ(u16 0xFFFF)・書き込みフェーズ(i32)・読み出しフェーズ(i32)・
+        // ゲート(bool)・待ち(i32)、状態ラッチ(bool)。v11 からはチャネルの表にある。
+        .Reserved([0x00, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
         .ByteQueue(e => e.KbdOut, 1 << 20)
         .U8(e => e.KbdLast, (e, v) => e.KbdLast = v)
         .U8(e => e.KbdCmdByte, (e, v) => e.KbdCmdByte = v)

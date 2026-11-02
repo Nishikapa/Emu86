@@ -56,6 +56,46 @@ public sealed class VgaDevice
             from component in new[] { 2, 1, 0 } // R, G, B の順
             select (byte)(((index >> component) & 1) * 0x2A + ((index >> (component + 3)) & 1) * 0x15)];
 
+    // モード設定で一括して書くレジスタ一式(Misc Output、Sequencer、CRTC、Graphics、Attribute)。BIOS の標準モードの値。
+    public readonly record struct RegisterSet(byte MiscOutput, byte[] Sequencer, byte[] Crtc, byte[] Graphics, byte[] Attribute);
+
+    // mode 3: 80×25 テキスト(リセット直後の状態でもある)。
+    public static readonly RegisterSet Mode3 = new(
+        0x67,
+        [0x03, 0x00, 0x03, 0x00, 0x02],
+        [0x5F, 0x4F, 0x50, 0x82, 0x55, 0x81, 0xBF, 0x1F, 0x00, 0x4F, 0x0D, 0x0E, 0x00, 0x00, 0x00, 0x00,
+         0x9C, 0x8E, 0x8F, 0x28, 0x1F, 0x96, 0xB9, 0xA3, 0xFF],
+        [0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x0E, 0x00, 0xFF],
+        [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x14, 0x07, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x0C, 0x00, 0x0F, 0x08, 0x00]);
+
+    // mode 12h: 640×480×16 色(プレーナ)。
+    public static readonly RegisterSet Mode12 = new(
+        0xE3,
+        [0x03, 0x01, 0x0F, 0x00, 0x06],
+        [0x5F, 0x4F, 0x50, 0x82, 0x54, 0x80, 0x0B, 0x3E, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0xEA, 0x8C, 0xDF, 0x28, 0x00, 0xE7, 0x04, 0xE3, 0xFF],
+        [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x0F, 0xFF],
+        [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x14, 0x07, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x01, 0x00, 0x0F, 0x00, 0x00]);
+
+    // mode 13h: 320×200×256 色(チェイン 4)。
+    public static readonly RegisterSet Mode13 = new(
+        0x63,
+        [0x03, 0x01, 0x0F, 0x00, 0x0E],
+        [0x5F, 0x4F, 0x50, 0x82, 0x54, 0x80, 0xBF, 0x1F, 0x00, 0x41, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x9C, 0x8E, 0x8F, 0x28, 0x40, 0x96, 0xB9, 0xA3, 0xFF],
+        [0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x05, 0x0F, 0xFF],
+        [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x41, 0x00, 0x0F, 0x00, 0x00]);
+
+    public void Load(RegisterSet registers)
+    {
+        MiscOutput = registers.MiscOutput;
+        registers.Sequencer.CopyTo(Sequencer, 0);
+        registers.Crtc.CopyTo(Crtc, 0);
+        registers.Graphics.CopyTo(Graphics, 0);
+        registers.Attribute.CopyTo(Attribute, 0);
+        Dirty = true;
+    }
+
     public VgaDevice() => Reset();
 
     public void Reset()
@@ -65,17 +105,12 @@ public sealed class VgaDevice
         Array.Clear(Vbe);
         Vbe[0] = VbeId;
         VbeIndex = 0;
-        new byte[] { 0x03, 0x00, 0x03, 0x00, 0x02 }.CopyTo(Sequencer, 0);
-        new byte[] { 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x0E, 0x00, 0xFF }.CopyTo(Graphics, 0);
-        new byte[] { 0x5F, 0x4F, 0x50, 0x82, 0x55, 0x81, 0xBF, 0x1F, 0x00, 0x4F, 0x0D, 0x0E, 0x00, 0x00, 0x00, 0x00,
-            0x9C, 0x8E, 0x8F, 0x28, 0x1F, 0x96, 0xB9, 0xA3, 0xFF }.CopyTo(Crtc, 0);
-        new byte[] { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x14, 0x07, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F,
-            0x0C, 0x00, 0x0F, 0x08, 0x00 }.CopyTo(Attribute, 0);
+        Load(Mode3);
         Array.Clear(Dac);
         EgaDac.CopyTo(Dac, 0);
         SequencerIndex = GraphicsIndex = CrtcIndex = AttributeIndex = 0;
         DacWriteIndex = DacReadIndex = DacWritePhase = DacReadPhase = 0;
-        DacMask = 0xFF; MiscOutput = 0x67; FeatureControl = 0;
+        DacMask = 0xFF; FeatureControl = 0;
         AttributeData = false;
         Array.Clear(latch);
         Dirty = true;
@@ -377,6 +412,9 @@ public sealed class VgaDevice
 
     static byte Expand(byte component) => (byte)((component << 2) | (component >> 4));
 
+    // 描画用の色表(添字 → ARGB)。
+    static uint[] Colors(int count, Func<int, uint> color) => [.. Enumerable.Range(0, count).Select(color)];
+
     // 16 色: Color Plane Enable → パレット → Color Select(P5P4/P7P6)→ DAC。
     uint PaletteColor(int index)
     {
@@ -411,8 +449,7 @@ public sealed class VgaDevice
         int bpp = Vbe[3], bytesPerPixel = Math.Max(1, (bpp + 7) / 8);
         var stride = (Vbe[6] == 0 ? width : Vbe[6]) * bytesPerPixel;
         var start = (long)Vbe[9] * stride + (long)Vbe[8] * bytesPerPixel;
-        uint[] palette = null;
-        if (bpp == 8) { palette = new uint[256]; for (var index = 0; index < 256; index++) palette[index] = DacColor(index); }
+        var palette = bpp == 8 ? Colors(256, DacColor) : null;
         for (var y = 0; y < height; y++)
         {
             var row = start + (long)y * stride;
@@ -445,8 +482,7 @@ public sealed class VgaDevice
 
     void RenderChain4(uint[] buffer, int width, int height)
     {
-        var colors = new uint[256];
-        for (var index = 0; index < 256; index++) colors[index] = DacColor(index);
+        var colors = Colors(256, DacColor);
         var pitch = Pitch;
         var start = StartAddress;
         for (var y = 0; y < height; y++)
@@ -462,8 +498,7 @@ public sealed class VgaDevice
 
     void RenderPlanar(uint[] buffer, int width, int height)
     {
-        var colors = new uint[16];
-        for (var index = 0; index < 16; index++) colors[index] = PaletteColor(index);
+        var colors = Colors(16, PaletteColor);
         var pitch = Pitch;
         var start = StartAddress;
         for (var y = 0; y < height; y++)
@@ -491,8 +526,7 @@ public sealed class VgaDevice
 
     void RenderText(uint[] buffer, int width, int height)
     {
-        var colors = new uint[16];
-        for (var index = 0; index < 16; index++) colors[index] = PaletteColor(index);
+        var colors = Colors(16, PaletteColor);
         var columns = Columns;
         var charHeight = CharHeight;
         var rows = height / charHeight;

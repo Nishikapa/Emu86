@@ -124,20 +124,29 @@ static public class Alu
         else { cpu.eax = (uint)value; cpu.edx = (uint)(value >> 32); }
     }
 
+    // 倍幅の被除数: 8 ビットは AX、16 ビットは DX:AX、32 ビットは EDX:EAX(WriteWide の対)。
+    static internal ulong ReadWide(CPU cpu, int type) => type switch
+    {
+        0 => cpu.ax,
+        1 => ((ulong)cpu.dx << 16) | cpu.ax,
+        _ => ((ulong)cpu.edx << 32) | cpu.eax,
+    };
+
+    // 倍幅の値を type の 2 倍の幅の符号付き整数として読む。
+    static long SignExtendWide(ulong value, int type) => type switch { 0 => (short)(ushort)value, 1 => (int)(uint)value, _ => (long)value };
+
     // DIV/IDIV: AX/AL、DX:AX/AX、EDX:EAX/EAX を商と剰余で上書きする。0 除算は例外(ランナーが停止する)。
+    // 商は AL/AX/EAX、剰余は AH/DX/EDX へ(下位の幅に切り詰める)。
     static internal void Divide(CPU c, int type, uint divisor, bool signed)
     {
         if (divisor == 0) throw new DivideByZeroException();
-        if (!signed)
-        {
-            if (type == 0) { uint dividend = c.ax; c.al = (byte)(dividend / divisor); c.ah = (byte)(dividend % divisor); }
-            else if (type == 1) { var dividend = ((uint)c.dx << 16) | c.ax; c.ax = (ushort)(dividend / divisor); c.dx = (ushort)(dividend % divisor); }
-            else { var dividend = ((ulong)c.edx << 32) | c.eax; c.eax = (uint)(dividend / divisor); c.edx = (uint)(dividend % divisor); }
-            return;
-        }
-        if (type == 0) { int dividend = (short)c.ax; c.al = (byte)(sbyte)(dividend / (sbyte)(byte)divisor); c.ah = (byte)(sbyte)(dividend % (sbyte)(byte)divisor); }
-        else if (type == 1) { var dividend = (int)(((uint)c.dx << 16) | c.ax); c.ax = (ushort)(short)(dividend / (short)(ushort)divisor); c.dx = (ushort)(short)(dividend % (short)(ushort)divisor); }
-        else { var dividend = (long)(((ulong)c.edx << 32) | c.eax); c.eax = (uint)(dividend / (int)divisor); c.edx = (uint)(dividend % (int)divisor); }
+        var dividend = ReadWide(c, type);
+        var (quotient, remainder) = signed
+            ? ((uint)(SignExtendWide(dividend, type) / SignExtend(divisor, type)), (uint)(SignExtendWide(dividend, type) % SignExtend(divisor, type)))
+            : ((uint)(dividend / divisor), (uint)(dividend % divisor));
+        if (type == 0) { c.al = (byte)quotient; c.ah = (byte)remainder; }
+        else if (type == 1) { c.ax = (ushort)quotient; c.dx = (ushort)remainder; }
+        else { c.eax = quotient; c.edx = remainder; }
     }
 
     // BCD 調整: 0 AAA、1 AAS、2 DAA、3 DAS、4 AAM(基数 imm。0 は呼び出し側で #DE)、5 AAD。

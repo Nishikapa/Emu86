@@ -343,6 +343,8 @@ static public class Fpu
 
     static Dictionary<(int op, int reg), Func<uint, State<Unit>>> BuildFpuMemoryForms()
     {
+        // 算術グループ(reg 0-7)のメモリ形式: D8 = f32、DA = int32、DC = f64、DE = int16 のメモリオペランドと ST0。
+        (int op, Func<uint, Real> source)[] arithmeticForms = [(0xD8, F32At), (0xDA, I32At), (0xDC, F64At), (0xDE, I16At)];
         var table = new Dictionary<(int op, int reg), Func<uint, State<Unit>>>
         {
             [(0xD9, 0)] = a => Load(F32At(a)), [(0xD9, 2)] = a => Store(F32At(a)), [(0xD9, 3)] = a => Store(F32At(a), pop: true),
@@ -359,13 +361,11 @@ static public class Fpu
             [(0xDF, 0)] = a => Load(I16At(a)), [(0xDF, 2)] = a => Store(I16At(a)), [(0xDF, 3)] = a => Store(I16At(a), pop: true),
             [(0xDF, 5)] = a => Load(I64At(a)), [(0xDF, 7)] = a => Store(I64At(a), pop: true),
         };
-        // 算術グループ: D8 = f32、DA = int32、DC = f64、DE = int16 のメモリオペランドと ST0
-        foreach (var (op, source) in new (int, Func<uint, Real>)[] { (0xD8, F32At), (0xDA, I32At), (0xDC, F64At), (0xDE, I16At) })
-            for (var kind = 0; kind < 8; kind++)
-            {
-                var (k, src) = (kind, source);
-                table[(op, kind)] = a => Arith(k, src(a), St0, pop: false);
-            }
+        var arithmetic =
+            from form in arithmeticForms
+            from kind in Enumerable.Range(0, 8)
+            select (key: (form.op, kind), instruction: (Func<uint, State<Unit>>)(a => Arith(kind, form.source(a), St0, pop: false)));
+        foreach (var (key, instruction) in arithmetic) table[key] = instruction;
         return table;
     }
 
@@ -435,13 +435,13 @@ static public class Fpu
             [(0xDF, 5)] = i => CompareEflags(StReal(i), pops: 1),                 // FUCOMIP
             [(0xDF, 6)] = i => CompareEflags(StReal(i), pops: 1),                 // FCOMIP
         };
-        for (var kind = 0; kind < 8; kind++)
-        {
-            var k = kind;
-            table[(0xD8, kind)] = i => Arith(k, StReal(i), St0, pop: false);           // ST0 <- ST0 op ST(i)
-            table[(0xDC, kind)] = i => Arith(k, StReal(i), StReal(i), pop: false);     // ST(i) <- ST(i) op ST0
-            if (kind != 3) table[(0xDE, kind)] = i => Arith(k, StReal(i), StReal(i), pop: true); // …して pop(FCOMPP は固定形式)
-        }
+        // 算術グループのレジスタ形式: D8 は ST0 <- ST0 op ST(i)、DC は ST(i) <- ST(i) op ST0、DE はそれに pop(FCOMPP は固定形式)。
+        var arithmetic =
+            from form in new (int op, bool toSti, bool pop)[] { (0xD8, false, false), (0xDC, true, false), (0xDE, true, true) }
+            from kind in Enumerable.Range(0, 8)
+            where !(form.op == 0xDE && kind == 3)
+            select (key: (form.op, kind), instruction: (Func<int, State<Unit>>)(i => Arith(kind, StReal(i), form.toSti ? StReal(i) : St0, form.pop)));
+        foreach (var (key, instruction) in arithmetic) table[key] = instruction;
         return table;
     }
 

@@ -67,6 +67,10 @@ public partial class DiskImage : IDisposable
     readonly int sectorsPerBlock;
     readonly int vhdBitmapSectors;
 
+    // 形式ごとの解析結果(DiskFormat.cs のレイアウトをファイルに当てはめた値)。コンストラクタはこれをフィールドへ写すだけ。
+    readonly record struct VhdFormat(int Type, long TotalSectors, int SectorsPerBlock, int BitmapSectors, uint[] Bat, VhdDynamicHeader Header);
+    readonly record struct VhdxFormat(Guid DataWriteGuid, long BatOffset, VhdxBatLayout Layout, ulong[] Bat, int SectorsPerBlock, long TotalSectors, VhdxParentLocator Locator);
+
     public DiskImage(string path, bool writable = false)
     {
         this.writable = writable;
@@ -75,72 +79,27 @@ public partial class DiskImage : IDisposable
 
         try
         {
-            // 形式の記述(各レイアウト)は DiskFormat.cs。ここではファイルの位置を読んで当てはめるだけ。
-            var header = ReadAt(0, SectorSize);
-            if (header.AsSpan(0, 8).SequenceEqual("conectix"u8))
+            var signature = ReadAt(file, 0, 8);
+            if (signature.AsSpan().SequenceEqual("conectix"u8))
             {
-                // VHD: 先頭にフッタのコピー(可変長/差分)。値はビッグエンディアン。
                 vhd = true;
-                var footer = VhdFooterLayout.Parse(header);
-                vhdType = footer.Type;
-                TotalSectors = footer.Size / SectorSize;
-
-                var dynamic = VhdDynamicHeaderLayout.Parse(ReadAt(SectorSize, 1024)); // 動的ヘッダ(offset 512)
-                sectorsPerBlock = dynamic.BlockSize / SectorSize;
-                vhdBitmapSectors = (sectorsPerBlock / 8 + SectorSize - 1) / SectorSize;
-                vhdBat = [.. Count(dynamic.MaxEntries, U32BE).Parse(ReadAt(dynamic.TableOffset, dynamic.MaxEntries * 4))];
-
+                var format = ReadVhd(file);
+                (vhdType, TotalSectors, sectorsPerBlock, vhdBitmapSectors, vhdBat) = (format.Type, format.TotalSectors, format.SectorsPerBlock, format.BitmapSectors, format.Bat);
                 if (vhdType == VhdTypeDifferencing)
-                    parent = OpenVhdParent(path, dynamic);
+                    parent = OpenVhdParent(path, format.Header);
             }
-            else if (header.AsSpan(0, 8).SequenceEqual("vhdxfile"u8))
+            else if (signature.AsSpan().SequenceEqual("vhdxfile"u8))
             {
                 vhdx = true;
-                dataWriteGuid = VhdxDataWriteGuidLayout.Parse(ReadAt(0x10000, 4096)); // ヘッダ 1(親子リンクの検証用)
-
-                // リージョン表(0x30000)から BAT とメタデータの位置を得る。
-                var regions = VhdxRegionTableLayout.Parse(ReadAt(0x30000, 0x10000));
-                var batRegion = regions.FirstOrDefault(region => region.Guid == BatRegionGuid);
-                var metaRegion = regions.FirstOrDefault(region => region.Guid == MetaRegionGuid);
-                vhdxBatOffset = batRegion.Offset;
-
-                // メタデータ領域: ブロックサイズと親の有無、仮想サイズ、論理セクタ、ペアレントロケータ。
-                var meta = ReadAt(metaRegion.Offset, (int)metaRegion.Length);
-                int blockSize = 0, logicalSector = 512;
-                long diskSize = 0;
-                var hasParent = false;
-                var locator = new VhdxParentLocator(Guid.Empty, []);
-                foreach (var entry in VhdxMetadataTableLayout.Parse(meta))
-                {
-                    if (entry.Guid == FileParamsGuid) (blockSize, hasParent) = VhdxFileParametersLayout.Parse(meta, entry.Offset);
-                    else if (entry.Guid == DiskSizeGuid) diskSize = I64.Parse(meta, entry.Offset);
-                    else if (entry.Guid == LogicalSectorGuid) logicalSector = (int)U32.Parse(meta, entry.Offset);
-                    else if (entry.Guid == ParentLocatorGuid) locator = VhdxParentLocatorLayout.Parse(meta, entry.Offset);
-                }
-                if (logicalSector != SectorSize)
-                    throw new InvalidDataException($"VHDX: unsupported logical sector size {logicalSector}");
-
-                vhdxLayout = new VhdxBatLayout(diskSize, blockSize, hasParent);
-                sectorsPerBlock = blockSize / SectorSize;
-                TotalSectors = diskSize / SectorSize;
-
-                // BAT(ペイロード chunkRatio 個ごとにビットマップエントリが挟まる)
-                var batEntries = vhdxLayout.EntryCount;
-                var requiredLength = (long)batEntries * sizeof(ulong);
-                if (batRegion.Length < requiredLength || vhdxBatOffset < 0 || vhdxBatOffset > file.Length - requiredLength)
-                    throw new InvalidDataException("VHDX: BAT region is too small or truncated");
-                vhdxBat = [.. Count(batEntries, U64).Parse(ReadAt(vhdxBatOffset, batEntries * 8))];
-
+                var format = ReadVhdx(file);
+                (dataWriteGuid, vhdxBatOffset, vhdxLayout, vhdxBat, sectorsPerBlock, TotalSectors) =
+                    (format.DataWriteGuid, format.BatOffset, format.Layout, format.Bat, format.SectorsPerBlock, format.TotalSectors);
                 nextAlloc = (file.Length + 0xFFFFF) & ~0xFFFFFL;
-
-                if (hasParent)
-                    parent = OpenVhdxParent(path, locator.Linkage, locator.Paths);
+                if (vhdxLayout.HasParent)
+                    parent = OpenVhdxParent(path, format.Locator.Linkage, format.Locator.Paths);
             }
             else
-            {
-                // 生イメージ: そのままセクタ列として扱う。
-                TotalSectors = file.Length / SectorSize;
-            }
+                TotalSectors = file.Length / SectorSize; // 生イメージ: そのままセクタ列として扱う。
 
             if (writable && (!vhdx || !vhdxLayout.HasParent))
                 throw new InvalidOperationException("writable disk must be an AVHDX overlay");
@@ -150,6 +109,45 @@ public partial class DiskImage : IDisposable
             Dispose();
             throw;
         }
+    }
+
+    // VHD: 先頭にフッタのコピー(可変長/差分)、動的ヘッダ(offset 512)、BAT。値はビッグエンディアン。
+    static VhdFormat ReadVhd(FileStream file)
+    {
+        var footer = VhdFooterLayout.Parse(ReadAt(file, 0, SectorSize));
+        var dynamic = VhdDynamicHeaderLayout.Parse(ReadAt(file, SectorSize, 1024));
+        var sectorsPerBlock = dynamic.BlockSize / SectorSize;
+        var bat = Count(dynamic.MaxEntries, U32BE).Parse(ReadAt(file, dynamic.TableOffset, dynamic.MaxEntries * 4));
+        return new(footer.Type, footer.Size / SectorSize, sectorsPerBlock, (sectorsPerBlock / 8 + SectorSize - 1) / SectorSize, [.. bat], dynamic);
+    }
+
+    // VHDX: ヘッダ 1 の DataWriteGuid(親子リンクの検証用)、リージョン表(0x30000)が指す BAT とメタデータの位置、
+    // メタデータ領域の項目(GUID で引く: ブロックサイズと親の有無、仮想サイズ、論理セクタ、ペアレントロケータ)、BAT。
+    static VhdxFormat ReadVhdx(FileStream file)
+    {
+        var dataWriteGuid = VhdxDataWriteGuidLayout.Parse(ReadAt(file, 0x10000, 4096));
+        var regions = VhdxRegionTableLayout.Parse(ReadAt(file, 0x30000, 0x10000));
+        var batRegion = regions.FirstOrDefault(region => region.Guid == BatRegionGuid);
+        var metaRegion = regions.FirstOrDefault(region => region.Guid == MetaRegionGuid);
+
+        var meta = ReadAt(file, metaRegion.Offset, (int)metaRegion.Length);
+        var entries = VhdxMetadataTableLayout.Parse(meta);
+        T Item<T>(Guid id, Field<T> layout, T fallback) =>
+            entries.LastOrDefault(entry => entry.Guid == id) is var found && found.Guid == id ? layout.Parse(meta, found.Offset) : fallback;
+        var (blockSize, hasParent) = Item(FileParamsGuid, VhdxFileParametersLayout, default);
+        var diskSize = Item(DiskSizeGuid, I64, 0L);
+        var logicalSector = Item(LogicalSectorGuid, U32, 512u);
+        var locator = Item(ParentLocatorGuid, VhdxParentLocatorLayout, new VhdxParentLocator(Guid.Empty, []));
+        if (logicalSector != SectorSize)
+            throw new InvalidDataException($"VHDX: unsupported logical sector size {logicalSector}");
+
+        // BAT(ペイロード chunkRatio 個ごとにビットマップエントリが挟まる)
+        var layout = new VhdxBatLayout(diskSize, blockSize, hasParent);
+        var requiredLength = (long)layout.EntryCount * sizeof(ulong);
+        if (batRegion.Length < requiredLength || batRegion.Offset < 0 || batRegion.Offset > file.Length - requiredLength)
+            throw new InvalidDataException("VHDX: BAT region is too small or truncated");
+        var bat = Count(layout.EntryCount, U64).Parse(ReadAt(file, batRegion.Offset, layout.EntryCount * 8));
+        return new(dataWriteGuid, batRegion.Offset, layout, [.. bat], blockSize / SectorSize, diskSize / SectorSize, locator);
     }
 
     public void Close() => Dispose();
@@ -164,10 +162,8 @@ public partial class DiskImage : IDisposable
 
     public void Flush() => file.Flush();
 
-    // ============ 親解決 ============
-
-    // 差分VHDの親を開く。候補: 子と同じフォルダの親ファイル名 → ロケータの絶対パス。
-    byte[] ReadAt(long offset, int length)
+    // ファイルの offset から length バイトを読む。
+    static byte[] ReadAt(FileStream file, long offset, int length)
     {
         var buffer = new byte[length];
         file.Seek(offset, SeekOrigin.Begin);
@@ -175,50 +171,52 @@ public partial class DiskImage : IDisposable
         return buffer;
     }
 
+    static byte[] ReadFileAt(string path, long offset, int length)
+    {
+        using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        return ReadAt(file, offset, length);
+    }
+
+    // ============ 親解決 ============
+
+    static string DirectoryOf(string path) => Path.GetDirectoryName(Path.GetFullPath(path)) ?? ".";
+
+    // 候補のうち最初に存在するパスを親として開く。どれも無ければ警告して null(無いセクタはゼロとして読む)。
+    static DiskImage OpenParent(IReadOnlyList<string> candidates, string kind, Action<DiskImage> verify = null)
+    {
+        if (candidates.FirstOrDefault(File.Exists) is not string path)
+        {
+            Console.Error.WriteLine($"[disk] WARNING: parent {kind} not found: {string.Join(" / ", candidates)} (missing sectors read as zero)");
+            return null;
+        }
+        Console.Error.WriteLine($"[disk] parent {kind}: {path}");
+        var parent = new DiskImage(path);
+        verify?.Invoke(parent);
+        return parent;
+    }
+
     // VHD の親: 動的ヘッダの親の名前(子と同じディレクトリで探す)と、Windows 形式(W2ku)のロケータが指すパス。
     static DiskImage OpenVhdParent(string childPath, VhdDynamicHeader header)
     {
-        var candidates = new List<string>();
-        if (header.ParentName.Length > 0)
-            candidates.Add(Path.Combine(Path.GetDirectoryName(Path.GetFullPath(childPath)) ?? ".", Path.GetFileName(header.ParentName)));
-
-        foreach (var locator in header.Locators.Where(locator => locator.IsWindowsUnicode))
-        {
-            using var f = new FileStream(childPath, FileMode.Open, FileAccess.Read, FileShare.Read);
-            var buf = new byte[locator.Length];
-            f.Seek(locator.Offset, SeekOrigin.Begin);
-            f.ReadExactly(buf);
-            candidates.Add(Encoding.Unicode.GetString(buf).TrimEnd('\0'));
-        }
-
-        foreach (var path in candidates.Where(File.Exists))
-        {
-            Console.Error.WriteLine($"[disk] parent VHD: {path}");
-            return new DiskImage(path);
-        }
-
-        Console.Error.WriteLine($"[disk] WARNING: parent VHD not found: {string.Join(" / ", candidates)} (missing sectors read as zero)");
-        return null;
+        var named = header.ParentName.Length > 0 ? [Path.Combine(DirectoryOf(childPath), Path.GetFileName(header.ParentName))] : Enumerable.Empty<string>();
+        var located =
+            from locator in header.Locators
+            where locator.IsWindowsUnicode
+            select Encoding.Unicode.GetString(ReadFileAt(childPath, locator.Offset, locator.Length)).TrimEnd('\0');
+        return OpenParent([.. named, .. located], "VHD");
     }
 
+    // VHDX の親: ペアレントロケータのパス(相対パスは子のディレクトリから。Windows 区切り)。開けたら DataWriteGuid を照合する。
     static DiskImage OpenVhdxParent(string childPath, Guid linkage, IReadOnlyList<string> paths)
     {
-        var childDir = Path.GetDirectoryName(Path.GetFullPath(childPath)) ?? ".";
         var candidates = paths
-            .Select(p => Path.IsPathRooted(p) ? p : Path.GetFullPath(Path.Combine(childDir, p.Replace('\\', Path.DirectorySeparatorChar))))
+            .Select(p => Path.IsPathRooted(p) ? p : Path.GetFullPath(Path.Combine(DirectoryOf(childPath), p.Replace('\\', Path.DirectorySeparatorChar))))
             .ToList();
-
-        foreach (var path in candidates.Where(File.Exists))
+        return OpenParent(candidates, "image", parent =>
         {
-            Console.Error.WriteLine($"[disk] parent image: {path}");
-            var p = new DiskImage(path);
-            if (p.vhdx && linkage != Guid.Empty && p.dataWriteGuid != linkage)
-                Console.Error.WriteLine($"[disk] WARNING: parent DataWriteGuid mismatch (expected {linkage}, got {p.dataWriteGuid})");
-            return p;
-        }
-
-        Console.Error.WriteLine($"[disk] WARNING: parent image not found: {string.Join(" / ", candidates)} (missing sectors read as zero)");
-        return null;
+            if (parent.vhdx && linkage != Guid.Empty && parent.dataWriteGuid != linkage)
+                Console.Error.WriteLine($"[disk] WARNING: parent DataWriteGuid mismatch (expected {linkage}, got {parent.dataWriteGuid})");
+        });
     }
 
     // ============ 読み込み ============
@@ -274,26 +272,16 @@ public partial class DiskImage : IDisposable
     {
         var block = lba / sectorsPerBlock;
         var entry = vhdxBat[vhdxLayout.PayloadIndex(block)];
-        var state = (int)(entry & 7);
         var inBlock = new SectorSource(this, (long)(entry & ~0xFFFFFUL) + lba % sectorsPerBlock * SectorSize);
-
-        switch (state)
+        var position = vhdxLayout.SectorInChunk(lba);
+        return (int)(entry & 7) switch
         {
-            case PayloadFullyPresent:
-                return inBlock;
-
-            case PayloadPartiallyPresent:
-                // VHDX のビットマップは LSB ファースト(bit0 が先頭セクタ)。チャンク単位(1MB)。ビットが 0 なら親。
-                var bmp = VhdxChunkBitmap(vhdxLayout.ChunkIndex(block));
-                var pos = vhdxLayout.SectorInChunk(lba);
-                return bmp != null && (bmp[pos / 8] >> (int)(pos % 8) & 1) != 0 ? inBlock : null;
-
-            case 2: // BLOCK_ZERO: 親を見ずにゼロ
-                return new SectorSource(null, 0);
-
-            default: // NOT_PRESENT / UNDEFINED / UNMAPPED
-                return null;
-        }
+            PayloadFullyPresent => inBlock,
+            // VHDX のビットマップは LSB ファースト(bit0 が先頭セクタ)。チャンク単位(1MB)。ビットが 0 なら親。
+            PayloadPartiallyPresent => VhdxChunkBitmap(vhdxLayout.ChunkIndex(block)) is { } bitmap && (bitmap[position / 8] >> (int)(position % 8) & 1) != 0 ? inBlock : null,
+            2 => new SectorSource(null, 0), // BLOCK_ZERO: 親を見ずにゼロ
+            _ => null,                      // NOT_PRESENT / UNDEFINED / UNMAPPED
+        };
     }
 
     // チャンクのセクタビットマップ(1MB)。未割り当てなら null。
@@ -434,20 +422,8 @@ public partial class DiskImage : IDisposable
     }
 
     // CRC-32C (Castagnoli)。VHDX のヘッダ/リージョンテーブルのチェックサムに使う。
-    static readonly uint[] Crc32CTable = BuildCrc32CTable();
-
-    static uint[] BuildCrc32CTable()
-    {
-        var t = new uint[256];
-        for (uint i = 0; i < 256; i++)
-        {
-            var c = i;
-            for (int k = 0; k < 8; k++)
-                c = (c & 1) != 0 ? 0x82F63B78 ^ (c >> 1) : c >> 1;
-            t[i] = c;
-        }
-        return t;
-    }
+    static readonly uint[] Crc32CTable =
+        [.. Enumerable.Range(0, 256).Select(index => Enumerable.Repeat(0, 8).Aggregate((uint)index, (crc, _) => (crc & 1) != 0 ? 0x82F63B78 ^ (crc >> 1) : crc >> 1))];
 
     internal static uint Crc32C(ReadOnlySpan<byte> data)
     {
@@ -539,74 +515,71 @@ public class AtaDevice(DiskImage disk) : IDisposable
 
     public void LoadState(BinaryReader reader) => Layout.Load(reader, this, SnapshotStore.Version);
 
+    // レジスタ(Lens)の表: ポート → 読み出しと書き込み(null なら書けない)。0x1F1 は読むとエラー、書くとフィーチャ。
+    // ステータス(0x1F7)は読むと INTRQ を降ろし、書くとコマンド。0x3F6 は代替ステータス(INTRQ は降ろさない)とデバイス制御。
+    // スレーブ(不在)を選択中のステータスは 0。表にないポートは 0xFF を返し、書き込みは無視する。
+    readonly record struct Register(Func<AtaDevice, byte> Read, Action<AtaDevice, byte> Write = null);
+
+    static readonly Dictionary<int, Register> Registers = new()
+    {
+        [0x1F1] = new(ata => ata.error, (ata, value) => ata.feature = value),
+        [0x1F2] = new(ata => ata.sectorCount, (ata, value) => ata.sectorCount = value),
+        [0x1F3] = new(ata => ata.lbaLow, (ata, value) => ata.lbaLow = value),
+        [0x1F4] = new(ata => ata.lbaMid, (ata, value) => ata.lbaMid = value),
+        [0x1F5] = new(ata => ata.lbaHigh, (ata, value) => ata.lbaHigh = value),
+        [0x1F6] = new(ata => ata.drive, (ata, value) => ata.drive = value),
+        [0x1F7] = new(ata => { if (ata.SlaveSelected) return 0; ata.IrqPending = false; return ata.status; }, (ata, value) => ata.IssueCommand(value)),
+        [0x3F6] = new(ata => ata.SlaveSelected ? (byte)0 : ata.status, (ata, value) => ata.DeviceControl(value)),
+    };
+
     public byte ReadReg(int port)
     {
         if (Log && LogReads && readLogLeft > 0) { readLogLeft--; Console.Error.WriteLine($"[ata] rd {port:x3} (status={status:x2} drive={drive:x2})"); }
-        switch (port)
-        {
-            case 0x1F1: return error;
-            case 0x1F2: return sectorCount;
-            case 0x1F3: return lbaLow;
-            case 0x1F4: return lbaMid;
-            case 0x1F5: return lbaHigh;
-            case 0x1F6: return drive;
-            // ステータスレジスタ読み出しは INTRQ を降ろす(0x1F7 のみ。0x3F6 は代替ステータスで降ろさない)。
-            case 0x1F7:
-                if (SlaveSelected) return 0;
-                IrqPending = false;
-                return status;
-            case 0x3F6:
-                return SlaveSelected ? (byte)0 : status;
-            default: return 0xFF;
-        }
+        return Registers.TryGetValue(port, out var register) ? register.Read(this) : (byte)0xFF;
     }
 
     public void WriteReg(int port, byte val)
     {
-        switch (port)
-        {
-            case 0x1F1: feature = val; break;
-            case 0x1F2: sectorCount = val; break;
-            case 0x1F3: lbaLow = val; break;
-            case 0x1F4: lbaMid = val; break;
-            case 0x1F5: lbaHigh = val; break;
-            case 0x1F6: drive = val; break;
-            case 0x1F7:
-                if (SlaveSelected) { L($"cmd {val:x2} to slave (absent) drive={drive:x2}"); break; }
-                L($"cmd {val:x2} feat={feature:x2} cnt={sectorCount:x2} lba={lbaHigh:x2}{lbaMid:x2}{lbaLow:x2} drive={drive:x2}");
-                Command(val);
-                break;
-            case 0x3F6:
-                L($"devctl {val:x2}");
-                if ((val & 0x04) != 0) // SRST: ソフトウェアリセット
-                {
-                    status = DRDY | DSC;
-                    error = 1;
-                    // ATA デバイスシグネチャ
-                    sectorCount = 1; lbaLow = 1; lbaMid = 0; lbaHigh = 0;
-                    buf = []; bufPos = 0; pendingWrite = false;
-                }
-                break;
-        }
+        if (Registers.TryGetValue(port, out var register)) register.Write?.Invoke(this, val);
     }
 
-    // コマンド表: コマンド番号 → 動作。表にないコマンド(DMA 系 0xC8/0x25/0xCA/0x35 等)は abort し、libata は PIO へ後退する。
-    static readonly Dictionary<byte, Action<AtaDevice>> Commands = BuildCommands();
-
-    static Dictionary<byte, Action<AtaDevice>> BuildCommands()
+    // コマンドレジスタ(0x1F7)への書き込み。スレーブは不在なので無視する。
+    void IssueCommand(byte command)
     {
-        var table = new Dictionary<byte, Action<AtaDevice>>
-        {
-            [0xEC] = ata => ata.Respond(ata.BuildIdentify()), // IDENTIFY DEVICE
-            [0xA1] = ata => ata.Abort(),                      // IDENTIFY PACKET DEVICE(ATAPI ではないので abort)
-        };
-        foreach (var read in new byte[] { 0x20, 0x21, 0x24, 0xC4 }) table[read] = ata => ata.BeginRead();    // READ SECTORS (PIO) / EXT / MULTIPLE(単一扱い)
-        foreach (var write in new byte[] { 0x30, 0x31, 0x34, 0xC5 }) table[write] = ata => ata.BeginWrite(); // WRITE SECTORS (PIO) / EXT / MULTIPLE(単一扱い)
+        if (SlaveSelected) { L($"cmd {command:x2} to slave (absent) drive={drive:x2}"); return; }
+        L($"cmd {command:x2} feat={feature:x2} cnt={sectorCount:x2} lba={lbaHigh:x2}{lbaMid:x2}{lbaLow:x2} drive={drive:x2}");
+        Command(command);
+    }
+
+    // デバイス制御(0x3F6)。SRST(bit2)でソフトウェアリセット: 状態を初期化し、ATA デバイスシグネチャを置く。
+    void DeviceControl(byte value)
+    {
+        L($"devctl {value:x2}");
+        if ((value & 0x04) == 0) return;
+        status = DRDY | DSC;
+        error = 1;
+        sectorCount = 1; lbaLow = 1; lbaMid = 0; lbaHigh = 0;
+        buf = []; bufPos = 0; pendingWrite = false;
+    }
+
+    // コマンド表: (コマンド番号の組, 動作)を番号ごとに展開する(オペコード表と同じ形)。
+    // 表にないコマンド(DMA 系 0xC8/0x25/0xCA/0x35 等)は abort し、libata は PIO へ後退する。
+    static readonly (byte[] codes, Action<AtaDevice> action)[] CommandGroups =
+    [
+        ([0xEC], ata => ata.Respond(ata.BuildIdentify())),                       // IDENTIFY DEVICE
+        ([0xA1], ata => ata.Abort()),                                            // IDENTIFY PACKET DEVICE(ATAPI ではないので abort)
+        ([0x20, 0x21, 0x24, 0xC4], ata => ata.BeginRead()),                      // READ SECTORS (PIO) / EXT / MULTIPLE(単一扱い)
+        ([0x30, 0x31, 0x34, 0xC5], ata => ata.BeginWrite()),                     // WRITE SECTORS (PIO) / EXT / MULTIPLE(単一扱い)
         // SET FEATURES / FLUSH CACHE(EXT) / READ VERIFY / INIT DEV PARAMS / NOP / IDLE:
         // libata のプローブ・設定で発行される非データコマンド。成功として完了 → INTRQ。
-        foreach (var nonData in new byte[] { 0xEF, 0xE7, 0xEA, 0x40, 0x41, 0x91, 0x00, 0xE1, 0xE0 }) table[nonData] = ata => ata.Complete();
-        return table;
-    }
+        ([0xEF, 0xE7, 0xEA, 0x40, 0x41, 0x91, 0x00, 0xE1, 0xE0], ata => ata.Complete()),
+    ];
+
+    static readonly Dictionary<byte, Action<AtaDevice>> Commands =
+        (from entry in CommandGroups
+         from code in entry.codes
+         select (code, entry.action))
+        .ToDictionary(pair => pair.code, pair => pair.action);
 
     void Command(byte cmd)
     {

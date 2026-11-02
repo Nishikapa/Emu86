@@ -1,7 +1,5 @@
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
-using System.Runtime.InteropServices;
-using System.Text;
 
 namespace Emu86;
 
@@ -140,14 +138,8 @@ internal sealed class VgaWindow : Form
             frame?.Dispose();
             frame = new Bitmap(width, height, PixelFormat.Format32bppRgb);
         }
-        var data = frame.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.WriteOnly, PixelFormat.Format32bppRgb);
-        try
-        {
-            for (var y = 0; y < height; y++)
-                Marshal.Copy(MemoryMarshal.Cast<uint, int>(pixels.AsSpan(y * width, width)).ToArray(), 0, data.Scan0 + y * data.Stride, width);
-        }
-        finally { frame.UnlockBits(data); }
-        Text = $"Emu86 - {vga.ModeDescription()} - {(control.IsPaused && !control.HasStopped ? "paused" : status)}";
+        ScreenCapture.Blit(frame, pixels, width, height);
+        Text =$"Emu86 - {vga.ModeDescription()} - {(control.IsPaused && !control.HasStopped ? "paused" : status)}";
         display.Frame = frame;
         display.GuestSize = new Size(width, height);
         display.Invalidate();

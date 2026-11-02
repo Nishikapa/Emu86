@@ -111,11 +111,9 @@ static partial class Instructions
         from m in ModRegRm()
         // ソースサイズはオペコードで固定(8/16bit)のため、OperandType を介さず直接読む。
         from addr in GetMemOrRegAddr(m.mod, m.rm)
-        from value in srcW
-            ? GetMemOrRegData16(addr).Select(dw => signed ? (uint)(int)(short)dw : dw)
-            : GetMemOrRegData8(addr).Select(db => signed ? (uint)(int)(sbyte)db : db)
+        from source in Rm(addr, srcW ? 1 : 0).Read
         from type in OperandType(true)
-        from _2 in SetRegData(m.reg, value.ToTypeData(type))
+        from _2 in SetRegData(m.reg, (signed ? (uint)source.Signed : source.Value).ToTypeData(type))
         select unit;
 
     static State<Unit> Mov_B0_BF =>

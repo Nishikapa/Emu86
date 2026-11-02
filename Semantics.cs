@@ -789,7 +789,7 @@ public static class Semantics
     static readonly string[] Registers16 = [nameof(CPU.ax), nameof(CPU.cx), nameof(CPU.dx), nameof(CPU.bx), nameof(CPU.sp), nameof(CPU.bp), nameof(CPU.si), nameof(CPU.di)];
     static readonly string[] Registers8 = [nameof(CPU.al), nameof(CPU.cl), nameof(CPU.dl), nameof(CPU.bl), nameof(CPU.ah), nameof(CPU.ch), nameof(CPU.dh), nameof(CPU.bh)];
     static MemberExpression Register(Scope s, int reg, int type) =>
-        Expression.Property(s.Cpu, (type == 0 ? Registers8 : type == 1 ? Registers16 : Registers32)[reg]);
+        Expression.Property(s.Cpu, (type switch { 0 => Registers8, 1 => Registers16, _ => Registers32 })[reg]);
     static Expression ReadRegisterOf(Scope s, int reg, int type) =>
         type == 2 ? Register(s, reg, type) : Expression.Convert(Register(s, reg, type), typeof(uint));
     static Expression WriteRegisterOf(Scope s, int reg, int type, Expression value) =>

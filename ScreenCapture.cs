@@ -40,12 +40,7 @@ public static class ScreenCapture
             graphics.Clear(Color.Black);
             graphics.DrawString(text, font, Brushes.White, -0.5f, 0f, format);
             for (var y = 0; y < 16; y++)
-            {
-                var row = 0;
-                for (var x = 0; x < 8; x++)
-                    if (bitmap.GetPixel(x, y).R > 96) row |= 0x80 >> x;
-                font8x16[code * 16 + y] = (byte)row;
-            }
+                font8x16[code * 16 + y] = (byte)Enumerable.Range(0, 8).Where(x => bitmap.GetPixel(x, y).R > 96).Sum(x => 0x80 >> x); // 左端が bit7
         }
         return font8x16;
     }
@@ -58,14 +53,24 @@ public static class ScreenCapture
         var pixels = new uint[width * height];
         (width, height) = vga.Render(pixels);
         var bitmap = new Bitmap(width, height, PixelFormat.Format32bppRgb);
+        Blit(bitmap, pixels, width, height);
+        return bitmap;
+    }
+
+    // 描いたピクセル列(幅 × 高さの ARGB)を 32bpp の Bitmap へ転写する(表示ウィンドウと画像保存で共有)。
+    // ストライドが幅 × 4 ならフレーム全体を 1 回で写す。
+    public static void Blit(Bitmap bitmap, uint[] pixels, int width, int height)
+    {
         var data = bitmap.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.WriteOnly, PixelFormat.Format32bppRgb);
         try
         {
-            for (var y = 0; y < height; y++)
-                Marshal.Copy(MemoryMarshal.Cast<uint, int>(pixels.AsSpan(y * width, width)).ToArray(), 0, data.Scan0 + y * data.Stride, width);
+            if (data.Stride == width * 4)
+                Marshal.Copy(MemoryMarshal.Cast<uint, int>(pixels.AsSpan(0, width * height)).ToArray(), 0, data.Scan0, width * height);
+            else
+                for (var y = 0; y < height; y++)
+                    Marshal.Copy(MemoryMarshal.Cast<uint, int>(pixels.AsSpan(y * width, width)).ToArray(), 0, data.Scan0 + y * data.Stride, width);
         }
         finally { bitmap.UnlockBits(data); }
-        return bitmap;
     }
 
     public static void Save(VgaDevice vga, string path)

@@ -247,10 +247,10 @@ internal sealed class RunDiagnostics
         if (options.BranchHistory)
         {
             output.WriteLine("--- last branches (from -> to) ---");
-            for (var index = 0; index < BrN; index++)
+            // 環状バッファを古い順に(空きは飛ばす)。
+            var positions = Enumerable.Range(0, BrN).Select(index => (brIdx + index) % BrN).Where(position => brTo[position] != default);
+            foreach (var position in positions)
             {
-                var position = (brIdx + index) % BrN;
-                if (brTo[position] == default) continue;
                 output.WriteLine($"  {brFrom[position].cs:x4}:{brFrom[position].eip:x8} -> {brTo[position].cs:x4}:{brTo[position].eip:x8}");
             }
         }

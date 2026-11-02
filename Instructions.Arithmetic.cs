@@ -110,17 +110,17 @@ static partial class Instructions
         let useCl = (opecode[1] & 0x01) != 0  // A5/AD=CL, A4/AC=imm8
         from m in ModRegRm()
         from addr in GetMemOrRegAddr(m.mod, m.rm)
-        from dst in GetMemOrRegData(addr, true)
-        from src in GetRegData(m.reg, dst.type)
-        from cnt in useCl ? GetRegData(1, 0).Select(d => (int)d.db) : GetMemoryDataIp8.Select(b => (int)b)
-        let count = cnt & 0x1F
+        from type in OperandType(true)
+        let rm = Rm(addr, type)
+        from dst in rm.Read
+        from src in Reg(m.reg, type).Read
+        from count in useCl ? _cl.Get().Select(cl => cl & 0x1F) : GetMemoryDataIp8.Select(imm => imm & 0x1F) // 80386 はシフト量を 5 ビットにマスクする
         // count==0 は結果・フラグとも不変
-        from _2 in Unless(count == 0, ApplyDoubleShift(addr, dst.type, DoubleShift(dst.Value, src.Value, count, Bits(dst.type), left)))
+        from _2 in Unless(count == 0, ApplyDoubleShift(rm, type, DoubleShift(dst.Value, src.Value, count, Bits(type), left)))
         select unit;
 
-    static State<Unit> ApplyDoubleShift(
-        MemAddr addr, int type, (uint result, bool cf, bool of) r) =>
-        from _w in SetMemOrRegData(addr, r.result.ToTypeData(type))
+    static State<Unit> ApplyDoubleShift(Operand rm, int type, (uint result, bool cf, bool of) r) =>
+        from _w in rm.Write(r.result.ToTypeData(type))
         from _f in SetCpu(
             (_cf, r.cf),
             (_of, r.of),

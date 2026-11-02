@@ -171,10 +171,10 @@ static partial class Instructions
         from m in ModRegRm()
         from addr in GetMemOrRegAddr(m.mod, m.rm)
         from sel in GetMemOrRegData16(addr)
-        from cpu in GetCpu
-        from value in GetDataFromEnvCpu((env, c) => EnvDescriptorQuery(env, c, sel, limit))
+        from type in OperandType(true)
+        from value in GetDataFromEnvCpu((env, cpu) => EnvDescriptorQuery(env, cpu, sel, limit))
         from _2 in _zf.Set(value != null)
-        from _3 in When(value != null, SetRegData(m.reg, cpu.code32 != cpu.operand_size_prefix ? (value ?? 0).ToTypeData() : ((ushort)(value ?? 0)).ToTypeData()))
+        from _3 in When(value != null, SetRegData(m.reg, (value ?? 0).ToTypeData(type)))
         select unit;
 
     // SLDT/STR: 保持しているセレクタを返す(レジスタ形式は32bit幅のときゼロ拡張)。

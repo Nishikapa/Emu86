@@ -205,33 +205,26 @@ public sealed class BootAutomation
         }
     }
 
-    // "c-a-del" のように修飾キー(c = Ctrl 0x1D、a = Alt 0x38、s = Shift 0x2A)を '-' でつなぎ、最後がキー名か配列にある 1 文字。
+    // 修飾キーのメイクコード(c = Ctrl、a = Alt、s = Shift)。
+    static readonly Dictionary<string, byte> ModifierKeys = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["c"] = 0x1D, ["ctrl"] = 0x1D, ["a"] = 0x38, ["alt"] = 0x38, ["s"] = 0x2A, ["shift"] = 0x2A,
+    };
+
+    // "c-a-del" のように修飾キーを '-' でつなぎ、最後がキー名か配列にある 1 文字。
+    // 列は 修飾キーのメイク → キーのメイク → キーのブレーク(E0 プレフィックスはそのまま、最後のバイトに 0x80)→ 修飾キーのブレーク(逆順)。
     static bool TryParseKey(string name, out byte[] sequence)
     {
         sequence = null;
         var parts = name.Split('-');
-        var modifiers = new List<byte>();
-        foreach (var part in parts[..^1])
-        {
-            switch (part.ToLowerInvariant())
-            {
-                case "c" or "ctrl": modifiers.Add(0x1D); break;
-                case "a" or "alt": modifiers.Add(0x38); break;
-                case "s" or "shift": modifiers.Add(0x2A); break;
-                default: return false;
-            }
-        }
+        var modifiers = parts[..^1].Select(part => ModifierKeys.GetValueOrDefault(part)).ToArray();
+        if (modifiers.Contains((byte)0)) return false;
         var key = parts[^1];
         byte[] make;
         if (SpecialKeys.TryGetValue(key, out var special)) make = special;
         else if (key.Length == 1 && Unshifted.IndexOf(key[0]) is var index && index >= 0) make = [UnshiftedCodes[index]];
         else return false;
-        var bytes = new List<byte>(modifiers);
-        bytes.AddRange(make);
-        bytes.AddRange(make[..^1]);
-        bytes.Add((byte)(make[^1] | 0x80));
-        for (var index = modifiers.Count - 1; index >= 0; index--) bytes.Add((byte)(modifiers[index] | 0x80));
-        sequence = bytes.ToArray();
+        sequence = [.. modifiers, .. make, .. make[..^1], (byte)(make[^1] | 0x80), .. Enumerable.Reverse(modifiers).Select(modifier => (byte)(modifier | 0x80))];
         return true;
     }
 

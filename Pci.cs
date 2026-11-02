@@ -153,15 +153,16 @@ public class PciHost
         return c;
     }
 
-    // reg = dword 境界のレジスタ番号(Address の 7:2)、off = ポート下位 2 ビット(0xCFC からのバイトずれ)。
+    // CONFIG_ADDRESS の分解: enable(bit31)、bus(23:16)、dev(15:11)、fn(10:8)、reg(7:2 = dword 境界のレジスタ番号)。
+    (bool enabled, int bus, int dev, int fn, int reg) Decoded =>
+        ((Address & 0x80000000) != 0, (int)(Address >> 16) & 0xFF, (int)(Address >> 11) & 0x1F, (int)(Address >> 8) & 0x7, (int)(Address & 0xFC));
+
+    // 選択中のファンクションのコンフィグ空間(bus 0 で enable のとき。無ければ null)。off = ポート下位 2 ビット(0xCFC からのバイトずれ)。
     byte[] Selected(out int reg)
     {
-        reg = (int)(Address & 0xFC);
-        var bus = (int)(Address >> 16) & 0xFF;
-        var dev = (int)(Address >> 11) & 0x1F;
-        var fn = (int)(Address >> 8) & 0x7;
-        if ((Address & 0x80000000) == 0 || bus != 0) return null;
-        return cfg.TryGetValue((dev << 3) | fn, out var c) ? c : null;
+        var (enabled, bus, dev, fn, register) = Decoded;
+        reg = register;
+        return enabled && bus == 0 && cfg.TryGetValue((dev << 3) | fn, out var c) ? c : null;
     }
 
     // CONFIG_DATA 読み出し。存在しないデバイスは 0xFFFF...(ベンダ ID = 0xFFFF)。
@@ -180,9 +181,9 @@ public class PciHost
         return v;
     }
 
-    int KeyOf() => (((int)(Address >> 11) & 0x1F) << 3) | ((int)(Address >> 8) & 7);
+    int KeyOf() => (Decoded.dev << 3) | Decoded.fn;
 
-    string Bdf() => $"{(Address >> 16) & 0xFF:x2}:{(Address >> 11) & 0x1F:x2}.{(Address >> 8) & 7}";
+    string Bdf() => $"{Decoded.bus:x2}:{Decoded.dev:x2}.{Decoded.fn}";
 
     // CONFIG_DATA 書き込み。コマンドレジスタ等の書き換えのみ受ける。
     // BAR(0x10-0x27)は互換モードのため常に 0 のままにし、サイズ問い合わせに 0 を返す

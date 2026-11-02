@@ -64,12 +64,12 @@ internal sealed class RegisterDialog : Form
         builder.AppendLine($"GDTR={cpu.gdt_base:X8}/{cpu.gdt_limit:X4}  IDTR={cpu.idt_base:X8}/{cpu.idt_limit:X4}  TR={cpu.tr:X4}  LDTR={cpu.ldtr:X4}");
         builder.AppendLine();
         builder.AppendLine($"FPU CW={cpu.fpu_cw:X4} SW={cpu.fpu_sw:X4} TOP={cpu.fpu_top}");
-        for (var index = 0; index < 8; index++)
-        {
-            var physical = (cpu.fpu_top + index) & 7;
-            var valid = (cpu.fpu_valid & (1 << physical)) != 0;
-            builder.AppendLine($"ST({index})={(valid ? cpu.fpu_st[physical].ToString("R") : "empty")}");
-        }
+        var stack =
+            from index in Enumerable.Range(0, 8)
+            let physical = (cpu.fpu_top + index) & 7
+            let valid = (cpu.fpu_valid & (1 << physical)) != 0
+            select $"ST({index})={(valid ? cpu.fpu_st[physical].ToString("R") : "empty")}";
+        builder.AppendJoin(Environment.NewLine, stack).AppendLine();
         return builder.ToString();
     }
 

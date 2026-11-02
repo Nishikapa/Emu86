@@ -111,16 +111,13 @@ static class SnapshotTests
         env.Ram[0x4321] = 0x5A; env.IoPort[0x4321] = 0x12;
         env.Cmos[14] = 0x41; env.CmosIndex = 14;
         env.Tsc = 12345678; env.Msrs[0x10] = 987654321;
-        env.PitCounter = 0x1234; env.PitLatched = 0x5678; env.PitReadPhase = 1;
         env.PicMasterBase = 0x20; env.PicSlaveBase = 0x28;
         env.PicMasterMask = 0xE0; env.PicSlaveMask = 0xA0;
         env.PicMasterIsr = 0x05; env.PicSlaveIsr = 0x40;
         env.PicMasterInit = 2; env.PicSlaveInit = 3;
         env.PicMasterIcw4 = true; env.PicSlaveIcw4 = true;
         env.NextIrq = 12349999;
-        env.Port61 = 3; env.Port61Refresh = 0x10;
-        env.Pit2Counter = 0x8765; env.Pit2WritePhase = 1; env.Pit2ReadPhase = 1;
-        env.Pit2Armed = true; env.Pit2Wait = 2; env.PitStatusPending = true;
+        env.Port61 = 3;
         env.Clock.InstructionsPerSecond = 7_654_321;
         env.Pit.Channel0.Reload = 0x2E9C; env.Pit.Channel0.Mode = 2; env.Pit.Channel0.Access = 3; env.Pit.Channel0.Started = 1234567; env.Pit.Channel0.Programmed = true;
         env.Pit.Channel0.Latched = 0x1234; env.Pit.Channel0.StatusLatched = 0x34; env.Pit.Channel0.ReadPhase = 1; env.Pit.Channel0.WritePhase = 1; env.Pit.Channel0.Pending = 0x9C;
@@ -169,7 +166,7 @@ static class SnapshotTests
         var loaded = SnapshotStore.Load("roundtrip.snap", restored, DiskConfiguration.Discover(Directory.GetCurrentDirectory()));
         Equal(12345L, loaded.count, "snapshot count");
         Equal(StateHash(env, cpu), StateHash(restored, loaded.cpu), "complete snapshot roundtrip");
-        string[] fields = ["PicMasterIsr", "PicSlaveIsr", "PicMasterInit", "PicSlaveInit", "PicMasterIcw4", "PicSlaveIcw4", "NextIrq", "Port61", "Port61Refresh", "Pit2Counter", "Pit2WritePhase", "Pit2ReadPhase", "Pit2Armed", "Pit2Wait", "PitStatusPending", "KbdLast", "KbdCmdByte", "KbdPendingCmd", "Pm1Sts", "Pm1En", "Pm1Cnt", "Gpe0Sts", "Gpe0En"];
+        string[] fields = ["PicMasterIsr", "PicSlaveIsr", "PicMasterInit", "PicSlaveInit", "PicMasterIcw4", "PicSlaveIcw4", "NextIrq", "Port61", "KbdLast", "KbdCmdByte", "KbdPendingCmd", "Pm1Sts", "Pm1En", "Pm1Cnt", "Gpe0Sts", "Gpe0En"];
         foreach (var name in fields)
         {
             var property = typeof(EmuEnvironment).GetProperty(name);
@@ -309,7 +306,7 @@ static class SnapshotTests
             env.SaveDeviceState(writer); env.Vga.SaveState(writer); env.Mouse.SaveState(writer); env.Com1.SaveState(writer); env.Com2.SaveState(writer);
         }
         Equal(396488L + 24 + VgaDevice.LfbSize, stream.Length, "v12 state length");
-        Equal("5753F35DB0B84616363FCA0649510EEBFFFC2ADCDF47DE1ABD102A0DEADA6FB3", Sha256(stream.ToArray()), "v12 state layout (RTC 2026-10-28, guest clock and PIT channels 2026-11-01, Bochs VBE 2026-11-01)");
+        Equal("FFF5D3EB7C41518B482587ABAB7CD0AC686BC41BED1D8725062E267EA9EE8AC2", Sha256(stream.ToArray()), "v12 state layout (RTC 2026-10-28, guest clock and PIT channels 2026-11-01, Bochs VBE 2026-11-01, legacy PIT slots reserved 2026-11-02)");
         var restored = Environment();
         using (var reader = new BinaryReader(new MemoryStream(stream.ToArray()), Encoding.UTF8))
         {
@@ -325,7 +322,7 @@ static class SnapshotTests
         }
         Close(restored.Ata); Close(env.Ata); env.Ata = null;
         SnapshotStore.Save("layout.snap", 777, cpu, env);
-        Equal("833051301119CD457664CC31F4BCA81F4737A3E81FA79414AF1606BF15583EE4", Sha256(File.ReadAllBytes("layout.snap")), "v12 file layout");
+        Equal("ED980E9ABFDC6A35717F36ABFFC97173E197B0FF60B4167ABBA1B5FE13765BCB", Sha256(File.ReadAllBytes("layout.snap")), "v12 file layout");
     }
 
     // フォルトの統一経路: #GP は例外として命令開始時の状態へ戻り、Raise が #PF/#UD と同じ形で IDT 経由で配送する。

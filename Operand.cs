@@ -1,6 +1,9 @@
+using static Emu86.CPU;
 using static Emu86.Conversions;
 using static Emu86.DataAccess;
 using static Emu86.AluStates;
+using static Emu86.CpuStates;
+using static Emu86.Ports;
 
 namespace Emu86;
 
@@ -27,6 +30,19 @@ static public partial class Operands
     // スタックトップ: 読むと POP、書くと PUSH。PUSH r は Move(Stack(type), Reg(...))、POP r は Move(Reg(...), Stack(type))。
     static public Operand Stack(int type) =>
         new(Pop(type), Push);
+
+    // I/O ポート: 読むと IN、書くと OUT(幅は type)。ポート番号は State で与える(即値か DX)。
+    // IN acc, port は Move(Reg(0, type), Port(port, type))、OUT port, acc は Move(Port(port, type), Reg(0, type))。
+    static public Operand Port(State<int> port, int type) =>
+        new(from address in port
+            from value in GetDataFromEnvCpu((env, _) => EnvInPortN(env, address, Bytes(type)))
+            select value.ToTypeData(type),
+            data => from address in port
+                    from _ in Effect((env, _) => EnvOutPortN(env, address, Bytes(type), data.Value))
+                    select Unit.unit);
+
+    // DX が指すポート(IN/OUT の DX 形式と INS/OUTS)。
+    static public State<int> Dx => _dx.Get().Select(dx => (int)dx);
 
     // dst <- src
     static public State<Unit> Move<T>(Lens<T> dst, Lens<T> src) =>

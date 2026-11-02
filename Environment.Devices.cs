@@ -28,18 +28,8 @@ public partial class EmuEnvironment
     public bool PicSlaveIcw4 { get => PicSlave.Icw4; set => PicSlave.Icw4 = value; }
     public byte PicSlaveIsr { get => PicSlave.Isr; set => PicSlave.Isr = value; }
 
+    // v10 以前のスナップショット形式に残る旧 PIT の項目は、保存形式(Environment.Snapshot.cs)の予約領域として読み飛ばす。
     public byte Port61 { get => Pit.Port61; set => Pit.Port61 = value; }
-    // v10 以前のスナップショット形式に残る旧 PIT の項目。保存形式を変えないために値を持つだけで、PIT の状態は v11 の項目(チャネル 0/2)にある。
-    public ushort PitCounter { get; set; } = 0xFFFF;
-    public ushort PitLatched { get; set; } = 0xFFFF;
-    public int PitReadPhase { get; set; }
-    public byte Port61Refresh { get; set; }
-    public ushort Pit2Counter { get; set; } = 0xFFFF;
-    public int Pit2WritePhase { get; set; }
-    public int Pit2ReadPhase { get; set; }
-    public bool Pit2Armed { get; set; }
-    public int Pit2Wait { get; set; }
-    public bool PitStatusPending { get; set; }
 
     public Queue<byte> KbdOut => Keyboard.Output;
     public MouseDevice Mouse => Keyboard.Mouse;

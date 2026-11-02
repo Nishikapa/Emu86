@@ -158,31 +158,19 @@ static partial class Instructions
         (0x0F, 0xAF, 0x01, Imul_0FAF)             // IMUL r, r/m
     ];
 
+    // 表の (オペコード, 個数) をオペコードごとに展開する。2 バイト命令は 1 バイト目(0F)でまとめる。
     static readonly Dictionary<int, State<Unit>> oneByte =
-        OneByteStates
-        .SelectMany(
-            item =>
-            Enumerable.Range(item.ope, item.len)
-            .Select(ope => (ope, item.state))
-        )
-        .ToDictionary(
-            item => item.ope,
-            item => item.state
-        );
+        (from item in OneByteStates
+         from ope in Enumerable.Range(item.ope, item.len)
+         select (ope, item.state))
+        .ToDictionary(entry => entry.ope, entry => entry.state);
 
     static readonly Dictionary<int, Dictionary<int, State<Unit>>> twoBytes =
-        TwoBytesStates
-        .ToLookup(item => item.ope1)
-        .ToDictionary(
-            item => (int)item.Key,
-            item =>
-                item.SelectMany(
-                    item2 =>
-                    Enumerable.Range(item2.ope2, item2.len)
-                    .Select(ope => (ope, item2.state))
-                )
-                .ToDictionary(j => (int)j.ope, j => j.state)
-            );
+        (from item in TwoBytesStates
+         from ope in Enumerable.Range(item.ope2, item.len)
+         group (ope, item.state) by (int)item.ope1 into escape
+         select escape)
+        .ToDictionary(escape => escape.Key, escape => escape.ToDictionary(entry => entry.ope, entry => entry.state));
 
     // オペコード 1 バイトを読んで表で引く。未定義(null)なら失敗。ハンドラにはここまでに読んだ
     // オペコード列(1 バイト目、または 0F と 2 バイト目)を渡す。
@@ -198,17 +186,12 @@ static partial class Instructions
         return result.IsSuccess ? result : (false, default, result.cpu, result.log);
     };
 
-    // 1 バイト目の表。0F は 2 バイト目の表へ(Dispatch を入れ子にした State)。
-    static readonly State<Unit>[] opcodeTable = BuildOpcodeTable();
-
-    static State<Unit>[] BuildOpcodeTable()
-    {
-        var table = new State<Unit>[256];
-        foreach (var (op, state) in oneByte) table[op] = state;
-        foreach (var (op1, inner) in twoBytes)
-            table[op1] = Dispatch([.. Enumerable.Range(0, 256).Select(op2 => inner.GetValueOrDefault(op2))]);
-        return table;
-    }
+    // 1 バイト目の表(256 項、未定義は null)。0F は 2 バイト目の表へ(Dispatch を入れ子にした State)。
+    static readonly State<Unit>[] opcodeTable =
+        [.. from op in Enumerable.Range(0, 256)
+            select twoBytes.TryGetValue(op, out var inner)
+                ? Dispatch([.. Enumerable.Range(0, 256).Select(op2 => inner.GetValueOrDefault(op2))])
+                : oneByte.GetValueOrDefault(op)];
 
     // プレフィックスを 0 個以上消費し、デコード文脈に立てる(Prefixes パーサは CPU を変えないので、
     // 読み取った長さだけ EIP を進める)。

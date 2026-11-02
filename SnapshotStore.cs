@@ -61,6 +61,22 @@ public static class SnapshotStore
         if (env.Ata != null) throw new InvalidOperationException("Load snapshots before attaching a disk");
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
         using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true);
+        var version = ReadHeader(reader, stream);
+        var count = reader.ReadInt64();
+        if (count < 0) throw new InvalidDataException("Invalid instruction count");
+        var cpu = CPU.ReadFrom(reader);
+        env.LoadState(reader);
+        env.LoadRuntimeState(reader, version, count);
+        cpu.LoadRuntimeState(reader, version);
+        if (version >= 7) LoadDevices(reader, stream, env, version, diskConfiguration);
+        else LoadLegacyDisk(path, stream, env, diskConfiguration);
+        env.Paging.Sync(cpu);
+        return (count, cpu);
+    }
+
+    // マジックと版を読む。v7 以降は末尾の SHA-256 でファイル全体を検証してから、版の直後へ戻る。
+    static int ReadHeader(BinaryReader reader, Stream stream)
+    {
         if (Encoding.ASCII.GetString(reader.ReadBytes(Magic.Length)) != Magic)
             throw new InvalidDataException("Not an Emu86 snapshot");
         var version = reader.ReadInt32();
@@ -73,45 +89,40 @@ public static class SnapshotStore
                 throw new InvalidDataException("Snapshot checksum mismatch");
             stream.Position = Magic.Length + sizeof(int);
         }
-        var count = reader.ReadInt64();
-        if (count < 0) throw new InvalidDataException("Invalid instruction count");
-        var cpu = CPU.ReadFrom(reader);
-        env.LoadState(reader);
-        env.LoadRuntimeState(reader, version, count);
-        cpu.LoadRuntimeState(reader, version);
-        if (version >= 7)
+        return version;
+    }
+
+    // v7 以降: デバイス状態(版ごとに増えた分を読み、無い版は初期値)と、末尾に埋め込まれたディスク差分(長さ 0 なら無し)。
+    static void LoadDevices(BinaryReader reader, Stream stream, EmuEnvironment env, int version, DiskConfiguration diskConfiguration)
+    {
+        env.LoadDeviceState(reader, version);
+        if (version >= 8) env.Vga.LoadState(reader, version);
+        else env.Vga.Reset();
+        if (version >= 9) env.Mouse.LoadState(reader);
+        if (version >= 10) { env.Com1.LoadState(reader); env.Com2.LoadState(reader); }
+        var diskLength = reader.ReadInt64();
+        if (diskLength < 0 || diskLength != stream.Length - HashSize - stream.Position
+            || (diskLength > 0) != (env.Ata != null))
+            throw new InvalidDataException("Invalid embedded disk length");
+        if (diskLength > 0) RestoreDisk(stream, diskLength, env, diskConfiguration);
+    }
+
+    // v6 以前: ディスクは別ファイル <snapshot>.avhdx(あれば組として復元し、無ければ現在の作業用オーバーレイを使う)。
+    static void LoadLegacyDisk(string path, Stream stream, EmuEnvironment env, DiskConfiguration diskConfiguration)
+    {
+        if (stream.Position != stream.Length) throw new InvalidDataException("Unexpected snapshot data");
+        if (env.Ata == null) return;
+        var saved = path + ".avhdx";
+        if (File.Exists(saved))
         {
-            env.LoadDeviceState(reader, version);
-            if (version >= 8) env.Vga.LoadState(reader, version);
-            else env.Vga.Reset();
-            if (version >= 9) env.Mouse.LoadState(reader);
-            if (version >= 10) { env.Com1.LoadState(reader); env.Com2.LoadState(reader); }
-            var diskLength = reader.ReadInt64();
-            if (diskLength < 0 || diskLength != stream.Length - HashSize - stream.Position
-                || (diskLength > 0) != (env.Ata != null))
-                throw new InvalidDataException("Invalid embedded disk length");
-            if (diskLength > 0) RestoreDisk(stream, diskLength, env, diskConfiguration);
+            using var disk = new FileStream(saved, FileMode.Open, FileAccess.Read, FileShare.Read);
+            RestoreDisk(disk, disk.Length, env, diskConfiguration);
         }
         else
         {
-            if (stream.Position != stream.Length) throw new InvalidDataException("Unexpected snapshot data");
-            if (env.Ata != null)
-            {
-                var saved = path + ".avhdx";
-                if (File.Exists(saved))
-                {
-                    using var disk = new FileStream(saved, FileMode.Open, FileAccess.Read, FileShare.Read);
-                    RestoreDisk(disk, disk.Length, env, diskConfiguration);
-                }
-                else
-                {
-                    var configuration = diskConfiguration ?? throw new FileNotFoundException("Snapshot requires a base disk image");
-                    env.Ata.AttachDisk(configuration.OpenOverlay());
-                }
-            }
+            var configuration = diskConfiguration ?? throw new FileNotFoundException("Snapshot requires a base disk image");
+            env.Ata.AttachDisk(configuration.OpenOverlay());
         }
-        env.Paging.Sync(cpu);
-        return (count, cpu);
     }
 
     static void RestoreDisk(Stream source, long length, EmuEnvironment env, DiskConfiguration diskConfiguration)
@@ -147,25 +158,24 @@ public static class SnapshotStore
             throw new InvalidDataException("Truncated snapshot");
         stream.Position = 0;
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        var buffer = new byte[81920];
-        while (length > 0)
-        {
-            var count = (int)Math.Min(buffer.Length, length);
-            stream.ReadExactly(buffer.AsSpan(0, count));
-            hash.AppendData(buffer, 0, count);
-            length -= count;
-        }
+        ReadChunks(stream, length, hash.AppendData);
         return hash.GetHashAndReset();
     }
 
-    static void CopyExactly(Stream source, Stream target, long length)
+    static void CopyExactly(Stream source, Stream target, long length) => ReadChunks(source, length, target.Write);
+
+    delegate void ChunkAction(ReadOnlySpan<byte> chunk);
+
+    // ストリームの現在位置から length バイトを、バッファ 1 つ分ずつ consume に渡す(ハッシュとコピーで共有)。
+    static void ReadChunks(Stream source, long length, ChunkAction consume)
     {
         var buffer = new byte[81920];
         while (length > 0)
         {
             var count = (int)Math.Min(buffer.Length, length);
-            source.ReadExactly(buffer.AsSpan(0, count));
-            target.Write(buffer, 0, count);
+            var chunk = buffer.AsSpan(0, count);
+            source.ReadExactly(chunk);
+            consume(chunk);
             length -= count;
         }
     }

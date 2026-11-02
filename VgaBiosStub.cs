@@ -176,14 +176,12 @@ public static class VgaBiosStub
         var ram = env.Ram;
         var clear = (requested & 0x80) == 0;
         var mode = requested & 0x7F;
-        var (misc, seq, crtc, gc, attr) = mode switch
+        vga.Load(mode switch
         {
-            0x13 => Mode13,
-            0x0D or 0x0E or 0x0F or 0x10 or 0x11 or 0x12 or 0x6A => Mode12,
-            _ => Mode3,
-        };
-        vga.MiscOutput = misc;
-        seq.CopyTo(vga.Sequencer, 0); crtc.CopyTo(vga.Crtc, 0); gc.CopyTo(vga.Graphics, 0); attr.CopyTo(vga.Attribute, 0);
+            0x13 => VgaDevice.Mode13,
+            0x0D or 0x0E or 0x0F or 0x10 or 0x11 or 0x12 or 0x6A => VgaDevice.Mode12,
+            _ => VgaDevice.Mode3,
+        });
         vga.DacMask = 0xFF;
         vga.AttributeData = false;
         LoadDefaultPalette(vga, mode == 0x13);
@@ -260,28 +258,28 @@ public static class VgaBiosStub
         ScrollLines(vga, lines, up, attribute, top, left, bottom, right, columns);
     }
 
+    // 窓の各行に、lines 行離れた行(窓の中なら)を写すか、空白と属性で埋める。上スクロールは上の行から、下スクロールは下の行から処理する
+    // (写す元がまだ書き換わっていない順)。文字はプレーン 0、属性はプレーン 1(0x10000 から)。
     static void ScrollLines(VgaDevice vga, int lines, bool up, byte attribute, int top, int left, int bottom, int right, int columns)
     {
         var height = bottom - top + 1;
+        var width = right - left + 1;
         if (lines <= 0 || lines >= height) lines = height;
         for (var step = 0; step < height; step++)
         {
             var row = up ? top + step : bottom - step;
             var source = up ? row + lines : row - lines;
-            for (var column = left; column <= right; column++)
+            var unit = row * columns + left;
+            if (source >= top && source <= bottom)
             {
-                var unit = row * columns + column;
-                if (source >= top && source <= bottom)
-                {
-                    var from = source * columns + column;
-                    vga.Vram[unit] = vga.Vram[from];
-                    vga.Vram[0x10000 + unit] = vga.Vram[0x10000 + from];
-                }
-                else
-                {
-                    vga.Vram[unit] = 0x20;
-                    vga.Vram[0x10000 + unit] = attribute;
-                }
+                var from = source * columns + left;
+                Array.Copy(vga.Vram, from, vga.Vram, unit, width);
+                Array.Copy(vga.Vram, 0x10000 + from, vga.Vram, 0x10000 + unit, width);
+            }
+            else
+            {
+                Array.Fill(vga.Vram, (byte)0x20, unit, width);
+                Array.Fill(vga.Vram, attribute, 0x10000 + unit, width);
             }
         }
         vga.Dirty = true;
@@ -333,28 +331,4 @@ public static class VgaBiosStub
     // 色相環の 1 区間(4 色相)を anchors[segment] から anchors[segment+1] へ線形補間する(整数演算、切り捨て)。
     static byte Blend(int[] anchors, int segment, int fraction) =>
         (byte)(anchors[segment] + (anchors[segment + 1] - anchors[segment]) * fraction / 4);
-
-    static readonly (byte misc, byte[] seq, byte[] crtc, byte[] gc, byte[] attr) Mode3 = (
-        0x67,
-        [0x03, 0x00, 0x03, 0x00, 0x02],
-        [0x5F, 0x4F, 0x50, 0x82, 0x55, 0x81, 0xBF, 0x1F, 0x00, 0x4F, 0x0D, 0x0E, 0x00, 0x00, 0x00, 0x00,
-         0x9C, 0x8E, 0x8F, 0x28, 0x1F, 0x96, 0xB9, 0xA3, 0xFF],
-        [0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x0E, 0x00, 0xFF],
-        [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x14, 0x07, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x0C, 0x00, 0x0F, 0x08, 0x00]);
-
-    static readonly (byte misc, byte[] seq, byte[] crtc, byte[] gc, byte[] attr) Mode12 = (
-        0xE3,
-        [0x03, 0x01, 0x0F, 0x00, 0x06],
-        [0x5F, 0x4F, 0x50, 0x82, 0x54, 0x80, 0x0B, 0x3E, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-         0xEA, 0x8C, 0xDF, 0x28, 0x00, 0xE7, 0x04, 0xE3, 0xFF],
-        [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x0F, 0xFF],
-        [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x14, 0x07, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x01, 0x00, 0x0F, 0x00, 0x00]);
-
-    static readonly (byte misc, byte[] seq, byte[] crtc, byte[] gc, byte[] attr) Mode13 = (
-        0x63,
-        [0x03, 0x01, 0x0F, 0x00, 0x0E],
-        [0x5F, 0x4F, 0x50, 0x82, 0x54, 0x80, 0xBF, 0x1F, 0x00, 0x41, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-         0x9C, 0x8E, 0x8F, 0x28, 0x40, 0x96, 0xB9, 0xA3, 0xFF],
-        [0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x05, 0x0F, 0xFF],
-        [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x41, 0x00, 0x0F, 0x00, 0x00]);
 }

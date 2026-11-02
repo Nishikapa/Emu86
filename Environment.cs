@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using static Emu86.CPU;
 using static Emu86.States;
+using static Emu86.Operands;
 using static Emu86.Mmu;
 using static Emu86.Ports;
 using static Emu86.DataAccess;
@@ -575,24 +576,82 @@ static public class DataAccess
 }
 
 // 文字列命令(MOVS/STOS/LODS/CMPS/SCAS/INS/OUTS)の 1 要素分。
+//   要素の幅(type)      : operand size に従う(w かつ 32bit なら dword、そうでなければ word/byte)= OperandType(w)。
+//   アドレスモード     : code32 でフラット32bit(ESI/EDI, ベース0)、そうでなければ real(DS:SI/ES:DI)。
+//   源(DS:SI)はセグメントオーバーライドで差し替えられる。先(ES:DI)は固定。
+// 通常コア向けは、源・先・ポート・アキュムレータをオペランド(Lens)にして Move/Binary で書く。IR 向けは Element(命令的な形)。
 static public class StringOps
 {
-    // 文字列命令の実効パラメータ。
-    //   要素の幅(type)      : operand size に従う(w かつ 32bit なら dword、そうでなければ word/byte)。
-    //   アドレスモード     : code32 でフラット32bit(ESI/EDI, ベース0)、そうでなければ real(DS:SI/ES:DI)。
-    //   源(DS:SI)はセグメントオーバーライドで差し替えられる。先(ES:DI)は固定。
-    static int StrType(CPU cpu, bool w) => w ? ((cpu.code32 != cpu.operand_size_prefix) ? 2 : 1) : 0;
-
-    static int StrSize(CPU cpu, bool w) => Bytes(StrType(cpu, w));
-
-    // AL/AX/EAX(type の幅のアキュムレータ)。
-    static uint StrAcc(CPU cpu, int type) => cpu.eax & Mask(type);
-
     static bool StrA32(CPU cpu) => cpu.code32 != cpu.address_size_prefix;
 
-    static uint StrSrc(CPU cpu) => (OverrideBase(cpu.Decode.Prefixes, cpu) ?? cpu.ds_base) + (StrA32(cpu) ? cpu.esi : cpu.si);
+    // 源 DS:SI と先 ES:DI のメモリアドレス。
+    static readonly State<MemAddr> Source =
+        GetDataFromCpu(cpu => (MemAddr)(true, (OverrideBase(cpu.Decode.Prefixes, cpu) ?? cpu.ds_base) + (StrA32(cpu) ? cpu.esi : cpu.si)));
 
-    static uint StrDst(CPU cpu) => cpu.es_base + (StrA32(cpu) ? cpu.edi : cpu.di);
+    static readonly State<MemAddr> Destination =
+        GetDataFromCpu(cpu => (MemAddr)(true, cpu.es_base + (StrA32(cpu) ? cpu.edi : cpu.di)));
+
+    // DF に従って SI/DI(32 ビットアドレスなら ESI/EDI)を 1 要素分だけ増減する。
+    static State<Unit> StrAdvance(int type, bool si, bool di) =>
+        Effect(cpu => Advance(cpu, Bytes(type), StrA32(cpu), si, di));
+
+    // MOVS: [DS:SI] -> [ES:DI] を 1 要素コピーし、DF に従って SI/DI を増減する。
+    static public State<Unit> Movs(bool w) =>
+        from type in OperandType(w)
+        from source in Source
+        from destination in Destination
+        from _1 in Move(Rm(destination, type), Rm(source, type))
+        from _2 in StrAdvance(type, si: true, di: true)
+        select Unit.unit;
+
+    // STOS: AL/AX/EAX -> [ES:DI]、DF に従って DI を増減する。
+    static public State<Unit> Stos(bool w) =>
+        from type in OperandType(w)
+        from destination in Destination
+        from _1 in Move(Rm(destination, type), Reg(0, type))
+        from _2 in StrAdvance(type, si: false, di: true)
+        select Unit.unit;
+
+    // LODS: [DS:SI] -> AL/AX/EAX、DF に従って SI を増減する。
+    static public State<Unit> Lods(bool w) =>
+        from type in OperandType(w)
+        from source in Source
+        from _1 in Move(Reg(0, type), Rm(source, type))
+        from _2 in StrAdvance(type, si: true, di: false)
+        select Unit.unit;
+
+    // CMPS: [DS:SI] - [ES:DI] でフラグを更新(結果は破棄 = CMP)し、SI/DI を増減する。
+    static public State<Unit> Cmps(bool w) =>
+        from type in OperandType(w)
+        from source in Source
+        from destination in Destination
+        from _1 in Binary(Rm(source, type), Rm(destination, type), 7)
+        from _2 in StrAdvance(type, si: true, di: true)
+        select Unit.unit;
+
+    // SCAS: AL/AX/EAX - [ES:DI] でフラグを更新(結果は破棄)し、DI を増減する。
+    static public State<Unit> Scas(bool w) =>
+        from type in OperandType(w)
+        from destination in Destination
+        from _1 in Binary(Reg(0, type), Rm(destination, type), 7)
+        from _2 in StrAdvance(type, si: false, di: true)
+        select Unit.unit;
+
+    // INS: ポート DX から 1 要素読み、[ES:DI] へ格納し、DF に従って DI を増減する。
+    static public State<Unit> Ins(bool w) =>
+        from type in OperandType(w)
+        from destination in Destination
+        from _1 in Move(Rm(destination, type), Port(Dx, type))
+        from _2 in StrAdvance(type, si: false, di: true)
+        select Unit.unit;
+
+    // OUTS: [DS:SI] から 1 要素読み、ポート DX へ出力し、DF に従って SI を増減する。
+    static public State<Unit> Outs(bool w) =>
+        from type in OperandType(w)
+        from source in Source
+        from _1 in Move(Port(Dx, type), Rm(source, type))
+        from _2 in StrAdvance(type, si: true, di: false)
+        select Unit.unit;
 
     // 1 要素分の命令的な形(IR の StringStmt が使う)。source は源(DS:SI)の基底(セグメントオーバーライド適用済み)、先(ES:DI)は固定。
     // 書き込み先の検査は EnvWriteN に任せる(読み取りが先なので、フォルト時に状態は変わっていない)。
@@ -642,91 +701,13 @@ static public class StringOps
         }
     }
 
-    // DF に従って SI/DI(a32 なら ESI/EDI)を size 分だけ増減する(命令的な形)。
+    // DF に従って SI/DI(a32 なら ESI/EDI)を size 分だけ増減する(命令的な形。通常コアの StrAdvance もこれを呼ぶ)。
     static void Advance(CPU c, int size, bool a32, bool si, bool di)
     {
         var delta = c.df ? -size : size;
         if (si) { if (a32) c.esi = (uint)(c.esi + delta); else c.si = (ushort)(c.si + delta); }
         if (di) { if (a32) c.edi = (uint)(c.edi + delta); else c.di = (ushort)(c.di + delta); }
     }
-
-    // DF に従って SI/DI(32bit なら ESI/EDI)を size 分だけ増減する。
-    static CPU StrAdvance(CPU cpu, int size, bool si, bool di)
-    {
-        int delta = cpu.df ? -size : size;
-        bool a32 = StrA32(cpu);
-        if (si) cpu = a32 ? _esi.setter(cpu)((uint)(cpu.esi + delta)) : _si.setter(cpu)((ushort)(cpu.si + delta));
-        if (di) cpu = a32 ? _edi.setter(cpu)((uint)(cpu.edi + delta)) : _di.setter(cpu)((ushort)(cpu.di + delta));
-        return cpu;
-    }
-
-    // MOVS: [DS:SI] -> [ES:DI] を 1 要素コピーし、DF に従って SI/DI を増減する。
-    static public State<Unit> Movs(bool w) =>
-        SetCpu((env, cpu) =>
-        {
-            int size = StrSize(cpu, w);
-            EnvWriteN(env, StrDst(cpu), size, EnvReadN(env, StrSrc(cpu), size));
-            return StrAdvance(cpu, size, si: true, di: true);
-        });
-
-    // STOS: AL/AX/EAX -> [ES:DI]、DF に従って DI を増減する。
-    static public State<Unit> Stos(bool w) =>
-        SetCpu((env, cpu) =>
-        {
-            int type = StrType(cpu, w), size = Bytes(type);
-            EnvWriteN(env, StrDst(cpu), size, StrAcc(cpu, type));
-            return StrAdvance(cpu, size, si: false, di: true);
-        });
-
-    // LODS: [DS:SI] -> AL/AX/EAX、DF に従って SI を増減する。
-    static public State<Unit> Lods(bool w) =>
-        SetCpu((env, cpu) =>
-        {
-            int size = StrSize(cpu, w);
-            uint val = EnvReadN(env, StrSrc(cpu), size);
-            cpu = size == 1 ? _al.setter(cpu)((byte)val) : size == 2 ? _ax.setter(cpu)((ushort)val) : _eax.setter(cpu)(val);
-            return StrAdvance(cpu, size, si: true, di: false);
-        });
-
-    // CMPS: [DS:SI] - [ES:DI] でフラグを更新（結果は破棄）し、SI/DI を増減する。
-    static public State<Unit> Cmps(bool w) =>
-        from vals in GetDataFromEnvCpu((env, cpu) =>
-        {
-            int type = StrType(cpu, w), size = Bytes(type);
-            return (type, s: EnvReadN(env, StrSrc(cpu), size), d: EnvReadN(env, StrDst(cpu), size));
-        })
-        from _f in update_eflags_sub(vals.type, vals.s, vals.d)
-        from _adv in SetCpu(cpu => StrAdvance(cpu, Bytes(vals.type), si: true, di: true))
-        select Unit.unit;
-
-    // INS: ポート DX から 1 要素読み、[ES:DI] へ格納し、DF に従って DI を増減する。
-    static public State<Unit> Ins(bool w) =>
-        SetCpu((env, cpu) =>
-        {
-            int size = StrSize(cpu, w);
-            EnvWriteN(env, StrDst(cpu), size, EnvInPortN(env, cpu.dx, size));
-            return StrAdvance(cpu, size, si: false, di: true);
-        });
-
-    // OUTS: [DS:SI] から 1 要素読み、ポート DX へ出力し、DF に従って SI を増減する。
-    static public State<Unit> Outs(bool w) =>
-        SetCpu((env, cpu) =>
-        {
-            int size = StrSize(cpu, w);
-            EnvOutPortN(env, cpu.dx, size, EnvReadN(env, StrSrc(cpu), size));
-            return StrAdvance(cpu, size, si: true, di: false);
-        });
-
-    // SCAS: AL/AX - [ES:DI] でフラグを更新（結果は破棄）し、DI を増減する。
-    static public State<Unit> Scas(bool w) =>
-        from vals in GetDataFromEnvCpu((env, cpu) =>
-        {
-            int type = StrType(cpu, w);
-            return (type, a: StrAcc(cpu, type), m: EnvReadN(env, StrDst(cpu), Bytes(type)));
-        })
-        from _f in update_eflags_sub(vals.type, vals.a, vals.m)
-        from _adv in SetCpu(cpu => StrAdvance(cpu, Bytes(vals.type), si: false, di: true))
-        select Unit.unit;
 }
 
 // ビット操作命令(BT 系、BSF/BSR)。
@@ -836,12 +817,11 @@ static public class Interrupts
     // IDT ゲート経由の配送。idt_base は線形アドレスだが、この関数はページング変換の
     // 起点(#PF ハンドラ自身)になりうるため、IDT は恒等マップ域にある前提で読む。
     static State<Unit> InterruptProtected(int vector, bool hasError, uint errorCode) =>
-        from _log in GetDataFromEnvCpu((env, cpu) =>
+        from _log in Effect((env, cpu) =>
         {
             if (env.Diagnostics is { InterruptLog: not null } diagnostics && cpu.pg)
                 diagnostics.LogInterrupt($"vec={vector:x2} err={(hasError ? errorCode.ToString("x") : "-")} at cs:eip={cpu.cs:x4}:{cpu.eip:x8} esp={cpu.esp:x8}",
                     fromV86: cpu.vm, env.Tsc, cpu.cr3);
-            return Unit.unit;
         })
         from gateLo in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryData32(env, cpu.idt_base + (uint)vector * 8))
         from gateHi in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryData32(env, cpu.idt_base + (uint)vector * 8 + 4))
@@ -1048,24 +1028,13 @@ static public class Segments
     // リアルモードは セレクタ*16 を基底に(セッタが自動設定)、
     // プロテクトモードは GDT 記述子から基底を読む。CS の場合は D ビットで code32 を更新する。
     static public State<Unit> LoadSReg(int reg, ushort sel) =>
-        SetCpu((env, cpu) =>
-        {
-            cpu = EnvSetSReg3(sel)(reg)(cpu);
-            if (cpu.pe && !cpu.vm) // V86 モードはリアルモードと同じく セレクタ*16(セッタが設定済み)
-            {
-                var (base_, d) = EnvReadDescriptor(env, cpu, sel);
-                cpu = ArraySregBase[reg].setter(cpu)(base_);
-                if (reg == 1) // CS: D ビットで 32ビットコードか決まる
-                    cpu.code32 = d;
-                else if (reg == 2) // SS: B ビットで 32ビットスタックか決まる
-                    cpu.stack32 = d;
-            }
-            else if (reg == 1)
-                cpu.code32 = false;
-            else if (reg == 2)
-                cpu.stack32 = false;
-            return cpu;
-        });
+        from _1 in SetCpu(EnvSetSReg3(sel)(reg))                             // セレクタ(リアルモードの基底 セレクタ*16 はセッタが置く)
+        from descriptors in GetDataFromCpu(cpu => cpu.pe && !cpu.vm)         // V86 モードはリアルモードと同じく セレクタ*16
+        from descriptor in descriptors ? GetDataFromEnvCpu((env, cpu) => EnvReadDescriptor(env, cpu, sel)) : default((uint base_, bool d)).ToState()
+        from _2 in When(descriptors, ArraySregBase[reg].Set(descriptor.base_))
+        from _3 in When(reg == 1, Effect(cpu => cpu.code32 = descriptor.d))  // CS: D ビットで 32 ビットコードか決まる(リアルモードは 16 ビット)
+        from _4 in When(reg == 2, Effect(cpu => cpu.stack32 = descriptor.d)) // SS: B ビットで 32 ビットスタックか決まる
+        select Unit.unit;
 
     // MOV Sreg, r/m は常に下位16ビットのみロードする
     static public State<Unit> SetSReg3(int reg, Data data) =>
