@@ -157,50 +157,48 @@ public class PciHost
         return enabled && bus == 0 && cfg.TryGetValue(Key(dev, fn), out var c) ? c : null;
     }
 
-    // CONFIG_DATA 読み出し。存在しないデバイスは 0xFFFF...(ベンダ ID = 0xFFFF)。
+    // CONFIG_DATA 読み出し。存在しないデバイスと、コンフィグ空間(256 バイト)の外は 0xFF(ベンダ ID = 0xFFFF)。
     public uint DataRead(int off, int size)
     {
-        var c = Selected(out var reg);
-        uint v = 0;
-        for (int i = 0; i < size; i++)
+        var config = Selected(out var reg);
+        uint value = 0;
+        for (var index = 0; index < size; index++)
         {
-            int idx = reg + off + i;
-            byte b = (c != null && idx < 256) ? c[idx] : (byte)0xFF;
-            v |= (uint)b << (8 * i);
+            var position = reg + off + index;
+            value |= (uint)(config != null && position < 256 ? config[position] : 0xFF) << (8 * index);
         }
-        if (Log && c != null)
-            Console.Error.WriteLine($"[pci] rd {Bdf()} reg {reg + off:x2} size {size} -> {v:x} @{Eip:x8} {Caller()}");
-        return v;
+        if (Log && config != null)
+            Console.Error.WriteLine($"[pci] rd {Bdf()} reg {reg + off:x2} size {size} -> {value:x} @{Eip:x8} {Caller()}");
+        return value;
     }
 
     int KeyOf() => Key(Decoded.dev, Decoded.fn);
 
     string Bdf() => $"{Decoded.bus:x2}:{Decoded.dev:x2}.{Decoded.fn}";
 
-    // CONFIG_DATA 書き込み。コマンドレジスタ等の書き換えのみ受ける。
-    // BAR(0x10-0x27)は互換モードのため常に 0 のままにし、サイズ問い合わせに 0 を返す
-    //(= 未実装扱い → libata は BMDMA を諦めて PIO 動作になる)。
+    // コンフィグ空間の 1 バイトのうち、書き換えられるビット。ベンダ/デバイス ID(0x00-0x03)、リビジョンとクラス(0x08-0x0B)、
+    // ヘッダ種別(0x0E)は不変。BAR から拡張 ROM BAR まで(0x10-0x33)は、実装済みの BAR だけがマスク(barMask)のビットを受ける
+    // (サイズ問い合わせに答えるため。未実装の BAR は 0 のまま読み取り専用)。それ以外(コマンドなど)は全ビット書ける。
+    byte WritableBits(int key, int position) => position switch
+    {
+        < 0x04 or (>= 0x08 and <= 0x0B) or 0x0E => 0x00,
+        >= 0x10 and < 0x34 => barMask.TryGetValue((key, position & ~3), out var mask) ? (byte)(mask >> (8 * (position & 3))) : (byte)0x00,
+        _ => 0xFF,
+    };
+
+    // CONFIG_DATA 書き込み。各バイトは、書き換えられるビットだけが変わる。
     public void DataWrite(int off, int size, uint val)
     {
-        var c = Selected(out var reg);
-        if (c == null) return;
+        var config = Selected(out var reg);
+        if (config == null) return;
         if (Log) Console.Error.WriteLine($"[pci] wr {Bdf()} reg {reg + off:x2} size {size} <- {val:x} @{Eip:x8} {Caller()}");
-        for (int i = 0; i < size; i++)
+        var key = KeyOf();
+        for (var index = 0; index < size && reg + off + index < 256; index++)
         {
-            int idx = reg + off + i;
-            if (idx >= 256) break;
-            if (idx >= 0x10 && idx < 0x34)                    // BAR / 拡張 ROM BAR
-            {
-                var bar = idx & ~3;
-                if (!barMask.TryGetValue((KeyOf(), bar), out var mask)) continue; // 未実装 BAR は読み取り専用
-                var mb = (byte)(mask >> (8 * (idx & 3)));
-                c[idx] = (byte)((c[idx] & ~mb) | ((byte)(val >> (8 * i)) & mb));
-                continue;
-            }
-            if (idx == 0x0E || (idx >= 0x08 && idx <= 0x0B)) continue; // ヘッダ種別/クラスは不変
-            if (idx < 0x04) continue;                         // ベンダ/デバイス ID は不変
-            c[idx] = (byte)(val >> (8 * i));
+            var position = reg + off + index;
+            var writable = WritableBits(key, position);
+            config[position] = (byte)((config[position] & ~writable) | ((byte)(val >> (8 * index)) & writable));
         }
-        if (KeyOf() == VgaKey) UpdateLfbBase();
+        if (key == VgaKey) UpdateLfbBase();
     }
 }

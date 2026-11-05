@@ -20,9 +20,11 @@ public static class VgaBiosStub
 {
     public const uint RomBase = 0xC0000;
     public const int RomSize = 2048;
+    const ushort RomSegment = (ushort)(RomBase >> 4);
     const int InitOffset = 0x20;
     const int PcirOffset = 0x40;
     public const int ServiceOffset = 0x60;
+    const int Int10Vector = 0x10 * 4;           // IVT のベクタ 10h(オフセット、セグメントの順)
 
     public static readonly byte[] Rom = BuildRom();
 
@@ -45,8 +47,8 @@ public static class VgaBiosStub
             Bytes(0x1E),                                        // push ds
             Bytes(0x31, 0xC0),                                  // xor ax, ax
             Bytes(0x8E, 0xD8),                                  // mov ds, ax
-            Bytes(0xC7, 0x06, 0x40, 0x00), U16(ServiceOffset),  // mov word [0x40], handler
-            Bytes(0xC7, 0x06, 0x42, 0x00), U16(0xC000),         // mov word [0x42], 0xC000
+            Bytes(0xC7, 0x06), U16(Int10Vector), U16(ServiceOffset),    // mov word [0x40], handler
+            Bytes(0xC7, 0x06), U16(Int10Vector + 2), U16(RomSegment),   // mov word [0x42], 0xC000
             Bytes(0x1F),                                        // pop ds
             Bytes(0xB8, 0x03, 0x00),                            // mov ax, 0x0003
             Bytes(0xCD, 0x10),                                  // int 10h
@@ -80,19 +82,19 @@ public static class VgaBiosStub
         if (ram.Length < RomBase + RomSize) return;
         Rom.CopyTo(ram, (int)RomBase);
         env.Translations.InvalidateAll(); // RAM への直接書き込み
-        ram[0x40] = ServiceOffset; ram[0x41] = 0x00; ram[0x42] = 0x00; ram[0x43] = 0xC0;
-        if (ram[0x449] == 0) SetMode(env, 0x03);
+        Sequence(U16(ServiceOffset), U16(RomSegment))(ram, Int10Vector);
+        if (ram[Bda.VideoMode] == 0) SetMode(env, 0x03);
     }
 
     public static bool IsInstalled(EmuEnvironment env) =>
         env.Ram.Length >= RomBase + RomSize &&
-        BitConverter.ToUInt32(env.Ram, 0x40) == (0xC000u << 16 | ServiceOffset) &&
+        BitConverter.ToUInt32(env.Ram, Int10Vector) == ((uint)RomSegment << 16 | ServiceOffset) &&
         env.Ram[RomBase + ServiceOffset] == 0x0F && env.Ram[RomBase + ServiceOffset + 1] == 0x0B;
 
     // C000:0060 の UD2 ならサービスを実行して EIP を進め true を返す。それ以外は false(通常の #UD 処理へ)。
     public static bool TryService(EmuEnvironment env, CPU cpu)
     {
-        if (cpu.cs != 0xC000 || cpu.ip != ServiceOffset || !IsInstalled(env)) return false;
+        if (cpu.cs != RomSegment || cpu.ip != ServiceOffset || !IsInstalled(env)) return false;
         Service(env, cpu);
         cpu.eip += 2;
         return true;
@@ -109,7 +111,7 @@ public static class VgaBiosStub
     static readonly State<(VgaDevice vga, int unit)> CursorCell =
         from vga in Vga
         from ram in Ram
-        select (vga, ram[0x451] * Columns(ram) + ram[0x450]);
+        select (vga, ram[Bda.CursorRow] * Columns(ram) + ram[Bda.CursorColumn]);
 
     // AH=09/0A: カーソル位置から CX 個の文字(09 は属性も)を書く。
     static State<Unit> WriteCells(bool withAttribute) =>
@@ -147,7 +149,7 @@ public static class VgaBiosStub
                  select Unit.unit,
         [0x02] = from row in _dh.Get() from column in _dl.Get() from _ in Effect((env, _) => SetCursor(env, row, column)) select Unit.unit,
         [0x03] = from ram in Ram from vga in Vga
-                 from _1 in SetCpu((_dl, ram[0x450]), (_dh, ram[0x451]))
+                 from _1 in SetCpu((_dl, ram[Bda.CursorColumn]), (_dh, ram[Bda.CursorRow]))
                  from _2 in _cx.Set((ushort)((vga.Crtc[0x0A] << 8) | vga.Crtc[0x0B]))
                  select Unit.unit,
         [0x06] = ScrollWindow(up: true),
@@ -158,7 +160,7 @@ public static class VgaBiosStub
         [0x09] = WriteCells(withAttribute: true),
         [0x0A] = WriteCells(withAttribute: false),
         [0x0E] = from character in _al.Get() from _ in Effect((env, _) => Teletype(env, character)) select Unit.unit,
-        [0x0F] = from ram in Ram from _ in SetCpu((_al, ram[0x449]), (_ah, ram[0x44A]), (_bh, (byte)0)) select Unit.unit,
+        [0x0F] = from ram in Ram from _ in SetCpu((_al, ram[Bda.VideoMode]), (_ah, ram[Bda.Columns]), (_bh, (byte)0)) select Unit.unit,
         [0x10] = Dispatch(_al, new()
         {
             [0x00] = from index in _bl.Get() from value in _bh.Get()
@@ -184,8 +186,8 @@ public static class VgaBiosStub
 
     internal static void Service(EmuEnvironment env, CPU cpu) => Dispatch(_ah, Services)(env, cpu, null);
 
-    static int Columns(byte[] ram) => ram[0x44A] == 0 ? 80 : ram[0x44A];
-    static int Rows(byte[] ram) => ram[0x484] + 1;
+    static int Columns(byte[] ram) => ram[Bda.Columns] == 0 ? 80 : ram[Bda.Columns];
+    static int Rows(byte[] ram) => ram[Bda.LastRow] + 1;
 
     public static void SetMode(EmuEnvironment env, int requested)
     {
@@ -211,28 +213,28 @@ public static class VgaBiosStub
                 Array.Fill(vga.Vram, (byte)0x07, 0x10000, 0x4000);
             }
         }
-        // BIOS データ領域(At は 0x400 からの位置)に、設定したモードの状態を置く。
+        // BIOS データ領域のビデオ項目に、設定したモードの状態を置く(At は Bda の番地)。
         Sequence(
-            At(0x49, U8((byte)mode)),                                               // 現在のビデオモード
-            At(0x4A, U16((ushort)(mode == 0x13 ? 40 : 80))),                        // 桁数
-            At(0x4C, U16((ushort)(vga.GraphicsMode ? 0 : 0x1000))),                 // 1 ページの大きさ(テキストは 4KB)
-            At(0x4E, U16(0)),                                                       // 表示ページの先頭
-            At(0x50, Bytes(new byte[16])),                                          // カーソル位置(8 ページ分)
-            At(0x60, Bytes(vga.Crtc[0x0B], vga.Crtc[0x0A])),                        // カーソルの形(終了行、開始行)
-            At(0x62, U8(0)),                                                        // 表示ページ
-            At(0x63, U16(0x3D4)),                                                   // CRTC のポート
-            At(0x84, U8((byte)(mode == 0x13 ? 24 : vga.GraphicsMode ? 29 : 24))),   // 行数 - 1
-            At(0x85, U16((ushort)(mode == 0x13 ? 8 : 16))),                         // 文字の高さ
-            At(0x87, U8((byte)(0x60 | (clear ? 0 : 0x80)))),                        // ビデオ制御(bit7 = 画面を消さなかった)
-            At(0x88, Bytes(0x09, 0x11, 0x08)))                                      // スイッチ、モード設定の制御、表示結合コードの表の番号
-            (ram, 0x400);
+            At(Bda.VideoMode, U8((byte)mode)),
+            At(Bda.Columns, U16((ushort)(mode == 0x13 ? 40 : 80))),
+            At(Bda.PageSize, U16((ushort)(vga.GraphicsMode ? 0 : 0x1000))),                         // テキストは 4KB
+            At(Bda.PageStart, U16(0)),
+            At(Bda.CursorColumn, Bytes(new byte[16])),                                              // 8 ページ分の列・行
+            At(Bda.CursorShape, Bytes(vga.Crtc[0x0B], vga.Crtc[0x0A])),
+            At(Bda.ActivePage, U8(0)),
+            At(Bda.CrtcPort, U16(0x3D4)),
+            At(Bda.LastRow, U8((byte)(mode == 0x13 ? 24 : vga.GraphicsMode ? 29 : 24))),
+            At(Bda.CharacterHeight, U16((ushort)(mode == 0x13 ? 8 : 16))),
+            At(Bda.VideoControl, U8((byte)(0x60 | (clear ? 0 : 0x80)))),
+            At(Bda.VideoSwitches, Bytes(0x09, 0x11, 0x08)))
+            (ram, 0);
         vga.Dirty = true;
     }
 
     static void SetCursor(EmuEnvironment env, int row, int column)
     {
         var ram = env.Ram;
-        ram[0x450] = (byte)column; ram[0x451] = (byte)row;
+        ram[Bda.CursorColumn] = (byte)column; ram[Bda.CursorRow] = (byte)row;
         var position = row * Columns(ram) + column;
         env.Vga.Crtc[0x0E] = (byte)(position >> 8);
         env.Vga.Crtc[0x0F] = (byte)position;
@@ -246,7 +248,7 @@ public static class VgaBiosStub
         if (vga.GraphicsMode) return;
         var columns = Columns(ram);
         var rows = Rows(ram);
-        int column = ram[0x450], row = ram[0x451];
+        int column = ram[Bda.CursorColumn], row = ram[Bda.CursorRow];
         switch (character)
         {
             case 0x0D: column = 0; break;

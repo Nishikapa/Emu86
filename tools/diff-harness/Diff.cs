@@ -3,8 +3,8 @@ using Emu86;
 
 // 差分実行ハーネス(README.md)。同じ命令列・同じ初期状態を通常コア(Instructions.Execute2 = 翻訳なしの InstructionExecutor)で
 // 1 命令だけ実行し、CPU(スナップショット形式。FPU スタックと TR/LDTR を含む)・メモリ・I/O ポート・MSR・DR の結果を 1 ケース 1 行で書き出す。
-// 続けて、特権レベルと記述子の内容で分かれる場面(Scenes)を同じ形の行で、末尾には、命令の実行ではない固定の結果
-// (ROM、PCI コンフィグ空間、モード設定後の BIOS データ領域、IDENTIFY)を "table ..." の行で足す。
+// 続けて、特権レベルと記述子の内容で分かれる場面(Scenes)を同じ形の行で、末尾には、命令の実行ではない結果
+// (ROM、PCI コンフィグ空間とその読み書き、モード設定後の BIOS データ領域、INT 10h のサービス、IDENTIFY)を "table ..." の行で足す。
 // Compare.ps1 が基準コミットの本体と作業ツリーの本体に対してこれを 2 回ビルド・実行し、出力を比べる。
 // 使い方: Emu86.Tests.exe [出力ファイル](省略時は標準出力へ)
 static class Diff
@@ -365,19 +365,22 @@ static class Diff
         return $"{mode} p{preset} {(scene == null ? "" : $"[{scene}] ")}{Convert.ToHexString(code)}: {result} cpu={state} mem={memory} io={ports} msr={msrs} dr={dr}";
     }
 
-    // 命令の実行ではない固定の結果を 1 項 1 行で: VGA BIOS の ROM、PCI コンフィグ空間の初期値、
-    // モード設定後の BIOS データ領域(0x400-0x4FF)と VGA の状態、ATA の IDENTIFY の応答。
+    static byte[] Saved(Action<BinaryWriter> save)
+    {
+        using var stream = new MemoryStream();
+        using var writer = new BinaryWriter(stream);
+        save(writer);
+        writer.Flush();
+        return stream.ToArray();
+    }
+
+    static string Hash(ReadOnlySpan<byte> data) => Convert.ToHexString(SHA256.HashData(data))[..16];
+
+    // 命令の実行ではない結果を 1 項 1 行で: VGA BIOS の ROM、PCI コンフィグ空間の初期値、
+    // モード設定後の BIOS データ領域(0x400-0x4FF)と VGA の状態、ATA の IDENTIFY の応答、
+    // INT 10h のサービスを決まった手順で呼んだ結果、PCI コンフィグ空間への読み書きの結果。
     static List<string> Tables()
     {
-        static byte[] Saved(Action<BinaryWriter> save)
-        {
-            using var stream = new MemoryStream();
-            using var writer = new BinaryWriter(stream);
-            save(writer);
-            writer.Flush();
-            return stream.ToArray();
-        }
-
         var lines = new List<string> { $"table rom: {Convert.ToHexString(VgaBiosStub.Rom)}" };
         using (var env = new EmuEnvironment(memory: new byte[0x100000]))
             lines.Add($"table pci: {Convert.ToHexString(Saved(env.Pci.SaveState))}");
@@ -399,6 +402,126 @@ static class Diff
             lines.Add($"table identify: {Convert.ToHexString([.. Enumerable.Range(0, 512).Select(_ => (byte)ata.ReadData(1))])}");
         }
         finally { File.Delete(image); }
+        lines.AddRange(Int10());
+        lines.AddRange(PciAccess());
         return lines;
+    }
+
+    // VGA BIOS スタブの導入と、INT 10h のサービス(VgaBiosStub.Service)。決まった手順で呼び、1 手順ごとに
+    // AX-DX、BIOS データ領域のビデオ項目(0x449-0x48A)、VGA の状態(VRAM・CRTC・Attribute・DAC のハッシュ)を 1 行にする。
+    static IEnumerable<string> Int10()
+    {
+        static Action<EmuEnvironment, CPU> Call(ushort ax, ushort bx = 0, ushort cx = 0, ushort dx = 0) => (env, cpu) =>
+        {
+            cpu.eax = ax; cpu.ebx = bx; cpu.ecx = cx; cpu.edx = dx;
+            VgaBiosStub.Service(env, cpu);
+        };
+        static string Screen(EmuEnvironment env) =>
+            $"bda={Convert.ToHexString(env.Ram, 0x449, 0x42)} vga={Hash([.. env.Vga.Vram, .. env.Vga.Crtc, .. env.Vga.Attribute, .. env.Vga.Dac])}";
+
+        using var env = new EmuEnvironment(memory: new byte[0x100000]);
+        var cpu = new CPU();
+        VgaBiosStub.Install(env);
+        yield return $"table install: installed={VgaBiosStub.IsInstalled(env)} ivt={Convert.ToHexString(env.Ram, 0x40, 4)} rom={Hash(env.Ram.AsSpan(0xC0000, 0x800))} {Screen(env)}";
+
+        (string name, Action<EmuEnvironment, CPU> run)[] steps =
+        [
+            ("set cursor 5,10", Call(0x0200, dx: 0x050A)),
+            ("get cursor", Call(0x0300)),
+            ("write char and attribute x5", Call(0x0941, bx: 0x001E, cx: 5)),
+            ("write char x3", Call(0x0A42, cx: 3)),
+            ("read cell", Call(0x0800)),
+            ("teletype X", Call(0x0E58)),
+            ("teletype CR", Call(0x0E0D)),
+            ("teletype BS at column 0", Call(0x0E08)),
+            ("teletype LF", Call(0x0E0A)),
+            ("teletype BEL", Call(0x0E07)),
+            ("teletype Q", Call(0x0E51)),
+            ("teletype BS", Call(0x0E08)),
+            ("set cursor 3,79", Call(0x0200, dx: 0x034F)),
+            ("teletype wraps to the next row", Call(0x0E59)),
+            ("set cursor 24,79", Call(0x0200, dx: 0x184F)),
+            ("teletype scrolls at the last cell", Call(0x0E5A)),
+            ("teletype LF scrolls on the last row", Call(0x0E0A)),
+            ("write char beyond the page", Call(0x0941, bx: 0x0007, cx: 0xFFFF)),
+            ("scroll up 1, full screen", Call(0x0601, bx: 0x1700, cx: 0x0000, dx: 0x184F)),
+            ("scroll up 3, window", Call(0x0603, bx: 0x2A00, cx: 0x0205, dx: 0x0A28)),
+            ("scroll down 2, window", Call(0x0702, bx: 0x4E00, cx: 0x0205, dx: 0x0A28)),
+            ("scroll up, clear window", Call(0x0600, bx: 0x0700, cx: 0x0205, dx: 0x0A28)),
+            ("scroll down 1, window beyond the screen", Call(0x0701, bx: 0x3000, cx: 0x0000, dx: 0x1E64)),
+            ("scroll up, more lines than the window", Call(0x0620, bx: 0x5000, cx: 0x0500, dx: 0x0A10)),
+            ("scroll up, empty window", Call(0x0601, bx: 0x0700, cx: 0x0A00, dx: 0x0500)),
+            ("cursor shape", Call(0x0100, cx: 0x0607)),
+            ("get cursor after shape", Call(0x0300)),
+            ("get mode", Call(0x0F00, bx: 0xFFFF)),
+            ("palette register", Call(0x1000, bx: 0x3F01)),
+            ("palette register out of range", Call(0x1000, bx: 0x3FFF)),
+            ("dac register", Call(0x1010, bx: 0x0105, cx: 0xC283, dx: 0x4100)),
+            ("palette, unknown function", Call(0x1055, bx: 0x0101)),
+            ("ega information", Call(0x1200, bx: 0xFF10, cx: 0xFFFF)),
+            .. Enumerable.Range(0x30, 8).Select(function => ($"video subsystem {function:x2}", Call(0x1200, bx: (ushort)function))),
+            ("display combination", Call(0x1A00, bx: 0xFFFF)),
+            ("display combination, set", Call(0x1A01, bx: 0x0102)),
+            ("vesa", Call(0x4F00)),
+            ("unknown service", Call(0x5512, bx: 0x3456, cx: 0x789A, dx: 0xBCDE)),
+            ("set mode 13", Call(0x0013)),
+            ("get mode in 13", Call(0x0F00)),
+            ("teletype in graphics", Call(0x0E41)),
+            ("write char in graphics", Call(0x0941, bx: 0x000F, cx: 2)),
+            ("read cell in graphics", Call(0x0800)),
+            ("scroll in graphics", Call(0x0601, bx: 0x0700, dx: 0x184F)),
+            ("set cursor in graphics", Call(0x0200, dx: 0x0203)),
+            ("set mode 12", Call(0x0012)),
+            ("get mode in 12", Call(0x0F00)),
+            ("set mode 3 without clearing", Call(0x0083)),
+            ("get mode in 83", Call(0x0F00)),
+            ("set cursor with the columns field 0", (env, cpu) => { env.Ram[0x44A] = 0; Call(0x0200, dx: 0x0102)(env, cpu); }),
+            ("teletype with the columns field 0", Call(0x0E52)),
+            ("set mode 3", Call(0x0003)),
+            ("teletype after mode 3", Call(0x0E53)),
+        ];
+        var index = 0;
+        foreach (var (name, run) in steps)
+        {
+            run(env, cpu);
+            yield return $"table int10 {index++:d2} {name}: ax={cpu.ax:x4} bx={cpu.bx:x4} cx={cpu.cx:x4} dx={cpu.dx:x4} {Screen(env)}";
+        }
+    }
+
+    // PCI コンフィグ空間への読み書き(ポート 0xCF8/0xCFC の先の PciHost.DataRead/DataWrite)。各ファンクションと、存在しないデバイス・
+    // enable の落ちたアドレス・bus 1 について、主なレジスタに幅(1/2/4 バイト)とバイトずれを変えて
+    // 「読む → 全ビット 1 を書く → 読む → パターンを書く → 読む」を行い、読んだ値の列のハッシュを 1 行にする。最後に全コンフィグ空間を出す。
+    static IEnumerable<string> PciAccess()
+    {
+        using var env = new EmuEnvironment(memory: new byte[0x100000]);
+        var pci = env.Pci;
+        int[] registers = [0x00, 0x04, 0x08, 0x0C, 0x10, 0x14, 0x20, 0x24, 0x30, 0x3C, 0x40, 0x58, 0x80, 0xD0, 0xFC];
+        (int offset, int size)[] accesses = [(0, 4), (0, 2), (2, 2), (0, 1), (1, 1), (2, 1), (3, 1), (3, 2), (1, 4)];
+        (int bus, int device, int function, bool enabled)[] targets =
+            [(0, 0, 0, true), (0, 1, 0, true), (0, 1, 1, true), (0, 1, 3, true), (0, 2, 0, true), (0, 3, 0, true), (0, 1, 1, false), (1, 1, 1, true)];
+        foreach (var (bus, device, function, enabled) in targets)
+        {
+            var reads = new List<uint>();
+            foreach (var register in registers)
+                foreach (var (offset, size) in accesses)
+                {
+                    pci.Address = (enabled ? 0x80000000u : 0) | ((uint)bus << 16) | ((uint)device << 11) | ((uint)function << 8) | (uint)register;
+                    reads.Add(pci.DataRead(offset, size));
+                    pci.DataWrite(offset, size, 0xFFFFFFFF);
+                    reads.Add(pci.DataRead(offset, size));
+                    pci.DataWrite(offset, size, 0x12345678 + (uint)register);
+                    reads.Add(pci.DataRead(offset, size));
+                }
+            var values = string.Join(",", reads.Select(value => value.ToString("x")));
+            yield return $"table pci access {bus:x2}:{device:x2}.{function}{(enabled ? "" : " disabled")}: reads={Hash(System.Text.Encoding.ASCII.GetBytes(values))}"
+                + $" lfb={pci.LfbBase:x8} bm={pci.IdeBmBase:x}";
+        }
+        // VGA の拡張 ROM BAR を有効にして、ROM 窓(64KB)の内と外を見る。
+        pci.Address = 0x80000000 | (2u << 11) | 0x30;
+        var before = pci.RomContains(0xFEBC0010);
+        pci.DataWrite(0, 4, 0xFEBC0001);
+        yield return $"table pci rom: bar={pci.DataRead(0, 4):x8} contains={before},{pci.RomContains(0xFEBC0010)},{pci.RomContains(0xFEBCFFFF)},{pci.RomContains(0xFEBD0000)},{pci.RomContains(0xFEBBFFFF)}"
+            + $" read={pci.RomRead(0xFEBC0002):x2},{pci.RomRead(0xFEBC0100):x2},{pci.RomRead(0xFEBC0900):x2}";
+        yield return $"table pci after access: {Convert.ToHexString(Saved(pci.SaveState))}";
     }
 }

@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using static Emu86.Scripts;
 
 namespace Emu86;
@@ -384,17 +385,18 @@ public sealed class BootAutomation
         }
     }
 
-    // BIOS のキーバッファ(BDA 0x41A = 先頭、0x41C = 末尾)が空。
+    // BIOS のキーバッファが空(読み出し位置と書き込み位置が同じ)。
     static bool BiosKeyBufferEmpty(EmuEnvironment env) =>
-        BitConverter.ToUInt16(env.Ram, 0x41A) == BitConverter.ToUInt16(env.Ram, 0x41C);
+        BitConverter.ToUInt16(env.Ram, Bda.KeyBufferHead) == BitConverter.ToUInt16(env.Ram, Bda.KeyBufferTail);
 
+    // BIOS のキーバッファを空にし(読み出し位置と書き込み位置をバッファの先頭へ)、注入待ちのキーも捨てる。
     static void ClearBiosKeyBuffer(EmuEnvironment env)
     {
         var ram = env.Ram;
-        var start = BitConverter.ToUInt16(ram, 0x480);
+        var start = BitConverter.ToUInt16(ram, Bda.KeyBufferStart);
         if (start == 0) start = 0x1E;
-        ram[0x41A] = (byte)start; ram[0x41B] = (byte)(start >> 8);
-        ram[0x41C] = (byte)start; ram[0x41D] = (byte)(start >> 8);
+        BinaryPrimitives.WriteUInt16LittleEndian(ram.AsSpan(Bda.KeyBufferHead), start);
+        BinaryPrimitives.WriteUInt16LittleEndian(ram.AsSpan(Bda.KeyBufferTail), start);
         while (env.Keyboard.Injected.TryDequeue(out _)) { }
         env.KbdOut.Clear();
     }
