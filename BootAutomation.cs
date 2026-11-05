@@ -1,6 +1,82 @@
+using static Emu86.Scripts;
+
 namespace Emu86;
 
-// 画面(テキスト VRAM)を見ながらキーを注入する自動操作。手順書はイテレータ(コルーチン)で、yield で返した待ち条件
+// 手順書モナド(コルーチン): 実行すると、値を返して終わるか、待ち条件と「その後の続き」を返して中断する。
+// クエリ構文の from が手順を順につなぐので、待ちを含む部分手順(キーを打って間を置く、プロンプトを待つ)を、値を返す関数と
+// 同じように合成できる。手順は実行されるまで何もしない(Delay の起点などは、その手順に来たときに決まる)。
+internal delegate Progress<T> Script<T>();
+
+// Ready が null なら完了(Value が結果)。そうでなければ、Ready が真になるのを待ってから Rest を実行する。
+internal readonly record struct Progress<T>(T Value, Func<bool> Ready, Script<T> Rest)
+{
+    public bool Completed => Ready == null;
+}
+
+internal static class Scripts
+{
+    public static Script<T> Return<T>(T value) => () => new(value, null, null);
+
+    // 何もしない手順。
+    public static readonly Script<Unit> Nothing = Return(Unit.unit);
+
+    public static Script<B> Select<A, B>(this Script<A> script, Func<A, B> selector) => () =>
+    {
+        var progress = script();
+        return progress.Completed
+            ? new(selector(progress.Value), null, null)
+            : new(default, progress.Ready, progress.Rest.Select(selector));
+    };
+
+    // script が中断したら、その続きの後ろに next をつないだものを新しい続きにする。完了したら、その値で next を実行する。
+    public static Script<C> SelectMany<A, B, C>(this Script<A> script, Func<A, Script<B>> next, Func<A, B, C> projector) => () =>
+    {
+        var progress = script();
+        if (!progress.Completed) return new(default, progress.Ready, progress.Rest.SelectMany(next, projector));
+        var value = progress.Value;
+        return next(value).Select(result => projector(value, result))();
+    };
+
+    // first の後に second。first が完了したら second をそのまま実行するので、繰り返し(While/ForEach)が続きを積み重ねない。
+    public static Script<T> Then<T>(this Script<Unit> first, Script<T> second) => () =>
+    {
+        var progress = first();
+        return progress.Completed ? second() : new(default, progress.Ready, progress.Rest.Then(second));
+    };
+
+    // 待たずに動作だけ行う。
+    public static Script<Unit> Do(Action action) => () =>
+    {
+        action();
+        return new(Unit.unit, null, null);
+    };
+
+    // 待たずに値を得る(その手順に来た時点の値)。
+    public static Script<T> Get<T>(Func<T> read) => () => new(read(), null, null);
+
+    // 条件が真になるまで待つ(Step のたびに判定する)。
+    public static Script<Unit> WaitFor(Func<bool> ready) => () => new(Unit.unit, ready, Nothing);
+
+    // 条件が成り立つ間 body を繰り返す。
+    public static Script<Unit> While(Func<bool> condition, Script<Unit> body) => () =>
+        condition() ? body.Then(While(condition, body))() : Nothing();
+
+    // 各要素について順に body を行う。
+    public static Script<Unit> ForEach<T>(IEnumerable<T> items, Func<T, Script<Unit>> body) => () =>
+    {
+        var remaining = items.GetEnumerator();
+        Script<Unit> next = null;
+        next = () =>
+        {
+            if (remaining.MoveNext()) return body(remaining.Current).Then(next)();
+            remaining.Dispose();
+            return Nothing();
+        };
+        return next();
+    };
+}
+
+// 画面(テキスト VRAM)を見ながらキーを注入する自動操作。手順書は Script モナドのクエリで書き、待ち条件
 // (画面に文字列が出る、一定命令数が経つ)が満たされるまで Step は先へ進まない。判定は VRAM のプレーン 0(文字)だけを見る。
 // 実行スレッドのタイマ周期で Step を呼ぶ。手順書は 2 種類:
 //   NtldrDebug (--boot-debug): NTLDR の起動メニューを操作し、boot.ini を変えずに「デバッグ モード」(/debug、XP の既定は COM2 19200bps)で起動する。
@@ -15,25 +91,22 @@ namespace Emu86;
 //     ヘッドレスでゲストのシェルや GRUB のメニューを操作する用。キーの間隔はゲストの時計(GuestClock)で 0.2 秒。
 public sealed class BootAutomation
 {
-    // 手順書の 1 ステップが待つ条件。真を返したら次のステップへ進む。
-    delegate bool Wait();
-
     long KeyInterval => env.Clock.InstructionsPerSecond / 5; // 命令数(ゲスト時間で 0.2 秒)
     const int MaxDownPresses = 40;
 
-    readonly IEnumerator<Wait> script;
-    Wait pending;
+    Script<Unit> rest;  // 残りの手順
+    Func<bool> pending; // いま待っている条件(null ならまだ始めていない)
     EmuEnvironment env;
     long count;
     TextWriter output;
 
-    BootAutomation(Func<BootAutomation, IEnumerable<Wait>> script, bool stopWhenCompleted)
+    BootAutomation(Func<BootAutomation, Script<Unit>> script, bool stopWhenCompleted)
     {
-        this.script = script(this).GetEnumerator();
+        rest = script(this);
         StopWhenCompleted = stopWhenCompleted;
     }
 
-    public static BootAutomation NtldrDebug() => new(self => self.NtldrScript(), stopWhenCompleted: false);
+    public static BootAutomation NtldrDebug() => new(self => self.NtldrScript, stopWhenCompleted: false);
 
     public static BootAutomation Typing(IReadOnlyList<string> steps) => new(self => self.TypingScript(steps), stopWhenCompleted: true);
 
@@ -51,103 +124,125 @@ public sealed class BootAutomation
         this.output = output;
         while (pending == null || pending())
         {
-            if (!script.MoveNext())
+            var progress = rest();
+            if (progress.Completed)
             {
                 Completed = true;
                 return;
             }
-            pending = script.Current;
+            (pending, rest) = (progress.Ready, progress.Rest);
         }
     }
 
-    IEnumerable<Wait> NtldrScript()
-    {
-        yield return () => VgaBiosStub.IsInstalled(env);
-        Status = "PressF8";
-        Log("boot started, pressing F8");
-        while (!ScreenContains(env, "Advanced Options Menu"))
-        {
-            env.Keyboard.Inject(0x42, 0xC2); // F8 make/break
-            yield return Delay(KeyInterval);
-        }
-        ClearBiosKeyBuffer(env);
-        Status = "SelectDebugging";
-        Log("advanced options menu shown, selecting Debugging Mode");
-        DumpScreen(env, output);
-        yield return Delay(KeyInterval);
+    /// 手順書 ///////////////////////////////
+    Script<Unit> NtldrScript =>
+        from _1 in WaitFor(() => VgaBiosStub.IsInstalled(env))
+        from _2 in Stage("PressF8", "boot started, pressing F8")
+        from _3 in While(() => !ScreenContains(env, "Advanced Options Menu"), Press(0x42, 0xC2)) // F8 make/break
+        from _4 in Do(() => ClearBiosKeyBuffer(env))
+        from _5 in Stage("SelectDebugging", "advanced options menu shown, selecting Debugging Mode")
+        from _6 in ShowScreen
+        from _7 in Delay(KeyInterval)
+        from selected in SelectDebuggingMode(presses: 0)
+        from _8 in selected ? ConfirmOperatingSystem : Nothing
+        select Unit.unit;
 
-        // メニューが描き終わる(最後の項目が出る)のを待ち、ハイライト行を見ながら ↓ を送る。
-        for (var attempts = 0; ; attempts++)
-        {
-            yield return Until(() => ScreenContains(env, "Return to OS Choices Menu"), poll: KeyInterval / 4);
-            var highlighted = HighlightedLine(env);
-            if (highlighted.Contains("Debugging Mode", StringComparison.OrdinalIgnoreCase))
-            {
-                DumpScreen(env, output);
-                env.Keyboard.Inject(0x1C, 0x9C); // Enter
-                Log("Debugging Mode selected");
-                break;
-            }
-            if (attempts >= MaxDownPresses)
-            {
-                output.WriteLine($"[bootdebug] giving up: highlighted line is '{highlighted}'");
-                DumpScreen(env, output);
-                yield break;
-            }
-            env.Keyboard.Inject(0xE0, 0x50, 0xE0, 0xD0); // ↓
-            yield return Delay(KeyInterval);
-        }
+    // メニューが描き終わる(最後の項目が出る)のを待ち、ハイライト行を見ながら ↓ を送る。「Debugging Mode」がハイライトされたら
+    // Enter を押して true。↓ を MaxDownPresses 回送っても来なければ諦めて false(手順はそこで終わる)。
+    Script<bool> SelectDebuggingMode(int presses) =>
+        from _ in Until(() => ScreenContains(env, "Return to OS Choices Menu"), poll: KeyInterval / 4)
+        let highlighted = HighlightedLine(env)
+        from selected in
+            highlighted.Contains("Debugging Mode", StringComparison.OrdinalIgnoreCase) ? Confirm("Debugging Mode selected").Then(Return(true))
+            : presses >= MaxDownPresses ? GiveUp(highlighted).Then(Return(false))
+            : Press(0xE0, 0x50, 0xE0, 0xD0).Then(SelectDebuggingMode(presses + 1)) // ↓
+        select selected;
 
-        // OS 選択メニューが出たら Enter。出ないまま起動が進んだ(タイムアウト 0 の単一エントリは自動で選択される)、
-        // またはデバッガ有効の表示が出た場合はそのまま終える。
-        Status = "WaitOsMenu";
-        var deadline = count + 41 * KeyInterval;
-        yield return Delay(KeyInterval);
-        yield return () => ScreenContains(env, "select the operating system") || DebuggerEnabled(env) || count > deadline;
-        if (ScreenContains(env, "select the operating system"))
-        {
-            DumpScreen(env, output);
-            env.Keyboard.Inject(0x1C, 0x9C);
-            Log("operating system menu confirmed");
-        }
-        else if (!DebuggerEnabled(env))
-            Log("no operating system menu, assuming automatic selection");
-    }
+    // OS 選択メニューが出たら Enter。出ないまま起動が進んだ(タイムアウト 0 の単一エントリは自動で選択される)、
+    // またはデバッガ有効の表示が出た場合はそのまま終える。
+    Script<Unit> ConfirmOperatingSystem =>
+        from _1 in Do(() => Status = "WaitOsMenu")
+        from deadline in Get(() => count + 41 * KeyInterval)
+        from _2 in Delay(KeyInterval)
+        from _3 in WaitFor(() => OperatingSystemMenuShown || DebuggerEnabled(env) || count > deadline)
+        from _4 in OperatingSystemMenuShown ? Confirm("operating system menu confirmed")
+            : DebuggerEnabled(env) ? Nothing
+            : Do(() => Log("no operating system menu, assuming automatic selection"))
+        select Unit.unit;
+
+    bool OperatingSystemMenuShown => ScreenContains(env, "select the operating system");
 
     // --type の手順: 各手順は「プロンプト=>キー列」(プロンプト省略可)。プロンプトは画面の最後の空でない行の末尾と比べる
     // (シェルがコマンドを終えてプロンプトを出し直したことの判定)。打った直後はまだエコーが出ていないので、少し待ってから見る。
     // プロンプトの代わりに <graphics>/<text>(表示モードが切り替わるまで)、<2s>(ゲスト時間で 2 秒)も書ける。
-    IEnumerable<Wait> TypingScript(IReadOnlyList<string> steps)
+    // 最後の手順のプロンプトが戻ったら(プロンプトが無ければ少し待ってから)画面を出力して終える。
+    Script<Unit> TypingScript(IReadOnlyList<string> steps) =>
+        from _1 in Do(() => Status = "Type")
+        let plan = ParseSteps(steps)
+        from _2 in ForEach(plan, step =>
+            from _a in WaitPrompt(step.prompt)
+            from _b in ShowScreen
+            from _c in Do(() => Log($"typing \"{step.keys.Replace("\n", "\\n")}\""))
+            from _d in ForEach(Scancodes(step.keys), TypeKey)
+            from _e in Delay(KeyInterval * 5)
+            select Unit.unit)
+        let lastPrompt = plan.Count > 0 ? plan[^1].prompt : ""
+        from _3 in lastPrompt.Length > 0 ? WaitPrompt(lastPrompt) : Delay(KeyInterval * 10)
+        from _4 in ShowScreen
+        from _5 in Do(() => Log("typing completed"))
+        select Unit.unit;
+
+    // 手順を (プロンプト, キー列) に分ける。「=>」の無い手順は直前の手順のプロンプトを引き継ぐ(最初は空)。
+    static List<(string prompt, string keys)> ParseSteps(IReadOnlyList<string> steps)
     {
-        Status = "Type";
+        var plan = new List<(string prompt, string keys)>();
         var prompt = "";
         foreach (var step in steps)
         {
             var separator = step.IndexOf("=>", StringComparison.Ordinal);
             if (separator >= 0) prompt = step[..separator].Trim();
-            var keys = Unescape(separator >= 0 ? step[(separator + 2)..] : step);
-            if (prompt.Length > 0) yield return PromptWait(prompt);
-            DumpScreen(env, output);
-            Log($"typing \"{keys.Replace("\n", "\\n")}\"");
-            foreach (var key in Scancodes(keys))
-            {
-                // BIOS 経由でキーを読むゲスト(GRUB など)は 1 キーの処理が遅く、BIOS のバッファ(16 キー)が溢れて取りこぼすので、
-                // バッファが空くまで待ってから打つ。保護モードの OS は BDA を使わないので、上限(KeyInterval)で先へ進む。
-                var deadline = count + KeyInterval;
-                yield return Until(() => BiosKeyBufferEmpty(env) || count >= deadline, poll: KeyInterval / 16);
-                env.Keyboard.Inject(key);
-                yield return Delay(KeyInterval / 4);
-            }
-            yield return Delay(KeyInterval * 5);
+            plan.Add((prompt, Unescape(separator >= 0 ? step[(separator + 2)..] : step)));
         }
-        if (prompt.Length > 0) yield return PromptWait(prompt);
-        else yield return Delay(KeyInterval * 10);
-        DumpScreen(env, output);
-        Log("typing completed");
+        return plan;
     }
 
-    Wait PromptWait(string prompt)
+    // 1 キーを打つ。BIOS 経由でキーを読むゲスト(GRUB など)は 1 キーの処理が遅く、BIOS のバッファ(16 キー)が溢れて取りこぼすので、
+    // バッファが空くまで待ってから打つ。保護モードの OS は BDA を使わないので、上限(KeyInterval)で先へ進む。打った後は少し間を置く。
+    Script<Unit> TypeKey(byte[] key) =>
+        from deadline in Get(() => count + KeyInterval)
+        from _1 in Until(() => BiosKeyBufferEmpty(env) || count >= deadline, poll: KeyInterval / 16)
+        from _2 in Do(() => env.Keyboard.Inject(key))
+        from _3 in Delay(KeyInterval / 4)
+        select Unit.unit;
+
+    /// 部分手順 ///////////////////////////////
+    // 状態名を変えて経過を記録する。
+    Script<Unit> Stage(string status, string message) => Do(() => { Status = status; Log(message); });
+
+    Script<Unit> ShowScreen => Do(() => DumpScreen(env, output));
+
+    // キーを打って(メイク/ブレークのスキャンコード列)、次のキーまでの間を置く。
+    Script<Unit> Press(params byte[] scancodes) => Do(() => env.Keyboard.Inject(scancodes)).Then(Delay(KeyInterval));
+
+    // 画面を出力してから Enter を押す(メニューの確定)。
+    Script<Unit> Confirm(string message) => Do(() =>
     {
+        DumpScreen(env, output);
+        env.Keyboard.Inject(0x1C, 0x9C);
+        Log(message);
+    });
+
+    Script<Unit> GiveUp(string highlighted) => Do(() =>
+    {
+        output.WriteLine($"[bootdebug] giving up: highlighted line is '{highlighted}'");
+        DumpScreen(env, output);
+    });
+
+    // プロンプトを待つ(空なら待たない)。<graphics>/<text> は表示モードの切り替わり、<2s> はゲスト時間、
+    // それ以外は画面の最後の行がその文字列で終わるまで。
+    Script<Unit> WaitPrompt(string prompt)
+    {
+        if (prompt.Length == 0) return Nothing;
         if (prompt.Equals("<graphics>", StringComparison.OrdinalIgnoreCase)) return Until(() => env.Vga.GraphicsMode, poll: KeyInterval / 4);
         if (prompt.Equals("<text>", StringComparison.OrdinalIgnoreCase)) return Until(() => !env.Vga.GraphicsMode, poll: KeyInterval / 4);
         if (prompt.Length > 3 && prompt[0] == '<' && prompt.EndsWith("s>", StringComparison.OrdinalIgnoreCase)
@@ -228,25 +323,25 @@ public sealed class BootAutomation
         return true;
     }
 
-    // 現在の命令数から interval 命令数だけ待つ。
-    Wait Delay(long interval)
+    // その手順に来たときの命令数から interval 命令数だけ待つ。
+    Script<Unit> Delay(long interval) => () =>
     {
         var due = count + interval;
-        return () => count >= due;
-    }
+        return WaitFor(() => count >= due)();
+    };
 
     // 条件が成り立つまで待つ。不成立を見たあとは poll 命令数おいてから再判定する(0 なら毎周期)。
-    Wait Until(Func<bool> condition, long poll)
+    Script<Unit> Until(Func<bool> condition, long poll) => () =>
     {
         long due = 0;
-        return () =>
+        return WaitFor(() =>
         {
             if (count < due) return false;
             if (condition()) return true;
             due = count + poll;
             return false;
-        };
-    }
+        })();
+    };
 
     void Log(string message) => output.WriteLine($"[{(StopWhenCompleted ? "type" : "bootdebug")}] {message} (instr {count})");
 

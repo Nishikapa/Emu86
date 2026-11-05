@@ -193,6 +193,69 @@ static class StateTests
         Equal(false, cpu.cf, "modify toggles a flag");
     }
 
+    // 手順書モナド(Script): 実行するまで何もしない、待ちで中断して続きから再開する、クエリ構文での合成、
+    // Then/While/ForEach が続きを積み重ねない(長い繰り返しでも再開のたびの呼び出しの深さが変わらない)。
+    static void ScriptMonad()
+    {
+        // 待ち条件が満たされている前提で最後まで進め、値と中断した回数を返す(BootAutomation.Step と同じ進め方)。
+        static (T value, int waits) Drive<T>(Script<T> script)
+        {
+            for (var waits = 0; ; waits++)
+            {
+                var progress = script();
+                if (progress.Completed) return (progress.Value, waits);
+                if (!progress.Ready()) throw new Exception("the wait is not satisfied");
+                script = progress.Rest;
+            }
+        }
+
+        Equal((5, 0), Drive(Scripts.Return(5)), "return completes without waiting");
+
+        var log = new List<string>();
+        var gate = false;
+        Script<int> script =
+            from start in Scripts.Get(() => log.Count)
+            from _1 in Scripts.Do(() => log.Add("before"))
+            from _2 in Scripts.WaitFor(() => gate)
+            from _3 in Scripts.Do(() => log.Add("after"))
+            select start + 10;
+        Equal(0, log.Count, "a script does nothing until it runs");
+        var suspended = script();
+        Equal((false, "before"), (suspended.Completed, string.Join(",", log)), "runs up to the first wait");
+        Equal(false, suspended.Ready(), "the wait is not satisfied yet");
+        gate = true;
+        Equal(true, suspended.Ready(), "the wait sees the condition change");
+        var finished = suspended.Rest();
+        Equal((true, 10, "before,after"), (finished.Completed, finished.Value, string.Join(",", log)), "resumes after the wait and returns the value");
+        Equal((12, 1), Drive(script), "a script can run again from the start");
+
+        Equal((7, 1), Drive(Scripts.WaitFor(() => true).Then(Scripts.Return(7))), "then continues with the second script");
+
+        var count = 0;
+        var loop = Scripts.While(() => count < 3, Scripts.Do(() => count++).Then(Scripts.WaitFor(() => true)));
+        Equal(0, count, "while is deferred");
+        Equal((3, 3), (Drive(loop).waits, count), "while repeats until the condition fails");
+        Equal(0, Drive(loop).waits, "while with a false condition runs zero times");
+
+        var visited = new List<int>();
+        var each = Scripts.ForEach(new[] { 1, 2, 3 }, item =>
+            from _1 in Scripts.WaitFor(() => true)
+            from _2 in Scripts.Do(() => visited.Add(item))
+            select Unit.unit);
+        Equal((3, "1,2,3"), (Drive(each).waits, string.Join(",", visited)), "foreach runs the body for each item in order");
+
+        // 20 万回中断しても完了する(繰り返しが続きを積み重ねると、再開のたびに呼び出しが深くなってスタックがあふれる)。
+        var total = 0L;
+        var many = Scripts.ForEach(Enumerable.Range(1, 200_000), item =>
+            from _1 in Scripts.WaitFor(() => true)
+            from _2 in Scripts.Do(() => total += item)
+            select Unit.unit);
+        Equal((200_000, 20_000_100_000L), (Drive(many).waits, total), "a long foreach resumes at constant depth");
+        var remaining = 200_000;
+        var countdown = Scripts.While(() => remaining > 0, Scripts.Do(() => remaining--).Then(Scripts.WaitFor(() => true)));
+        Equal(200_000, Drive(countdown).waits, "a long while resumes at constant depth");
+    }
+
     // 名前付きのケース(ランナーが順に実行し、失敗したケース名を報告する)。
     public static (string Name, Action Run)[] Cases =>
     [
@@ -200,5 +263,6 @@ static class StateTests
         ("combinators", Combinators),
         ("operand-widths", OperandWidths),
         ("control-registers", ControlRegisters),
+        ("script", ScriptMonad),
     ];
 }
