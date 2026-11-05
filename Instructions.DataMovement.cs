@@ -46,20 +46,15 @@ static partial class Instructions
         from address in MoffsAddress(offset)
         select Rm(address, type);
 
-    // MOV AL/AX/EAX, [moffs] (0xA0/0xA1): 直接アドレス(DS:offset)から読み込む。
-    static State<Unit> Mov_A0_A1 =>
-        from _1 in SetLog("Mov_A0_A1")
+    // MOV AL/AX/EAX, [moffs] (A0/A1) と MOV [moffs], AL/AX/EAX (A2/A3): アキュムレータと直接アドレス(DS:offset)の間の Move。
+    // bit1 が向き(1 = メモリへ)。
+    static State<Unit> Mov_A0_A3 =>
+        from _1 in SetLog("Mov_A0_A3")
+        from opecode in Opecodes
         from type in OperandTypeW
         from moffs in Moffs(type)
-        from _2 in Move(Reg(0, type), moffs)
-        select unit;
-
-    // MOV [moffs], AL/AX/EAX (0xA2/0xA3): アキュムレータを直接アドレス(DS:offset)へ書き込む。
-    static State<Unit> Mov_A2_A3 =>
-        from _1 in SetLog("Mov_A2_A3")
-        from type in OperandTypeW
-        from moffs in Moffs(type)
-        from _2 in Move(moffs, Reg(0, type))
+        let accumulator = Reg(0, type)
+        from _2 in (opecode[0] & 0x02) != 0 ? Move(moffs, accumulator) : Move(accumulator, moffs)
         select unit;
 
     static State<Unit> Mov_8E =>

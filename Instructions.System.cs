@@ -1,6 +1,7 @@
 using static Emu86.CPU;
 using static Emu86.Conversions;
 using static Emu86.Unit;
+using static Emu86.Operands;
 using static Emu86.States;
 using static Emu86.DataAccess;
 using static Emu86.Segments;
@@ -10,40 +11,27 @@ using static Emu86.Fetch;
 namespace Emu86;
 
 // システム命令: 制御/デバッグレジスタの MOV、CPUID、RDTSC、RDMSR/WRMSR、記述子テーブル(SGDT/LGDT/LIDT/SIDT/LLDT/LTR)、VERR/VERW/LAR/LSL、INVLPG、HLT、NOP、FWAIT、キャッシュ命令。
+// 保存と読み込みが対になる命令(MOV CR/DR の両方向、RDMSR/WRMSR、SGDT/LGDT、SLDT/LLDT)は、レジスタを Lens にして Move の向きだけを変える。
 static partial class Instructions
 {
-    static State<Unit> Mov_0F20 =>
-        from _1 in SetLog("Mov_0F20")
-        from m in ModRegRm()
-        where 3 == m.mod
-        from data in GetCrReg(m.reg)
-        from _3 in SetRegData32(m.rm, data)
-        select unit;
+    // 制御レジスタ CRn(書くとページング状態も同期する)、デバッグレジスタ DRn(ハードウェアブレークポイントは未実装で、
+    // 値を保持するだけ)、32 ビット汎用レジスタの Lens。
+    static Lens<uint> ControlRegister(int reg) => new(GetCrReg(reg), value => SetCrReg(reg, value));
 
-    // MOV r32, DRx (0F 21) / MOV DRx, r32 (0F 23): デバッグレジスタ。
-    // ハードウェアブレークポイントは未実装のため、値を保持するだけの汎用ストア。
-    static State<Unit> Mov_0F21 =>
-        from _1 in SetLog("Mov_0F21")
-        from m in ModRegRm()
-        where 3 == m.mod
-        from data in GetDataFromEnvCpu((env, _) => env.Dr[m.reg])
-        from _3 in SetRegData32(m.rm, data)
-        select unit;
+    static Lens<uint> DebugRegister(int reg) => new(GetDataFromEnvCpu((env, _) => env.Dr[reg]), value => Effect((env, _) => env.Dr[reg] = value));
 
-    static State<Unit> Mov_0F23 =>
-        from _1 in SetLog("Mov_0F23")
-        from m in ModRegRm()
-        where 3 == m.mod
-        from data in GetRegData32(m.rm)
-        from _3 in Effect((env, _) => env.Dr[m.reg] = data)
-        select unit;
+    static Lens<uint> GeneralRegister32(int reg) => new(GetRegData32(reg), value => SetRegData32(reg, value));
 
-    static State<Unit> Mov_0F22 =>
-        from _1 in SetLog("Mov_0F22")
+    // MOV r32, CRn/DRn (0F 20/21) と MOV CRn/DRn, r32 (0F 22/23): 汎用レジスタと制御/デバッグレジスタの間の Move(レジスタ形式のみ)。
+    // 2 バイト目の bit0 が DR、bit1 が向き(1 = 制御/デバッグレジスタへ)。
+    static State<Unit> MovSpecial_0F20_23 =>
+        from _1 in SetLog("MovSpecial_0F20_23")
+        from opecode in Opecodes
         from m in ModRegRm()
         where 3 == m.mod
-        from data in GetRegData32(m.rm)
-        from _3 in SetCrReg(m.reg, data)
+        let special = (opecode[1] & 0x01) != 0 ? DebugRegister(m.reg) : ControlRegister(m.reg)
+        let general = GeneralRegister32(m.rm)
+        from _2 in (opecode[1] & 0x02) != 0 ? Move(special, general) : Move(general, special)
         select unit;
 
     // CPUID (0F A2): 入力 EAX=リーフ。最小限の機能のみ報告し、APIC 等の高度な
@@ -67,25 +55,27 @@ static partial class Instructions
         _ => (0, 0, 0, 0),
     };
 
+    // ECX が選ぶ MSR の Lens(実際の機能は持たない汎用ストア。未書き込みの MSR は 0)。
+    static Lens<ulong> SelectedMsr =>
+        new(GetDataFromEnvCpu((env, cpu) => env.Msrs.GetValueOrDefault(cpu.ecx)), value => Effect((env, cpu) => env.Msrs[cpu.ecx] = value));
+
     // RDTSC (0F 31): EDX:EAX <- タイムスタンプカウンタ。実行済み命令数を代用する
     // (Runner が毎命令 env.Tsc を更新する)。
     static State<Unit> Rdtsc_0F31 =>
         from _1 in SetLog("Rdtsc_0F31")
         from tsc in GetDataFromEnvCpu((env, _) => env.Tsc)
-        from _2 in SetWide(2, tsc)
+        from _2 in EdxEax.Write(tsc)
         select unit;
 
-    // RDMSR (0F 32) / WRMSR (0F 30): ECX で選択した MSR を EDX:EAX で読み書きする。
-    // 実際の機能は持たない汎用ストア(未書き込みの MSR は 0 を返す)。
+    // RDMSR (0F 32) / WRMSR (0F 30): EDX:EAX と MSR の間の Move。
     static State<Unit> Rdmsr_0F32 =>
         from _1 in SetLog("Rdmsr_0F32")
-        from value in GetDataFromEnvCpu((env, cpu) => env.Msrs.GetValueOrDefault(cpu.ecx))
-        from _2 in SetWide(2, value)
+        from _2 in Move(EdxEax, SelectedMsr)
         select unit;
 
     static State<Unit> Wrmsr_0F30 =>
         from _1 in SetLog("Wrmsr_0F30")
-        from _2 in Effect((env, cpu) => env.Msrs[cpu.ecx] = ((ulong)cpu.edx << 32) | cpu.eax)
+        from _2 in Move(SelectedMsr, EdxEax)
         select unit;
 
     // WAIT/FWAIT (0x9B): FPU 例外を同期する。例外は配送しないため NOP。
@@ -117,24 +107,26 @@ static partial class Instructions
         from _2 in Effect(cpu => cpu.Halted = true)
         select unit;
 
-    // SGDT/SIDT (0F 01 /0, /1): limit(16bit) + base(32bit) をメモリへ書き出す。
-    static State<Unit> Sgdt(int mod, int rm, bool idt) =>
-        from addr in GetMemOrRegAddr(mod, rm)
-        from cpu in GetCpu
-        from _1 in SetMemOrRegData(addr, (idt ? cpu.idt_limit : cpu.gdt_limit).ToTypeData())
-        from _2 in SetMemOrRegData((addr.isMem, addr.addr + 2), (idt ? cpu.idt_base : cpu.gdt_base).ToTypeData())
-        select unit;
+    // 番号で引けない CPU のレジスタ(GDTR/IDTR の limit と base、TR/LDTR のセレクタ)をオペランドに。
+    static Operand Word(Func<CPU, ushort> get, Action<CPU, ushort> set) =>
+        new(GetDataFromCpu(cpu => get(cpu).ToTypeData()), data => Effect(cpu => set(cpu, data.dw)));
 
-    // LGDT/LIDT (0F 01 /2, /3): メモリから limit(16bit) + base(32bit) を読み込む。
-    static State<Unit> Lgdt(int mod, int rm, bool idt) =>
+    static Operand Dword(Func<CPU, uint> get, Action<CPU, uint> set) =>
+        new(GetDataFromCpu(cpu => get(cpu).ToTypeData()), data => Effect(cpu => set(cpu, data.dd)));
+
+    // 記述子テーブルレジスタ(GDTR か IDTR)の limit(16 ビット)と base(32 ビット)。
+    static (Operand limit, Operand @base) TableRegister(bool idt) => idt
+        ? (Word(cpu => cpu.idt_limit, (cpu, value) => cpu.idt_limit = value), Dword(cpu => cpu.idt_base, (cpu, value) => cpu.idt_base = value))
+        : (Word(cpu => cpu.gdt_limit, (cpu, value) => cpu.gdt_limit = value), Dword(cpu => cpu.gdt_base, (cpu, value) => cpu.gdt_base = value));
+
+    // SGDT/SIDT (0F 01 /0, /1) と LGDT/LIDT (0F 01 /2, /3): 記述子テーブルレジスタとメモリ(limit の 2 バイト後ろに base)の間の Move。
+    // load なら レジスタ <- メモリ、そうでなければ メモリ <- レジスタ。
+    static State<Unit> DescriptorTable(int mod, int rm, bool idt, bool load) =>
         from addr in GetMemOrRegAddr(mod, rm)
-        from dw in GetMemOrRegData16(addr)
-        from dd in GetMemOrRegData32((addr.isMem, addr.addr + 2))
-        from _ in Effect(cpu =>
-        {
-            if (idt) { cpu.idt_base = dd; cpu.idt_limit = dw; }
-            else { cpu.gdt_base = dd; cpu.gdt_limit = dw; }
-        })
+        let memory = (limit: Rm(addr, 1), @base: Rm((addr.isMem, addr.addr + 2), 2))
+        let register = TableRegister(idt)
+        from _1 in load ? Move(register.limit, memory.limit) : Move(memory.limit, register.limit)
+        from _2 in load ? Move(register.@base, memory.@base) : Move(memory.@base, register.@base)
         select unit;
 
     // Group6 (0F 00): SLDT/STR/LLDT/LTR/VERR/VERW。LDT・タスクスイッチは未使用のため、
@@ -144,10 +136,10 @@ static partial class Instructions
         from m in ModRegRm()
         from _ in Group(
             m.reg,
-            (0, SldtStr(m)),            // SLDT
-            (1, SldtStr(m)),            // STR
-            (2, LldtLtr(m)),            // LLDT
-            (3, LldtLtr(m)),            // LTR
+            (0, StoreSelector(m)),        // SLDT
+            (1, StoreSelector(m)),        // STR
+            (2, LoadSelector(m)),         // LLDT
+            (3, LoadSelector(m)),         // LTR
             (4, Verify(m, write: false)), // VERR
             (5, Verify(m, write: true))   // VERW
         )
@@ -177,19 +169,22 @@ static partial class Instructions
         from _3 in When(value != null, SetRegData(m.reg, (value ?? 0).ToTypeData(type)))
         select unit;
 
-    // SLDT/STR: 保持しているセレクタを返す(レジスタ形式は32bit幅のときゼロ拡張)。
-    static State<Unit> SldtStr((int mod, int reg, int rm) m) =>
+    // Group6 の reg が選ぶセレクタのレジスタ: bit0 が立っていれば TR(STR/LTR)、そうでなければ LDTR(SLDT/LLDT)。
+    static Operand SystemSelector(int reg) => (reg & 1) != 0
+        ? Word(cpu => cpu.tr, (cpu, value) => cpu.tr = value)
+        : Word(cpu => cpu.ldtr, (cpu, value) => cpu.ldtr = value);
+
+    // SLDT/STR: 保持しているセレクタを r/m16 へ(レジスタ形式は 32 ビットへゼロ拡張して書く)。
+    static State<Unit> StoreSelector((int mod, int reg, int rm) m) =>
         from addr in GetMemOrRegAddr(m.mod, m.rm)
-        from cpu in GetCpu
-        let sel = m.reg == 1 ? cpu.tr : cpu.ldtr
-        from _ in addr.isMem ? SetMemOrRegData(addr, sel.ToTypeData()) : SetRegData(m.rm, ((uint)sel).ToTypeData())
+        from selector in SystemSelector(m.reg).Read
+        from _ in addr.isMem ? SetMemOrRegData(addr, selector) : SetRegData(m.rm, ((uint)selector.dw).ToTypeData())
         select unit;
 
-    // LLDT/LTR: セレクタを保持するだけ(記述子の検証・ビジー化は行わない)。
-    static State<Unit> LldtLtr((int mod, int reg, int rm) m) =>
+    // LLDT/LTR: r/m16 のセレクタを保持するだけ(記述子の検証・ビジー化は行わない)。
+    static State<Unit> LoadSelector((int mod, int reg, int rm) m) =>
         from addr in GetMemOrRegAddr(m.mod, m.rm)
-        from sel in GetMemOrRegData16(addr)
-        from _ in Effect(cpu => { if (m.reg == 3) cpu.tr = sel; else cpu.ldtr = sel; })
+        from _ in Move(SystemSelector(m.reg), Rm(addr, 1))
         select unit;
 
     static State<Unit> Group7_0F01 =>
@@ -197,10 +192,10 @@ static partial class Instructions
         from m in ModRegRm()
         from _ in Group(
             m.reg,
-            (0, Sgdt(m.mod, m.rm, idt: false)),
-            (1, Sgdt(m.mod, m.rm, idt: true)),
-            (2, Lgdt(m.mod, m.rm, idt: false)),
-            (3, Lgdt(m.mod, m.rm, idt: true)),
+            (0, DescriptorTable(m.mod, m.rm, idt: false, load: false)), // SGDT
+            (1, DescriptorTable(m.mod, m.rm, idt: true, load: false)),  // SIDT
+            (2, DescriptorTable(m.mod, m.rm, idt: false, load: true)),  // LGDT
+            (3, DescriptorTable(m.mod, m.rm, idt: true, load: true)),   // LIDT
             (7, Invlpg(m.mod, m.rm))
         )
         select unit;

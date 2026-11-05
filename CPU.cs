@@ -185,11 +185,8 @@ static public class AluStates
     static public State<Unit> update_eflags_sub(int type, uint left, uint right) =>
         Effect(cpu => SetSubtractionFlags(cpu, type, left, right));
 
-    static public State<Unit> update_eflags_inc(Data data) => update_eflags_incdec(data, +1);
-
-    static public State<Unit> update_eflags_dec(Data data) => update_eflags_incdec(data, -1);
-
-    static State<Unit> update_eflags_incdec(Data data, int delta) =>
+    // INC/DEC(delta = +1/-1)のフラグ。CF は変えない。
+    static public State<Unit> update_eflags_incdec(Data data, int delta) =>
         Effect(cpu => SetIncDecFlags(cpu, data.type, data.Value, delta));
 }
 

@@ -9,7 +9,8 @@ namespace Emu86;
 
 // オペランド(Lens): 読み出す State と書き戻す関数の組。整数命令は Data(Operand)、FPU は double(Real)で同じ形を使う
 // (GlobalUsings の別名)。汎用レジスタ、ModRM で決まる r/m(メモリまたはレジスタ)、読み出した即値、スタックトップ、
-// FPU の ST(i) とメモリ形式を同じ形で扱う。d ビットで向きが決まる命令(ALU の 00-3B、MOV の 88-8B)は、
+// I/O ポート、セグメントレジスタ、EFLAGS、FPU の ST(i) とメモリ形式を同じ形で扱う。d ビットで向きが決まる命令
+// (ALU の 00-3B、MOV の 88-8B)や、保存と読み込みが対になる命令(PUSH/POP、IN/OUT、SGDT/LGDT、FNSAVE/FRSTOR)は、
 // オペランドを入れ替えるだけで書ける。
 public readonly record struct Lens<T>(State<T> Read, Func<T, State<Unit>> Write);
 
@@ -43,6 +44,16 @@ static public partial class Operands
 
     // DX が指すポート(IN/OUT の DX 形式と INS/OUTS)。
     static public State<int> Dx => _dx.Get().Select(dx => (int)dx);
+
+    // セグメントレジスタ: 読むとセレクタを type の幅へゼロ拡張し、書くと下位 16 ビットをロードする(プロテクトモードでは記述子も読み直す)。
+    // PUSH Sreg は Move(Stack(type), Sreg(reg, type))、POP Sreg は Move(Sreg(reg, type), Stack(type))。
+    static public Operand Sreg(int reg, int type) =>
+        new(GetSRegData(reg).Select(selector => ((uint)selector).ToTypeData(type)), data => Segments.LoadSReg(reg, (ushort)data.Value));
+
+    // EFLAGS: 読むと type の幅の下位、書くと POPF の規則(CPL > 0 では IOPL と IF を保護する。Alu.PopFlags。IR と共有)。
+    // PUSHF は Move(Stack(type), Flags(type))、POPF は Move(Flags(type), Stack(type))。
+    static public Operand Flags(int type) =>
+        new(GetDataFromCpu(cpu => cpu.eflags.ToTypeData(type)), data => Effect(cpu => Alu.PopFlags(cpu, type, data.Value)));
 
     // dst <- src
     static public State<Unit> Move<T>(Lens<T> dst, Lens<T> src) =>

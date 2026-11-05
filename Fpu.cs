@@ -16,6 +16,7 @@ namespace Emu86;
 // FNSAVE/FRSTOR・m80 のロード/ストアは 80 ビット拡張実数と相互変換する。
 // 命令は整数命令と同じく表で引く: メモリ形式は (op, reg)、レジスタ形式は (op, reg, rm) か (op, reg) で、
 // 各命令はオペランドの Lens(Real: ST(i) とメモリ形式)に対する Load/Store/Compute/Compare の State で書く。
+// 環境と全体の保存・復元(FNSTENV/FLDENV、FNSAVE/FRSTOR)は、項目とメモリの対応表を Move の向きだけ変えてたどる。
 // 未実装のエンコーディングは失敗を返し、STOP 診断に載る(Execute が EIP を巻き戻す)。
 static public class Fpu
 {
@@ -152,9 +153,7 @@ static public class Fpu
         return (0x8000000000000000UL | (frac << 11), (ushort)(sign | (exp - 1023 + 16383)));
     }
 
-    // --- FNSTENV/FLDENV/FNSAVE/FRSTOR(32 ビット保護モード形式) ----------------
-    // env: cw(4) sw(4) tag(4) fip(4) fcs(4) fdp(4) fds(4) = 28 バイト
-    // save: env + ST(0)..ST(7) の 80 ビット値 ×8 = 108 バイト
+    // --- タグワード ------------------------------------------------------------
     // 物理レジスタ j のタグ: 0 valid、1 zero、2 special(NaN/Inf)、3 empty。
     static uint FpuTag(CPU c, int j) =>
         (c.fpu_valid & (1 << j)) == 0 ? 3u
@@ -164,50 +163,6 @@ static public class Fpu
 
     static uint FpuTagWord(CPU c) =>
         Enumerable.Range(0, 8).Aggregate(0u, (tag, j) => tag | FpuTag(c, j) << (2 * j));
-
-    static void FpuStEnv(EmuEnvironment env, CPU c, uint a)
-    {
-        EnvWriteDword(env, a + 0, c.fpu_cw);
-        EnvWriteDword(env, a + 4, FpuSw(c));
-        EnvWriteDword(env, a + 8, FpuTagWord(c));
-        EnvWriteDword(env, a + 12, 0); // fip(未追跡)
-        EnvWriteDword(env, a + 16, 0); // fcs/opcode
-        EnvWriteDword(env, a + 20, 0); // fdp
-        EnvWriteDword(env, a + 24, 0); // fds
-    }
-
-    static void FpuLdEnv(EmuEnvironment env, CPU c, uint a)
-    {
-        c.fpu_cw = (ushort)EnvGetMemoryData32(env, a);
-        var sw = EnvGetMemoryData32(env, a + 4);
-        c.fpu_sw = (ushort)(sw & 0xC7FF);
-        c.fpu_top = (int)((sw >> 11) & 7);
-        var tag = EnvGetMemoryData32(env, a + 8);
-        c.fpu_valid = (byte)Enumerable.Range(0, 8).Where(j => ((tag >> (2 * j)) & 3) != 3).Sum(j => 1 << j); // empty 以外を有効に
-    }
-
-    static void FpuSave(EmuEnvironment env, CPU c, uint a)
-    {
-        FpuStEnv(env, c, a);
-        for (var i = 0; i < 8; i++)
-        {
-            var (mant, se) = DoubleToF80(St(c, i));
-            FpuW64(env, a + 28 + (uint)i * 10, mant);
-            EnvWriteWord(env, a + 28 + (uint)i * 10 + 8, se);
-        }
-        FpuInit(c); // FNSAVE は保存後に初期化する
-    }
-
-    static void FpuRstor(EmuEnvironment env, CPU c, uint a)
-    {
-        FpuLdEnv(env, c, a);
-        for (var i = 0; i < 8; i++)
-        {
-            var mant = FpuR64(env, a + 28 + (uint)i * 10);
-            var se = EnvGetMemoryData16(env, a + 28 + (uint)i * 10 + 8);
-            StSet(c, i, F80ToDouble(mant, se));
-        }
-    }
 
     // --- 命令の記述: オペランド(Lens)と操作 ------------------------------------
     // Real は double を読み書きする Lens(整数命令の Operand と同じ Lens<T>。Move/Swap も共有)。ST(i) とメモリ形式
@@ -223,6 +178,51 @@ static public class Fpu
     static Real I64At(uint a) => new(GetDataFromEnvCpu((e, _) => (double)(long)FpuR64(e, a)), v => Effect((e, c) => FpuW64(e, a, FpuToInt64(c, v))));
     static Real F80At(uint a) => new(GetDataFromEnvCpu((e, _) => F80ToDouble(FpuR64(e, a), EnvGetMemoryData16(e, a + 8))),
         v => Effect((e, _) => { var (mant, se) = DoubleToF80(v); FpuW64(e, a, mant); EnvWriteWord(e, a + 8, se); }));
+
+    // --- 制御・状態・タグワードと、FNSTENV/FLDENV/FNSAVE/FRSTOR(32 ビット保護モード形式) ---------
+    // 環境は 4 バイトの項が 7 つ(cw sw tag fip fcs fdp fds = 28 バイト)。FNSAVE/FRSTOR はその後ろに ST(0)..ST(7) の 80 ビット値が 8 つ(計 108 バイト)。
+    // 項とメモリ上の位置の対応を 1 度だけ書き、保存は メモリ <- 項、読み込みは 項 <- メモリ の Move にする
+    // (FLDCW/FNSTCW/FNSTSW は同じ Lens を 2 バイトのメモリと組み合わせる)。
+    static Lens<uint> WordAt(uint a) => new(GetDataFromEnvCpu((e, _) => (uint)EnvGetMemoryData16(e, a)), v => Effect((e, _) => EnvWriteWord(e, a, (ushort)v)));
+    static Lens<uint> DwordAt(uint a) => new(GetDataFromEnvCpu((e, _) => EnvGetMemoryData32(e, a)), v => Effect((e, _) => EnvWriteDword(e, a, v)));
+
+    static readonly Lens<uint> ControlWord = new(GetDataFromCpu(c => (uint)c.fpu_cw), v => Effect(c => c.fpu_cw = (ushort)v));
+    // 状態ワードは、読むと TOP フィールドを合成し、書くと TOP を取り出す。
+    static readonly Lens<uint> StatusWord = new(GetDataFromCpu(c => (uint)FpuSw(c)),
+        v => Effect(c => { c.fpu_sw = (ushort)(v & 0xC7FF); c.fpu_top = (int)((v >> 11) & 7); }));
+    // タグワードは、読むと各レジスタの状態、書くと empty(3)以外のレジスタを有効にする。
+    static readonly Lens<uint> TagWord = new(GetDataFromCpu(FpuTagWord),
+        v => Effect(c => c.fpu_valid = (byte)Enumerable.Range(0, 8).Where(j => ((v >> (2 * j)) & 3) != 3).Sum(j => 1 << j)));
+
+    // 環境の各項。追跡していない fip/fcs/fdp/fds は null(保存では 0 を書き、読み込みでは触れない)。
+    static readonly Lens<uint>?[] EnvironmentLayout = [ControlWord, StatusWord, TagWord, null, null, null, null];
+
+    static State<Unit> StoreEnvironment(uint a) =>
+        (from slot in EnvironmentLayout.Index()
+         let memory = DwordAt(a + 4 * (uint)slot.Index)
+         select slot.Item is { } field ? Move(memory, field) : memory.Write(0))
+        .Sequence().Ignore();
+
+    static State<Unit> LoadEnvironment(uint a) =>
+        (from slot in EnvironmentLayout.Index()
+         where slot.Item != null
+         select Move(slot.Item.Value, DwordAt(a + 4 * (uint)slot.Index)))
+        .Sequence().Ignore();
+
+    // 環境の後ろに並ぶ 80 ビット値(10 バイトずつ)と、対応する ST(i)。
+    static IEnumerable<(Real memory, Real register)> RegisterImage(uint a) =>
+        from i in Enumerable.Range(0, 8)
+        select (F80At(a + 28 + 10 * (uint)i), StReal(i));
+
+    // FNSAVE: 環境とレジスタを保存してから初期化する。FRSTOR はその逆向き。
+    static State<Unit> Save(uint a) =>
+        StoreEnvironment(a)
+            .Then(RegisterImage(a).Select(pair => Move(pair.memory, pair.register)).Sequence().Ignore())
+            .Then(Effect(FpuInit));
+
+    static State<Unit> Restore(uint a) =>
+        LoadEnvironment(a)
+            .Then(RegisterImage(a).Select(pair => Move(pair.register, pair.memory)).Sequence().Ignore());
 
     // 何もしない State。State.cs の Pass は別ファイルの静的フィールドなので、表の初期化順に依存しないよう自前で持つ。
     static readonly State<Unit> FpuNop = unit.ToState();
@@ -348,16 +348,16 @@ static public class Fpu
         var table = new Dictionary<(int op, int reg), Func<uint, State<Unit>>>
         {
             [(0xD9, 0)] = a => Load(F32At(a)), [(0xD9, 2)] = a => Store(F32At(a)), [(0xD9, 3)] = a => Store(F32At(a), pop: true),
-            [(0xD9, 4)] = a => Effect((e, c) => FpuLdEnv(e, c, a)),                        // FLDENV
-            [(0xD9, 5)] = a => Effect((e, c) => c.fpu_cw = EnvGetMemoryData16(e, a)),       // FLDCW
-            [(0xD9, 6)] = a => Effect((e, c) => { FpuStEnv(e, c, a); c.fpu_cw |= 0x3F; }),  // FNSTENV(例外を全マスク)
-            [(0xD9, 7)] = a => Effect((e, c) => EnvWriteWord(e, a, c.fpu_cw)),             // FNSTCW
+            [(0xD9, 4)] = LoadEnvironment,                                                  // FLDENV
+            [(0xD9, 5)] = a => Move(ControlWord, WordAt(a)),                                // FLDCW
+            [(0xD9, 6)] = a => StoreEnvironment(a).Then(Effect(c => c.fpu_cw |= 0x3F)),     // FNSTENV(保存後に例外を全マスク)
+            [(0xD9, 7)] = a => Move(WordAt(a), ControlWord),                                // FNSTCW
             [(0xDB, 0)] = a => Load(I32At(a)), [(0xDB, 2)] = a => Store(I32At(a)), [(0xDB, 3)] = a => Store(I32At(a), pop: true),
             [(0xDB, 5)] = a => Load(F80At(a)), [(0xDB, 7)] = a => Store(F80At(a), pop: true),
             [(0xDD, 0)] = a => Load(F64At(a)), [(0xDD, 2)] = a => Store(F64At(a)), [(0xDD, 3)] = a => Store(F64At(a), pop: true),
-            [(0xDD, 4)] = a => Effect((e, c) => FpuRstor(e, c, a)),                         // FRSTOR
-            [(0xDD, 6)] = a => Effect((e, c) => FpuSave(e, c, a)),                          // FNSAVE
-            [(0xDD, 7)] = a => Effect((e, c) => EnvWriteWord(e, a, FpuSw(c))),              // FNSTSW m16
+            [(0xDD, 4)] = Restore,                                                          // FRSTOR
+            [(0xDD, 6)] = Save,                                                             // FNSAVE
+            [(0xDD, 7)] = a => Move(WordAt(a), StatusWord),                                 // FNSTSW m16
             [(0xDF, 0)] = a => Load(I16At(a)), [(0xDF, 2)] = a => Store(I16At(a)), [(0xDF, 3)] = a => Store(I16At(a), pop: true),
             [(0xDF, 5)] = a => Load(I64At(a)), [(0xDF, 7)] = a => Store(I64At(a), pop: true),
         };

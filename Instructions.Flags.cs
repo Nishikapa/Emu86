@@ -7,29 +7,26 @@ using static Emu86.Alu;
 
 namespace Emu86;
 
-// フラグ操作命令: CLI/STI、CLD/STD、CLC/STC/CMC、SAHF/LAHF。
+// フラグ操作命令: CLC/STC/CMC、CLI/STI、CLD/STD、SAHF/LAHF。
 static partial class Instructions
 {
-    // CLI/STI: 割り込み許可フラグ(IF、この実装では jf)を操作する。
-    static State<Unit> Cli_FA =>
-        from _1 in SetLog("Cli_FA")
-        from _2 in _jf.Set(false)
+    // フラグを 1 つ立てるか降ろすだけの命令: CLC/STC(CF)、CLI/STI(割り込み許可フラグ IF。この実装では jf)、CLD/STD(DF)。
+    static State<Unit> SetFlag(string name, Accessor<CPU, bool> flag, bool value) =>
+        from _1 in SetLog(name)
+        from _2 in flag.Set(value)
         select unit;
 
-    static State<Unit> Sti_FB =>
-        from _1 in SetLog("Sti_FB")
-        from _2 in _jf.Set(true)
-        select unit;
+    static State<Unit> Clc_F8 => SetFlag("Clc_F8", _cf, false);
 
-    static State<Unit> Cld_FC =>
-        from _1 in SetLog("Cld_FC")
-        from _2 in _df.Set(false)
-        select unit;
+    static State<Unit> Stc_F9 => SetFlag("Stc_F9", _cf, true);
 
-    static State<Unit> Std_FD =>
-        from _1 in SetLog("Std_FD")
-        from _2 in _df.Set(true)
-        select unit;
+    static State<Unit> Cli_FA => SetFlag("Cli_FA", _jf, false);
+
+    static State<Unit> Sti_FB => SetFlag("Sti_FB", _jf, true);
+
+    static State<Unit> Cld_FC => SetFlag("Cld_FC", _df, false);
+
+    static State<Unit> Std_FD => SetFlag("Std_FD", _df, true);
 
     // SAHF (0x9E): AH の下位8bit を FLAGS の下位8bit(SF/ZF/AF/PF/CF)へ転送する。
     static State<Unit> Sahf_9E =>
@@ -42,16 +39,6 @@ static partial class Instructions
         from _1 in SetLog("Lahf_9F")
         from flags in _eflags.Get()
         from _2 in _ah.Set((byte)flags)
-        select unit;
-
-    static State<Unit> Clc_F8 =>
-        from _1 in SetLog("Clc_F8")
-        from _2 in _cf.Set(false)
-        select unit;
-
-    static State<Unit> Stc_F9 =>
-        from _1 in SetLog("Stc_F9")
-        from _2 in _cf.Set(true)
         select unit;
 
     static State<Unit> Cmc_F5 =>

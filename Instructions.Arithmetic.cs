@@ -67,21 +67,27 @@ static partial class Instructions
         from m in ModRegRm()
         where m.reg == 1 && m.mod != 3
         from addr in GetMemOrRegAddr(m.mod, m.rm)
-        from lo in GetMemOrRegData32(addr)
-        from hi in GetMemOrRegData32((addr.isMem, addr.addr + 4))
-        from cpu in GetCpu
-        from _3 in cpu.eax == lo && cpu.edx == hi
-            ? from _w1 in SetMemOrRegData(addr, cpu.ebx.ToTypeData())
-              from _w2 in SetMemOrRegData((addr.isMem, addr.addr + 4), cpu.ecx.ToTypeData())
-              from _z in _zf.Set(true)
-              select unit
-            : from _r in SetCpu((_eax, lo), (_edx, hi))
-              from _z in _zf.Set(false)
-              select unit
+        let memory = Memory64(addr)
+        from actual in memory.Read
+        from expected in EdxEax.Read
+        from replacement in GetDataFromCpu(cpu => ((ulong)cpu.ecx << 32) | cpu.ebx)
+        from _2 in expected == actual ? memory.Write(replacement) : EdxEax.Write(actual)
+        from _3 in _zf.Set(expected == actual)
         select unit;
 
     // 倍幅の結果を書く: 8 ビットは AX、16 ビットは DX:AX、32 ビットは EDX:EAX(規則は Alu.WriteWide。IR と共有)。
     static State<Unit> SetWide(int type, ulong value) => Effect(cpu => WriteWide(cpu, type, value));
+
+    // 64 ビット値の Lens: EDX:EAX(上位と下位。CMPXCHG8B、RDMSR/WRMSR、RDTSC)と、メモリ上の 8 バイト(下位の 4 バイトが先)。
+    static Lens<ulong> EdxEax => new(GetDataFromCpu(cpu => ((ulong)cpu.edx << 32) | cpu.eax), value => SetWide(2, value));
+
+    static Lens<ulong> Memory64(MemAddr addr) =>
+        new(from low in GetMemOrRegData32(addr)
+            from high in GetMemOrRegData32((addr.isMem, addr.addr + 4))
+            select ((ulong)high << 32) | low,
+            value => from _1 in SetMemOrRegData(addr, ((uint)value).ToTypeData())
+                     from _2 in SetMemOrRegData((addr.isMem, addr.addr + 4), ((uint)(value >> 32)).ToTypeData())
+                     select unit);
 
     // IMUL r, ...(2/3 オペランド形式): 積の下位を reg へ、収まらなければ CF=OF=1(SF/ZF 等は未定義)。
     static State<Unit> ImulInto(int reg, int type, long a, long b)
@@ -229,8 +235,8 @@ static partial class Instructions
             (3, Group3_Neg(addr, data)),
             (4, Group3_Mul(data)),
             (5, Group3_Imul(data)),
-            (6, Group3_Div(data)),
-            (7, Group3_Idiv(data))
+            (6, Group3_Divide(data, signed: false)),
+            (7, Group3_Divide(data, signed: true))
         )
         select unit;
 
@@ -280,24 +286,14 @@ static partial class Instructions
         from _2 in ImulInto(m.reg, type, src.Signed, imm.Signed)
         select unit;
 
-    // DIV r/m : 符号なし除算。商と剰余を AL/AH, AX/DX, EAX/EDX へ(規則は Alu.Divide。IR と共有)。
-    static State<Unit> Group3_Div(Data data) =>
-        Effect(cpu => Divide(cpu, data.type, data.Value, signed: false));
+    // DIV/IDIV r/m: 符号なし/符号付き除算。商と剰余を AL/AH, AX/DX, EAX/EDX へ(規則は Alu.Divide。IR と共有)。
+    static State<Unit> Group3_Divide(Data data, bool signed) =>
+        Effect(cpu => Divide(cpu, data.type, data.Value, signed));
 
-    // IDIV r/m : 符号付き除算。
-    static State<Unit> Group3_Idiv(Data data) =>
-        Effect(cpu => Divide(cpu, data.type, data.Value, signed: true));
-
-    // INC r/m: type に応じて +1 し、フラグ(CF以外)を更新して書き戻す。
-    static State<Unit> IncData(MemAddr addr, Data data) =>
-        from _f in update_eflags_inc(data)
-        from _w in SetMemOrRegData(addr, (data.Value + 1).ToTypeData(data.type))
-        select unit;
-
-    // DEC r/m: type に応じて -1 し、フラグ(CF以外)を更新して書き戻す。
-    static State<Unit> DecData(MemAddr addr, Data data) =>
-        from _f in update_eflags_dec(data)
-        from _w in SetMemOrRegData(addr, (data.Value - 1).ToTypeData(data.type))
+    // INC/DEC r/m: delta(+1 か -1)を足し、フラグ(CF 以外)を更新して書き戻す。
+    static State<Unit> IncDec(MemAddr addr, Data data, int delta) =>
+        from _f in update_eflags_incdec(data, delta)
+        from _w in SetMemOrRegData(addr, ((uint)(data.Value + delta)).ToTypeData(data.type))
         select unit;
 
     // Group4 (0xFE): reg=0 INC r/m8, reg=1 DEC r/m8
@@ -308,8 +304,8 @@ static partial class Instructions
         from data in GetMemOrRegData(addr, false)
         from _2 in Group(
             m.reg,
-            (0, IncData(addr, data)),
-            (1, DecData(addr, data))
+            (0, IncDec(addr, data, +1)),
+            (1, IncDec(addr, data, -1))
         )
         select unit;
 
@@ -321,8 +317,8 @@ static partial class Instructions
         from data in GetMemOrRegData(addr, true)
         from _2 in Group(
             m.reg,
-            (0, IncData(addr, data)),
-            (1, DecData(addr, data)),
+            (0, IncDec(addr, data, +1)),
+            (1, IncDec(addr, data, -1)),
             (2, Call_rm(data)),               // 近傍間接 CALL
             (3, CallFar_rm(addr, data.type)), // far 間接 CALL m16:16/m16:32
             (4, JmpTo(data)),                 // 近傍間接 JMP
@@ -348,19 +344,15 @@ static partial class Instructions
         from _2 in Test(Reg(0, type), Const(imm))
         select unit;
 
-    // INC r (40-47) / DEC r (48-4F): オペコード下位 3 ビットのレジスタをオペランドサイズ幅で。
-    static State<Unit> IncDecReg(string name, Func<MemAddr, Data, State<Unit>> step) =>
-        from _1 in SetLog(name)
+    // INC r (40-47) / DEC r (48-4F): オペコード下位 3 ビットのレジスタをオペランドサイズ幅で。bit3 が DEC。
+    static State<Unit> IncDec_40_4F =>
+        from _1 in SetLog("IncDec_40_4F")
         from opecode in Opecodes
         let reg = opecode[0] & 0x07
         from type in OperandType(true)
         from value in GetRegData(reg, type)
-        from _2 in step((false, (uint)reg), value)
+        from _2 in IncDec((false, (uint)reg), value, (opecode[0] & 0x08) != 0 ? -1 : +1)
         select unit;
-
-    static State<Unit> Inc_40_47 => IncDecReg("Inc_40_47", IncData);
-
-    static State<Unit> Dec_48_4F => IncDecReg("Dec_48_4F", DecData);
 
     // CBW/CWDE (0x98): 1 つ狭い幅のアキュムレータ(AL / AX)を符号拡張して AX / EAX へ。
     static State<Unit> Cbw_98 =>

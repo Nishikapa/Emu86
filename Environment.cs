@@ -532,79 +532,49 @@ static public class DataAccess
 //   要素の幅(type)      : operand size に従う(w かつ 32bit なら dword、そうでなければ word/byte)= OperandType(w)。
 //   アドレスモード     : code32 でフラット32bit(ESI/EDI, ベース0)、そうでなければ real(DS:SI/ES:DI)。
 //   源(DS:SI)はセグメントオーバーライドで差し替えられる。先(ES:DI)は固定。
-// 通常コア向けは、源・先・ポート・アキュムレータをオペランド(Lens)にして Move/Binary で書く。IR 向けは Element(命令的な形)。
+// 通常コア向けは、源・先・ポート・アキュムレータをオペランド(Lens)にして、7 命令を 1 つの骨格(PerElement)と Move/Binary で書く。
+// IR 向けは Element(命令的な形)。
 static public class StringOps
 {
     static bool StrA32(CPU cpu) => cpu.code32 != cpu.address_size_prefix;
 
-    // 源 DS:SI と先 ES:DI のメモリアドレス。
-    static readonly State<MemAddr> Source =
-        GetDataFromCpu(cpu => (MemAddr)(true, (OverrideBase(cpu.Decode.Prefixes, cpu) ?? cpu.ds_base) + (StrA32(cpu) ? cpu.esi : cpu.si)));
+    // 源 [DS:SI] と先 [ES:DI] のメモリアドレス(アドレスサイズが 32 ビットなら ESI/EDI、そうでなければ SI/DI)。
+    static readonly State<(MemAddr source, MemAddr destination)> Addresses = GetDataFromCpu(cpu => (
+        source: (MemAddr)(true, (OverrideBase(cpu.Decode.Prefixes, cpu) ?? cpu.ds_base) + (StrA32(cpu) ? cpu.esi : cpu.si)),
+        destination: (MemAddr)(true, cpu.es_base + (StrA32(cpu) ? cpu.edi : cpu.di))));
 
-    static readonly State<MemAddr> Destination =
-        GetDataFromCpu(cpu => (MemAddr)(true, cpu.es_base + (StrA32(cpu) ? cpu.edi : cpu.di)));
+    // 1 要素のオペランド: 源、先、アキュムレータ(AL/AX/EAX)、ポート DX。
+    // 命令が使うものだけを組み立てる(REP の反復ごとに通るので、使わない Lens は作らない)。
+    readonly record struct StringOperands(MemAddr SourceAddress, MemAddr DestinationAddress, int Type)
+    {
+        public Operand Source => Rm(SourceAddress, Type);
+        public Operand Destination => Rm(DestinationAddress, Type);
+        public Operand Accumulator => Reg(0, Type);
+        public Operand Port => Operands.Port(Dx, Type);
+    }
 
-    // DF に従って SI/DI(32 ビットアドレスなら ESI/EDI)を 1 要素分だけ増減する。
-    static State<Unit> StrAdvance(int type, bool si, bool di) =>
-        Effect(cpu => Advance(cpu, Bytes(type), StrA32(cpu), si, di));
-
-    // MOVS: [DS:SI] -> [ES:DI] を 1 要素コピーし、DF に従って SI/DI を増減する。
-    static public State<Unit> Movs(bool w) =>
+    // 1 要素分の骨格: オペランドの間で operation(転送か比較)を行い、使ったインデックス(SI/DI)を DF に従って 1 要素分進める。
+    static State<Unit> PerElement(bool w, bool si, bool di, Func<StringOperands, State<Unit>> operation) =>
         from type in OperandType(w)
-        from source in Source
-        from destination in Destination
-        from _1 in Move(Rm(destination, type), Rm(source, type))
-        from _2 in StrAdvance(type, si: true, di: true)
+        from address in Addresses
+        from _1 in operation(new(address.source, address.destination, type))
+        from _2 in Effect(cpu => Advance(cpu, Bytes(type), StrA32(cpu), si, di))
         select Unit.unit;
 
-    // STOS: AL/AX/EAX -> [ES:DI]、DF に従って DI を増減する。
-    static public State<Unit> Stos(bool w) =>
-        from type in OperandType(w)
-        from destination in Destination
-        from _1 in Move(Rm(destination, type), Reg(0, type))
-        from _2 in StrAdvance(type, si: false, di: true)
-        select Unit.unit;
+    // 7 つの文字列命令は「どこからどこへ」と「どのインデックスを進めるか」だけが違う。比較(CMPS/SCAS)は CMP と同じく結果を捨ててフラグだけ。
+    static public State<Unit> Movs(bool w) => PerElement(w, si: true, di: true, operands => Move(operands.Destination, operands.Source));            // [ES:DI] <- [DS:SI]
 
-    // LODS: [DS:SI] -> AL/AX/EAX、DF に従って SI を増減する。
-    static public State<Unit> Lods(bool w) =>
-        from type in OperandType(w)
-        from source in Source
-        from _1 in Move(Reg(0, type), Rm(source, type))
-        from _2 in StrAdvance(type, si: true, di: false)
-        select Unit.unit;
+    static public State<Unit> Stos(bool w) => PerElement(w, si: false, di: true, operands => Move(operands.Destination, operands.Accumulator));      // [ES:DI] <- アキュムレータ
 
-    // CMPS: [DS:SI] - [ES:DI] でフラグを更新(結果は破棄 = CMP)し、SI/DI を増減する。
-    static public State<Unit> Cmps(bool w) =>
-        from type in OperandType(w)
-        from source in Source
-        from destination in Destination
-        from _1 in Binary(Rm(source, type), Rm(destination, type), 7)
-        from _2 in StrAdvance(type, si: true, di: true)
-        select Unit.unit;
+    static public State<Unit> Lods(bool w) => PerElement(w, si: true, di: false, operands => Move(operands.Accumulator, operands.Source));           // アキュムレータ <- [DS:SI]
 
-    // SCAS: AL/AX/EAX - [ES:DI] でフラグを更新(結果は破棄)し、DI を増減する。
-    static public State<Unit> Scas(bool w) =>
-        from type in OperandType(w)
-        from destination in Destination
-        from _1 in Binary(Reg(0, type), Rm(destination, type), 7)
-        from _2 in StrAdvance(type, si: false, di: true)
-        select Unit.unit;
+    static public State<Unit> Cmps(bool w) => PerElement(w, si: true, di: true, operands => Binary(operands.Source, operands.Destination, 7));       // [DS:SI] - [ES:DI]
 
-    // INS: ポート DX から 1 要素読み、[ES:DI] へ格納し、DF に従って DI を増減する。
-    static public State<Unit> Ins(bool w) =>
-        from type in OperandType(w)
-        from destination in Destination
-        from _1 in Move(Rm(destination, type), Port(Dx, type))
-        from _2 in StrAdvance(type, si: false, di: true)
-        select Unit.unit;
+    static public State<Unit> Scas(bool w) => PerElement(w, si: false, di: true, operands => Binary(operands.Accumulator, operands.Destination, 7)); // アキュムレータ - [ES:DI]
 
-    // OUTS: [DS:SI] から 1 要素読み、ポート DX へ出力し、DF に従って SI を増減する。
-    static public State<Unit> Outs(bool w) =>
-        from type in OperandType(w)
-        from source in Source
-        from _1 in Move(Port(Dx, type), Rm(source, type))
-        from _2 in StrAdvance(type, si: true, di: false)
-        select Unit.unit;
+    static public State<Unit> Ins(bool w) => PerElement(w, si: false, di: true, operands => Move(operands.Destination, operands.Port));              // [ES:DI] <- ポート DX
+
+    static public State<Unit> Outs(bool w) => PerElement(w, si: true, di: false, operands => Move(operands.Port, operands.Source));                  // ポート DX <- [DS:SI]
 
     // 1 要素分の命令的な形(IR の StringStmt が使う)。source は源(DS:SI)の基底(セグメントオーバーライド適用済み)、先(ES:DI)は固定。
     // 書き込み先の検査は EnvWriteN に任せる(読み取りが先なので、フォルト時に状態は変わっていない)。
@@ -654,7 +624,7 @@ static public class StringOps
         }
     }
 
-    // DF に従って SI/DI(a32 なら ESI/EDI)を size 分だけ増減する(命令的な形。通常コアの StrAdvance もこれを呼ぶ)。
+    // DF に従って SI/DI(a32 なら ESI/EDI)を size 分だけ増減する(命令的な形。通常コアの PerElement もこれを呼ぶ)。
     static void Advance(CPU c, int size, bool a32, bool si, bool di)
     {
         var delta = c.df ? -size : size;

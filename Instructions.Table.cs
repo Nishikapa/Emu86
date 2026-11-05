@@ -13,24 +13,19 @@ static partial class Instructions
     static (byte ope, int len, State<Unit> state)[] OneByteStates =>
     [
         (0x00, 6, Arithmetic),
-        (0x06, 1, PushSreg),   // PUSH ES
-        (0x07, 1, PopSreg),    // POP ES
+        (0x06, 2, PushPopSreg), // PUSH ES / POP ES
         (0x08, 6, Arithmetic),
-        (0x0E, 1, PushSreg),   // PUSH CS
+        (0x0E, 1, PushPopSreg), // PUSH CS
         (0x10, 6, Arithmetic),
-        (0x16, 1, PushSreg),   // PUSH SS
-        (0x17, 1, PopSreg),    // POP SS
+        (0x16, 2, PushPopSreg), // PUSH SS / POP SS
         (0x18, 6, Arithmetic),
-        (0x1E, 1, PushSreg),   // PUSH DS
-        (0x1F, 1, PopSreg),    // POP DS
+        (0x1E, 2, PushPopSreg), // PUSH DS / POP DS
         (0x20, 6, Arithmetic),
         (0x28, 6, Arithmetic),
         (0x30, 6, Arithmetic),
         (0x38, 6, Arithmetic),
-        (0x40, 8, Inc_40_47),
-        (0x48, 8, Dec_48_4F),
-        (0x50, 8, Push_50_57),
-        (0x58, 8, Pop_58_5F),
+        (0x40, 16, IncDec_40_4F),
+        (0x50, 16, PushPop_50_5F),
         (0x60, 1, Pusha_60),
         (0x61, 1, Popa_61),
         (0x6C, 2, Ins_6C_6D),
@@ -56,12 +51,10 @@ static partial class Instructions
         (0x98, 1, Cbw_98),
         (0x99, 1, Cwd_99),
         (0x9B, 1, Fwait_9B),
-        (0x9C, 1, Pushf_9C),
+        (0x9C, 2, PushfPopf_9C_9D),
         (0x9E, 1, Sahf_9E),
         (0x9F, 1, Lahf_9F),
-        (0x9D, 1, Popf_9D),
-        (0xA0, 2, Mov_A0_A1),
-        (0xA2, 2, Mov_A2_A3),
+        (0xA0, 4, Mov_A0_A3),
         (0xA4, 2, Movs_A4_A5),
         (0xA6, 2, Cmps_A6_A7),
         (0xA8, 2, Test_A8_A9),
@@ -93,14 +86,12 @@ static partial class Instructions
         (0xD8, 8, Fpu_D8_DF),
         (0xE0, 3, Loop_E0_E2),
         (0xE3, 1, Jcxz_E3),
-        (0xE4, 2, In_E4_E5),
-        (0xE6, 2, Out_E6_E7),
+        (0xE4, 4, InOut_E4_E7),
         (0xE8, 1, Call_E8),
         (0xE9, 1, Jump_E9),
         (0xEA, 1, FarJump_EA),
         (0xEB, 1, Jmp_EB),
-        (0xEC, 2, In_EC_ED),
-        (0xEE, 2, Out_EE_EF),
+        (0xEC, 4, InOut_EC_EF),
         (0xF2, 1, Repne_F2),
         (0xF3, 1, Rep_F3),
         (0xF6, 2, Group3_F6_F7),
@@ -125,11 +116,8 @@ static partial class Instructions
         (0x0F, 0x03, 0x01, Lsl_0F03),
         (0x0F, 0x08, 0x02, CacheInvd_0F08_09),    // INVD / WBINVD (NOP 扱い)
         (0x0F, 0x18, 0x08, HintNop_0F18_1F),      // PREFETCHh / 予約 NOP / NOP r/m(ModRM を消費するだけ)
-        (0x0F, 0x20, 0x01, Mov_0F20),
-        (0x0F, 0x21, 0x01, Mov_0F21),
-        (0x0F, 0x23, 0x01, Mov_0F23),
+        (0x0F, 0x20, 0x04, MovSpecial_0F20_23),   // MOV r32, CRn/DRn ; MOV CRn/DRn, r32
         (0x0F, 0x40, 0x10, Cmov_0F40_4F),         // CMOVcc r, r/m (16 条件)
-        (0x0F, 0x22, 0x01, Mov_0F22),
         (0x0F, 0x90, 0x10, Setcc_0F90_9F),        // SETcc r/m8 (16 条件)
         (0x0F, 0xA3, 0x01, BitTest_reg),          // BT  r/m, r
         (0x0F, 0xAB, 0x01, BitTest_reg),          // BTS r/m, r

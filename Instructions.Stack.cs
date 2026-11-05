@@ -53,59 +53,36 @@ static partial class Instructions
         from _3 in Move(Reg(5, type), Stack(type))            // BP <- pop
         select unit;
 
-    // PUSH/POP FS/GS (0F A0/A1/A8/A9)。オペランドサイズ幅で push/pop する。
-    //   A0=PUSH FS, A1=POP FS, A8=PUSH GS, A9=POP GS。セグメント番号 FS=4, GS=5。
+    // スタックとオペランドの間の Move(幅はオペランドサイズ): pop なら operand <- スタック、そうでなければ スタック <- operand。
+    // PUSH と POP の対は、オペコードのどのビットが POP かと、相手のオペランドだけが違う。
+    static State<Unit> PushPop(string name, Func<byte[], bool> pop, Func<byte[], int, Operand> operand) =>
+        from _1 in SetLog(name)
+        from opecode in Opecodes
+        from type in OperandType(true)
+        let stack = Stack(type)
+        let target = operand(opecode, type)
+        from _2 in pop(opecode) ? Move(target, stack) : Move(stack, target)
+        select unit;
+
+    // PUSH r (50-57) / POP r (58-5F): bit3 が POP、下位 3 ビットがレジスタ。
+    static State<Unit> PushPop_50_5F =>
+        PushPop("PushPop_50_5F", opecode => (opecode[0] & 0x08) != 0, (opecode, type) => Reg(opecode[0] & 0x07, type));
+
+    // PUSH Sreg (06/0E/16/1E) / POP Sreg (07/17/1F): bit0 が POP、opcode>>3 が ES/CS/SS/DS の順のセグメント番号。
+    // push は(32 ビットなら)セレクタをゼロ拡張し、pop は下位 16 ビットをロードする(プロテクトモードでは記述子を読み直す)。
+    static State<Unit> PushPopSreg =>
+        PushPop("PushPopSreg", opecode => (opecode[0] & 0x01) != 0, (opecode, type) => Sreg(opecode[0] >> 3, type));
+
+    // PUSH/POP FS/GS (0F A0/A1/A8/A9): bit0 が POP、bit3 が GS(セグメント番号 FS=4、GS=5)。
     static State<Unit> PushPopFsGs =>
-        from _1 in SetLog("PushPopFsGs")
-        from opecode in Opecodes
-        let reg = (opecode[1] & 0x08) != 0 ? 5 : 4   // A8/A9=GS, A0/A1=FS
-        let pop = (opecode[1] & 0x01) != 0           // A1/A9=POP
-        from type in OperandType(true)
-        from _2 in pop ? PopSregInto(reg, type) : PushSregOf(reg, type)
-        select unit;
+        PushPop("PushPopFsGs", opecode => (opecode[1] & 0x01) != 0, (opecode, type) => Sreg((opecode[1] & 0x08) != 0 ? 5 : 4, type));
 
-    // セグメントレジスタをオペランドサイズ幅で push する(32 ビットならセレクタをゼロ拡張)/ pop して下位 16 ビットをロードする。
-    static State<Unit> PushSregOf(int reg, int type) =>
-        from selector in GetSRegData(reg)
-        from _ in Push(((uint)selector).ToTypeData(type))
-        select unit;
+    // PUSHF (9C) / POPF (9D): bit0 が POP。32 ビットコードでは EFLAGS 全体を 4 バイトで push/pop する。
+    static State<Unit> PushfPopf_9C_9D =>
+        PushPop("PushfPopf_9C_9D", opecode => (opecode[0] & 0x01) != 0, (_, type) => Flags(type));
 
-    internal static State<Unit> PopSregInto(int reg, int type) =>
-        from value in Pop(type)
-        from _ in LoadSReg(reg, (ushort)value.Value)
-        select unit;
-
-    // PUSH Sreg (06/0E/16/1E): opcode>>3 が ES/CS/SS/DS の順のセグメント番号になる。
-    static State<Unit> PushSreg =>
-        from _1 in SetLog("PushSreg")
-        from opecode in Opecodes
-        from type in OperandType(true)
-        from _2 in PushSregOf(opecode[0] >> 3, type)
-        select unit;
-
-    // POP Sreg (07/17/1F)。オペランドサイズ幅で pop し、下位16ビットをロードする。
-    // プロテクトモードでは記述子を再ロードする。
-    static State<Unit> PopSreg =>
-        from _1 in SetLog("PopSreg")
-        from opecode in Opecodes
-        from type in OperandType(true)
-        from _2 in PopSregInto(opecode[0] >> 3, type)
-        select unit;
-
-    // PUSH r (50-57) / POP r (58-5F): スタックとレジスタの間の Move。
-    static State<Unit> Push_50_57 =>
-        from _1 in SetLog("Push_50_57")
-        from opecode in Opecodes
-        from type in OperandType(true)
-        from _2 in Move(Stack(type), Reg(opecode[0] & 0x07, type))
-        select unit;
-
-    static State<Unit> Pop_58_5F =>
-        from _1 in SetLog("Pop_58_5F")
-        from opecode in Opecodes
-        from type in OperandType(true)
-        from _2 in Move(Reg(opecode[0] & 0x07, type), Stack(type))
-        select unit;
+    // セグメントレジスタを pop する(IR からも使う)。
+    internal static State<Unit> PopSregInto(int reg, int type) => Move(Sreg(reg, type), Stack(type));
 
     // POP r/m (0x8F /0)
     static State<Unit> Pop_8F =>
@@ -117,34 +94,15 @@ static partial class Instructions
         from _3 in Move(Rm(addr, type), Stack(type))
         select unit;
 
-    // PUSH imm16/imm32 (0x68): オペランドサイズで imm を読み、その幅で push する。
-    static State<Unit> PushImm_68 =>
-        from _1 in SetLog("PushImm_68")
+    // PUSH imm: 即値をオペランドサイズの幅で読み、その幅で push する。0x68 は imm16/imm32、0x6A は符号拡張した imm8。
+    static State<Unit> PushImmediate(string name, Func<int, State<Data>> immediate) =>
+        from _1 in SetLog(name)
         from type in OperandType(true)
-        from value in GetMemoryDataIp(type)
-        from _2 in Push(value)
-        select unit;
-
-    // PUSH imm8 (0x6A): imm8 を符号拡張し、オペランドサイズ幅で push する。
-    static State<Unit> PushImm_6A =>
-        from _1 in SetLog("PushImm_6A")
-        from type in OperandType(true)
-        from imm in Imm8SignExtended(type)
+        from imm in immediate(type)
         from _2 in Push(imm)
         select unit;
 
-    // PUSHF/POPF はオペランドサイズに従う(32ビットコードでは EFLAGS 全体を 4 バイトで push/pop)。
-    static State<Unit> Pushf_9C =>
-        from _1 in SetLog("Pushf_9C")
-        from type in OperandType(true)
-        from fl in GetDataFromCpu(cpu => cpu.eflags)
-        from _2 in Push(fl.ToTypeData(type))
-        select unit;
+    static State<Unit> PushImm_68 => PushImmediate("PushImm_68", GetMemoryDataIp);
 
-    static State<Unit> Popf_9D =>
-        from _1 in SetLog("Popf_9D")
-        from type in OperandType(true)
-        from fl in Pop(type)
-        from _2 in Effect(cpu => PopFlags(cpu, type, fl.Value)) // CPL>0 の IOPL/IF の保護は Alu.PopFlags(IR と共有)
-        select unit;
+    static State<Unit> PushImm_6A => PushImmediate("PushImm_6A", Imm8SignExtended);
 }
