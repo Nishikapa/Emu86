@@ -305,7 +305,6 @@ public partial class CPU
     private const uint JF = 0x200;
     private const uint DF = 0x400;
     private const uint OF = 0x800;
-    private const uint NT = 0x4000;
 
     private void UpdateEflags(uint flag, bool f)
     {
@@ -339,7 +338,6 @@ public partial class CPU
     // LOCK (F0)。単一CPUなのでアトミック性は自明に満たされ、実質無視でよい。
     // 命令間では常に false のためスナップショットには保存しない。
     public bool lock_prefix { get => Decode.Lock; set => Decode.Lock = value; }
-    static public readonly Accessor<CPU, bool> _lock_prefix = new(c => c.lock_prefix, c => v => { c.lock_prefix = v; return c; });
     static public readonly Accessor<CPU, bool> _cs_prefix = new(c => c.cs_prefix, c => v => { c.cs_prefix = v; return c; });
     static public readonly Accessor<CPU, bool> _es_prefix = new(c => c.es_prefix, c => v => { c.es_prefix = v; return c; });
     static public readonly Accessor<CPU, bool> _ss_prefix = new(c => c.ss_prefix, c => v => { c.ss_prefix = v; return c; });
@@ -358,18 +356,15 @@ public partial class CPU
     public bool jf { get => GetEflags(JF); set => UpdateEflags(JF, value); }
     public bool df { get => GetEflags(DF); set => UpdateEflags(DF, value); }
     public bool of { get => GetEflags(OF); set => UpdateEflags(OF, value); }
-    public bool nt { get => GetEflags(NT); set => UpdateEflags(NT, value); }
 
     static public readonly Accessor<CPU, bool> _cf = new(c => c.cf, c => v => { c.cf = v; return c; });
     static public readonly Accessor<CPU, bool> _pf = new(c => c.pf, c => v => { c.pf = v; return c; });
-    static public readonly Accessor<CPU, bool> _af = new(c => c.af, c => v => { c.af = v; return c; });
     static public readonly Accessor<CPU, bool> _zf = new(c => c.zf, c => v => { c.zf = v; return c; });
     static public readonly Accessor<CPU, bool> _sf = new(c => c.sf, c => v => { c.sf = v; return c; });
     static public readonly Accessor<CPU, bool> _tf = new(c => c.tf, c => v => { c.tf = v; return c; });
     static public readonly Accessor<CPU, bool> _jf = new(c => c.jf, c => v => { c.jf = v; return c; });
     static public readonly Accessor<CPU, bool> _df = new(c => c.df, c => v => { c.df = v; return c; });
     static public readonly Accessor<CPU, bool> _of = new(c => c.of, c => v => { c.of = v; return c; });
-    static public readonly Accessor<CPU, bool> _nt = new(c => c.nt, c => v => { c.nt = v; return c; });
 
     static public readonly Accessor<CPU, byte> _al = new(c => c.al, c => v => { c.al = v; return c; });
     static public readonly Accessor<CPU, byte> _bl = new(c => c.bl, c => v => { c.bl = v; return c; });

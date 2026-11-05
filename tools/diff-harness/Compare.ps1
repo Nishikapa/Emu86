@@ -26,11 +26,13 @@ New-Item -ItemType Directory -Path $work | Out-Null
 
 # ハーネスのプロジェクトを一時フォルダへコピーし(bin/obj をリポジトリの外に置く)、project の本体に対してビルドして exe のパスを返す。
 # 本体の bin/obj はいつもの場所(作業ツリー側はリポジトリ、基準側は worktree)。
+# 本体も毎回ビルドし直す(--no-incremental): 増分ビルドは更新時刻で判断するので、古い時刻のファイルで置き換えた変更
+# (バックアップからのコピーなど)を見落とし、前のバイナリのまま比べてしまうことがある。
 function Build-Harness([string]$label, [string]$project) {
     $dir = Join-Path $work "$label-harness"
     New-Item -ItemType Directory -Path $dir | Out-Null
     Copy-Item (Join-Path $harness "Emu86.Diff.csproj") $dir
-    $log = & dotnet build (Join-Path $dir "Emu86.Diff.csproj") -c Release --nologo "-p:HarnessDir=$harness" "-p:Emu86Project=$project" 2>&1
+    $log = & dotnet build (Join-Path $dir "Emu86.Diff.csproj") -c Release --nologo --no-incremental "-p:HarnessDir=$harness" "-p:Emu86Project=$project" 2>&1
     if ($LASTEXITCODE -ne 0) { $log | Out-Host; throw "build failed: $label" }
     (Get-ChildItem -Path (Join-Path $dir "bin") -Recurse -Filter Emu86.Tests.exe | Select-Object -First 1).FullName
 }

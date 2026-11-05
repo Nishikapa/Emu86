@@ -1,7 +1,7 @@
 using static Emu86.CPU;
-using static Emu86.Conversions;
 using static Emu86.States;
 using static Emu86.CpuStates;
+using static Emu86.Writers;
 
 namespace Emu86;
 
@@ -26,35 +26,52 @@ public static class VgaBiosStub
 
     public static readonly byte[] Rom = BuildRom();
 
-    // ROM の構造: 署名と jmp short init、PCI データ構造(SeaBIOS は ROM のベンダ/デバイス ID が取り込み元の
-    // PCI デバイスと一致することを確認してから init を呼ぶ)、init(IVT 10h をハンドラへ向けて mode 3 を設定)、
-    // ハンドラ(ud2 でサービス呼び出し、iret)、識別文字列、チェックサム。
-    static byte[] BuildRom() => new RomBuilder(RomSize)
-        .Db(0x55, 0xAA, RomSize / 512)                  // 署名とサイズ(512 バイト単位)
-        .JmpShort("init")
-        .At(0x18).Dw("pcir")                            // PCI データ構造へのポインタ
-        .At(PcirOffset).Label("pcir")
-        .Ascii("PCIR")
-        .Dw(0x1234).Dw(0x1111)                          // ベンダ、デバイス
-        .Dw(0x0000).Dw(0x0018).Db(0x00)                 // VPD ポインタ、構造体長、リビジョン
-        .Db(0x00, 0x00, 0x03)                           // クラス: VGA 互換(prog-if, sub, base)
-        .Dw(RomSize / 512).Dw(0x0000)                   // イメージ長(512 バイト単位)、コードリビジョン
-        .Db(0x00, 0x80).Dw(0x0000)                      // コード種別 x86、最後のイメージ
-        .At(InitOffset).Label("init")
-        .Db(0x1E)                                       // push ds
-        .Db(0x31, 0xC0)                                 // xor ax, ax
-        .Db(0x8E, 0xD8)                                 // mov ds, ax
-        .Db(0xC7, 0x06, 0x40, 0x00).Dw("handler")       // mov word [0x40], handler
-        .Db(0xC7, 0x06, 0x42, 0x00).Dw(0xC000)          // mov word [0x42], 0xC000
-        .Db(0x1F)                                       // pop ds
-        .Db(0xB8, 0x03, 0x00)                           // mov ax, 0x0003
-        .Db(0xCD, 0x10)                                 // int 10h
-        .Db(0xCB)                                       // retf
-        .At(ServiceOffset).Label("handler")
-        .Db(0x0F, 0x0B)                                 // ud2(サービス呼び出し)
-        .Db(0xCF)                                       // iret
-        .At(0x100).Ascii("Emu86 VGA BIOS stub")
-        .Checksum();
+    // ROM の構造(Writer で書く。At は ROM の先頭からの位置): 署名と jmp short init、PCI データ構造(SeaBIOS は ROM のベンダ/デバイス ID が
+    // 取り込み元の PCI デバイスと一致することを確認してから init を呼ぶ)、init(IVT 10h をハンドラへ向けて mode 3 を設定)、
+    // ハンドラ(ud2 でサービス呼び出し、iret)、識別文字列。最後の 1 バイトは ROM 全体の和を 0 にするチェックサム。
+    static byte[] BuildRom() => Sequence(
+        At(0x00, Sequence(
+            Bytes(0x55, 0xAA, RomSize / 512),                   // 署名とサイズ(512 バイト単位)
+            JmpShort(InitOffset))),
+        At(0x18, U16(PcirOffset)),                              // PCI データ構造へのポインタ
+        At(PcirOffset, Sequence(
+            Ascii("PCIR"),
+            U16(0x1234), U16(0x1111),                           // ベンダ、デバイス
+            U16(0x0000), U16(0x0018), U8(0x00),                 // VPD ポインタ、構造体長、リビジョン
+            Bytes(0x00, 0x00, 0x03),                            // クラス: VGA 互換(prog-if, sub, base)
+            U16(RomSize / 512), U16(0x0000),                    // イメージ長(512 バイト単位)、コードリビジョン
+            Bytes(0x00, 0x80), U16(0x0000))),                   // コード種別 x86、最後のイメージ
+        At(InitOffset, Sequence(
+            Bytes(0x1E),                                        // push ds
+            Bytes(0x31, 0xC0),                                  // xor ax, ax
+            Bytes(0x8E, 0xD8),                                  // mov ds, ax
+            Bytes(0xC7, 0x06, 0x40, 0x00), U16(ServiceOffset),  // mov word [0x40], handler
+            Bytes(0xC7, 0x06, 0x42, 0x00), U16(0xC000),         // mov word [0x42], 0xC000
+            Bytes(0x1F),                                        // pop ds
+            Bytes(0xB8, 0x03, 0x00),                            // mov ax, 0x0003
+            Bytes(0xCD, 0x10),                                  // int 10h
+            Bytes(0xCB))),                                      // retf
+        At(ServiceOffset, Bytes(0x0F, 0x0B, 0xCF)),             // ハンドラ: ud2(サービス呼び出し)、iret
+        At(0x100, Ascii("Emu86 VGA BIOS stub")),
+        ZeroSum(RomSize))
+        .Build(RomSize);
+
+    // jmp short target(EB rel8)。変位は次の命令からの相対。
+    static Writer JmpShort(int target) => (buffer, pos) =>
+    {
+        buffer[pos] = 0xEB;
+        buffer[pos + 1] = (byte)(target - (pos + 2));
+        return pos + 2;
+    };
+
+    // 最後の 1 バイトに、size バイト全体の和が 0 になる値を置く(他の項目をすべて書いた後に計算する)。
+    static Writer ZeroSum(int size) => (buffer, pos) =>
+    {
+        var sum = 0;
+        for (var index = 0; index < size - 1; index++) sum += buffer[pos + index];
+        buffer[pos + size - 1] = (byte)-sum;
+        return pos;
+    };
 
     // ROM を 0xC0000 へ置き、IVT 10h をハンドラへ向ける(INT 19h のたびに呼んでも同じ結果)。
     public static void Install(EmuEnvironment env)
@@ -194,19 +211,21 @@ public static class VgaBiosStub
                 Array.Fill(vga.Vram, (byte)0x07, 0x10000, 0x4000);
             }
         }
-        var columns = mode == 0x13 ? 40 : 80;
-        ram[0x449] = (byte)mode;
-        ram[0x44A] = (byte)columns; ram[0x44B] = 0;
-        ram[0x44C] = 0x00; ram[0x44D] = (byte)(vga.GraphicsMode ? 0 : 0x10);
-        ram[0x44E] = 0; ram[0x44F] = 0;
-        Array.Clear(ram, 0x450, 16);
-        ram[0x460] = vga.Crtc[0x0B]; ram[0x461] = vga.Crtc[0x0A];
-        ram[0x462] = 0;
-        ram[0x463] = 0xD4; ram[0x464] = 0x03;
-        ram[0x484] = (byte)(mode == 0x13 ? 24 : vga.GraphicsMode ? 29 : 24);
-        ram[0x485] = (byte)(mode == 0x13 ? 8 : 16); ram[0x486] = 0;
-        ram[0x487] = (byte)(0x60 | (clear ? 0 : 0x80));
-        ram[0x488] = 0x09; ram[0x489] = 0x11; ram[0x48A] = 0x08;
+        // BIOS データ領域(At は 0x400 からの位置)に、設定したモードの状態を置く。
+        Sequence(
+            At(0x49, U8((byte)mode)),                                               // 現在のビデオモード
+            At(0x4A, U16((ushort)(mode == 0x13 ? 40 : 80))),                        // 桁数
+            At(0x4C, U16((ushort)(vga.GraphicsMode ? 0 : 0x1000))),                 // 1 ページの大きさ(テキストは 4KB)
+            At(0x4E, U16(0)),                                                       // 表示ページの先頭
+            At(0x50, Bytes(new byte[16])),                                          // カーソル位置(8 ページ分)
+            At(0x60, Bytes(vga.Crtc[0x0B], vga.Crtc[0x0A])),                        // カーソルの形(終了行、開始行)
+            At(0x62, U8(0)),                                                        // 表示ページ
+            At(0x63, U16(0x3D4)),                                                   // CRTC のポート
+            At(0x84, U8((byte)(mode == 0x13 ? 24 : vga.GraphicsMode ? 29 : 24))),   // 行数 - 1
+            At(0x85, U16((ushort)(mode == 0x13 ? 8 : 16))),                         // 文字の高さ
+            At(0x87, U8((byte)(0x60 | (clear ? 0 : 0x80)))),                        // ビデオ制御(bit7 = 画面を消さなかった)
+            At(0x88, Bytes(0x09, 0x11, 0x08)))                                      // スイッチ、モード設定の制御、表示結合コードの表の番号
+            (ram, 0x400);
         vga.Dirty = true;
     }
 

@@ -6,6 +6,8 @@ namespace Emu86;
 
 // バイト列の構造を書くビルダー(Field<T> の対)。buffer の pos に書いて次の位置を返す。順次は Then/Sequence/Count、
 // 固定オフセットの項目は At(位置は進めない)で、読み取り側のレイアウトと同じ形に書ける。構造体全体の大きさは Build(size) で決める。
+// ディスクの形式のほか、固定レイアウトのバイト列はどれもこれで書く: VGA BIOS の ROM と BIOS データ領域(VgaBiosStub)、
+// PCI コンフィグ空間(Pci)、ATA の IDENTIFY の応答(AtaDevice)。
 internal delegate int Writer(byte[] buffer, int pos);
 
 internal static class Writers
@@ -24,7 +26,7 @@ internal static class Writers
     public static Writer U32BE(uint value) => Primitive(4, span => BinaryPrimitives.WriteUInt32BigEndian(span, value));
     public static Writer U64BE(ulong value) => Primitive(8, span => BinaryPrimitives.WriteUInt64BigEndian(span, value));
     public static Writer Uuid(Guid value) => Primitive(16, span => value.TryWriteBytes(span));
-    public static Writer Bytes(byte[] value) => Primitive(value.Length, span => value.CopyTo(span));
+    public static Writer Bytes(params byte[] value) => Primitive(value.Length, span => value.CopyTo(span));
     public static Writer Ascii(string value) => Bytes(Encoding.ASCII.GetBytes(value));
     public static Writer Utf16(string value) => Bytes(Encoding.Unicode.GetBytes(value));
 

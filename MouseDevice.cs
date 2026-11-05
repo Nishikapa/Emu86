@@ -24,8 +24,6 @@ public sealed class MouseDevice
     // ホストから: PS/2 の向き(dy は上が正)で相対移動を積む。buttons: bit0=左 bit1=右 bit2=中。
     public void Move(int dx, int dy, int dz, byte buttons) => motion.Enqueue((dx, dy, dz, buttons));
 
-    public bool HasPendingMotion => !motion.IsEmpty;
-
     // 出力バッファが空で報告中なら次のパケットを組み立てる。移したら true。
     public bool Pump()
     {

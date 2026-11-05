@@ -221,8 +221,6 @@ public sealed class VgaDevice
     public static bool IsPort(int port) =>
         port is 0x3B4 or 0x3B5 or 0x3BA or (>= 0x3C0 and <= 0x3CF) or 0x3D4 or 0x3D5 or 0x3DA;
 
-    public static bool IsVbePort(int port) => port is 0x1CE or 0x1CF;
-
     // VBE レジスタ(16 ビット)。GETCAPS(ENABLE bit1)が立っているあいだ XRES/YRES/BPP は最大値を返す。
     public ushort VbeRead(int port)
     {

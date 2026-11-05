@@ -699,12 +699,12 @@ static public class Interrupts
     // V86 モードの INT n: IOPL<3 なら #GP(0)。IOPL=3 でも IDT ゲートの DPL が 3 未満なら
     // #GP(vector*8+2) になる(NT はこれを KiTrap0D で受けて IVT 経由の反射をソフトウェアで行う)。
     static public State<Unit> InterruptFromV86(int vector) =>
-        from gateHi in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryData32(env, cpu.idt_base + (uint)vector * 8 + 4))
+        // DPL は上位 dword にある(飛び先は見ないので下位は読まない)。
+        from gate in GetDataFromEnvCpu((env, cpu) => new Gate(Low: 0, High: EnvGetMemoryData32(env, cpu.idt_base + (uint)vector * 8 + 4)))
         from cpu in GetCpu
         let iopl = (cpu.eflags >> 12) & 3
-        let dpl = (gateHi >> 13) & 3
         from _ in iopl < 3 ? GeneralProtection(0)
-                : dpl < 3 ? GeneralProtection(((uint)vector << 3) | 2)
+                : gate.Dpl < 3 ? GeneralProtection(((uint)vector << 3) | 2)
                 : Interrupt(vector)
         select Unit.unit;
 
@@ -746,11 +746,8 @@ static public class Interrupts
                 diagnostics.LogInterrupt($"vec={vector:x2} err={(hasError ? errorCode.ToString("x") : "-")} at cs:eip={cpu.cs:x4}:{cpu.eip:x8} esp={cpu.esp:x8}",
                     fromV86: cpu.vm, env.Tsc, cpu.cr3);
         })
-        from gateLo in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryData32(env, cpu.idt_base + (uint)vector * 8))
-        from gateHi in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryData32(env, cpu.idt_base + (uint)vector * 8 + 4))
-        let offset = (gateHi & 0xFFFF0000) | (gateLo & 0xFFFF)
-        let sel = (ushort)(gateLo >> 16)
-        let gateType = (int)(gateHi >> 8) & 0xF
+        from gate in GetDataFromEnvCpu((env, cpu) =>
+            new Gate(EnvGetMemoryData32(env, cpu.idt_base + (uint)vector * 8), EnvGetMemoryData32(env, cpu.idt_base + (uint)vector * 8 + 4)))
         // 特権レベルが上がる(例: ring3 のユーザーモードから ring0 へ)ときは TSS の SS0:ESP0 へ
         // スタックを切り替え、旧 SS/ESP を先に積む(IRET で元へ戻る)。
         // V86 モードからの配送は VM を先に落として(以降のセグメントロードを記述子経由にする)、
@@ -760,7 +757,7 @@ static public class Interrupts
         let cpl = cpu0.cpl // VM を落とす前に評価する(V86 なら 3)
         let fl = cpu0.eflags
         from _vm in When(fromVm, _eflags.Modify(flags => flags & ~0x20000u))
-        from _sw in SwitchToInnerStack(sel, cpl, fromVm)
+        from _sw in SwitchToInnerStack(gate.Selector, cpl, fromVm)
         from _1 in Push(fl.ToTypeData())
         from cs in GetSRegData(1)
         from _2 in Push(((uint)cs).ToTypeData())
@@ -768,11 +765,11 @@ static public class Interrupts
         from _3 in Push(eip0.ToTypeData())
         // 一部の例外(#PF 等)は EIP の後ろにエラーコードを push する。
         from _e in When(hasError, Push(errorCode.ToTypeData()))
-        // 割り込みゲート(型 0xE)は IF をクリアする。トラップゲート(0xF)は保つ。
-        from _if in When(gateType == 0xE, _jf.Set(false))
+        // 割り込みゲートは IF をクリアする。トラップゲートは保つ。
+        from _if in When(gate.IsInterruptGate, _jf.Set(false))
         from _t in _tf.Set(false)
-        from _4 in _eip.Set(offset)
-        from _5 in LoadSReg(1, sel)
+        from _4 in _eip.Set(gate.Offset)
+        from _5 in LoadSReg(1, gate.Selector)
         select Unit.unit;
 
     // 割り込み/例外配送での特権レベル変化: CPL より目標 CS の RPL が小さければ
@@ -783,7 +780,7 @@ static public class Interrupts
         When(cpl > (targetCs & 3),
             from ctx in GetDataFromEnvCpu((env, cpu) =>
                 {
-                    var (tssBase, _) = EnvReadDescriptor(env, cpu, cpu.tr);
+                    var tssBase = EnvReadDescriptor(env, cpu, cpu.tr).Base;
                     var esp0 = EnvGetMemoryData32(env, tssBase + 4);
                     var ss0 = (ushort)EnvGetMemoryData32(env, tssBase + 8);
                     return (oldSs: cpu.ss, oldEsp: cpu.esp, ss0, esp0, cpu.es, cpu.ds, cpu.fs, cpu.gs);
@@ -864,13 +861,11 @@ static public class Interrupts
         var flags = EnvGetMemoryData32(env, stack + 8);
         if ((flags & 0x20000) != 0 && cpu.cpl == 0) return null;
         if ((cs & 0xFFFC) == 0) return 0;
-        var hi = EnvGetMemoryData32(env, cpu.gdt_base + (uint)(cs & 0xFFF8) + 4);
-        var type = (int)(hi >> 8) & 0x1F; // bit4=S, bit3=code, bit2=conforming
-        var dpl = (int)(hi >> 13) & 3;
+        // 種別と DPL は上位 dword にある(基底とリミットは見ないので下位は読まない)。
+        var target = new Descriptor(Low: 0, High: EnvGetMemoryData32(env, cpu.gdt_base + (uint)(cs & 0xFFF8) + 4));
         var rpl = cs & 3;
-        if ((type & 0x18) != 0x18 || rpl < cpu.cpl) return (uint)(cs & 0xFFFC);
-        var conforming = (type & 0x04) != 0;
-        return (conforming ? dpl > rpl : dpl != rpl) ? (uint)(cs & 0xFFFC) : null;
+        var allowed = target.IsCode && rpl >= cpu.cpl && (target.Conforming ? target.Dpl <= rpl : target.Dpl == rpl);
+        return allowed ? null : (uint)(cs & 0xFFFC);
     }
 
     // ring0 からの IRET で EFLAGS.VM=1 を積んでいた場合は V86 モードへ入る: さらに ESP, SS, ES, DS, FS, GS を
@@ -895,68 +890,95 @@ static public class Interrupts
         select Unit.unit;
 }
 
+// GDT の記述子(8 バイト。Low = 下位 dword、High = 上位 dword)。ビットの位置はここだけに書く。
+//   Low  : リミット 15:0、基底 15:0
+//   High : 基底 23:16、種別(bit8-11)、S(bit12)、DPL(bit13-14)、P(bit15)、リミット 19:16、D/B(bit22)、G(bit23)、基底 31:24
+readonly record struct Descriptor(uint Low, uint High)
+{
+    public uint Base => (Low >> 16) | ((High & 0xFF) << 16) | (High & 0xFF000000);
+
+    // リミット(G ビットが立っていれば 4K 単位を展開する)。
+    public uint Limit => Granular ? (RawLimit << 12) | 0xFFF : RawLimit;
+    uint RawLimit => (Low & 0xFFFF) | (High & 0x000F0000);
+    bool Granular => (High & 0x00800000) != 0;
+
+    // LAR が返すアクセス権(種別・S・DPL・P と、リミット 19:16・AVL・D/B・G)。
+    public uint AccessRights => High & 0x00FFFF00;
+
+    // D/B ビット: コードなら 32 ビットコード、スタックなら 32 ビットスタック。
+    public bool Default32 => (High & 0x00400000) != 0;
+
+    public int Dpl => (int)(High >> 13) & 3;
+
+    // S ビット: コード/データのセグメント(落ちていればシステム記述子)。
+    public bool IsSegment => (High & 0x1000) != 0;
+    public bool IsCode => IsSegment && (High & 0x0800) != 0;
+    public bool Conforming => IsCode && (High & 0x0400) != 0;
+
+    // コードなら読み出し可、データなら書き込み可。
+    public bool ReadableOrWritable => (High & 0x0200) != 0;
+
+    // システム記述子の種別: TSS(1, 3, 9, 11)、LDT(2)、コールゲート(4, 12)、タスクゲート(5)。
+    int SystemType => (int)(High >> 8) & 0x0F;
+    public bool IsTssOrLdt => !IsSegment && SystemType is 1 or 2 or 3 or 9 or 11;
+    public bool IsCallOrTaskGate => !IsSegment && SystemType is 4 or 5 or 12;
+}
+
+// IDT のゲート(8 バイト)。Low: 飛び先のオフセット 15:0 とセレクタ。High: 種別(bit8-11)、DPL(bit13-14)、オフセット 31:16。
+readonly record struct Gate(uint Low, uint High)
+{
+    public uint Offset => (High & 0xFFFF0000) | (Low & 0xFFFF);
+    public ushort Selector => (ushort)(Low >> 16);
+    public int Dpl => (int)(High >> 13) & 3;
+
+    // 割り込みゲート(種別 0xE)。トラップゲートは 0xF。
+    public bool IsInterruptGate => ((High >> 8) & 0xF) == 0xE;
+}
+
 // セグメント記述子の読み取り・照合と、セグメントレジスタのロード。
 static public class Segments
 {
-    // 記述子の照合(VERR/VERW/LAR/LSL): GDT のセレクタの記述子 8 バイトを返す。ヌルセレクタ、LDT(未対応)、GDT の範囲外は null。
-    static (uint lo, uint hi)? EnvDescriptorRaw(EmuEnvironment env, CPU cpu, ushort sel)
+    // GDT の記述子を読む(範囲や種別は検査しない: セグメントレジスタのロードと TSS の参照)。
+    static internal Descriptor EnvReadDescriptor(EmuEnvironment env, CPU cpu, ushort sel)
     {
-        if ((sel & 0xFFFC) == 0 || (sel & 4) != 0 || (sel & 0xFFF8) + 7 > cpu.gdt_limit) return null;
-        var off = cpu.gdt_base + (uint)(sel & 0xFFF8);
-        return (EnvGetMemoryData32(env, off), EnvGetMemoryData32(env, off + 4));
+        var offset = cpu.gdt_base + (uint)(sel & 0xFFF8);
+        return new(EnvGetMemoryData32(env, offset), EnvGetMemoryData32(env, offset + 4));
     }
 
-    // VERR/VERW: セレクタのセグメントが CPL と RPL から読める(書ける)か。システム記述子・実行専用(読み)・コードと読み取り専用(書き)は否。
-    // 非コンフォーミングのセグメントは DPL >= CPL かつ DPL >= RPL が要る。例外は出さず真偽だけ返す。
-    static internal bool EnvSegmentAccessible(EmuEnvironment env, CPU cpu, ushort sel, bool write)
-    {
-        if (EnvDescriptorRaw(env, cpu, sel) is not (_, var hi)) return false;
-        var access = (hi >> 8) & 0xFF;
-        if ((access & 0x10) == 0) return false;
-        var code = (access & 0x08) != 0;
-        var readableOrWritable = (access & 0x02) != 0;
-        if (write ? code || !readableOrWritable : code && !readableOrWritable) return false;
-        var conforming = code && (access & 0x04) != 0;
-        var dpl = (int)(access >> 5) & 3;
-        return conforming || (dpl >= cpu.cpl && dpl >= (sel & 3));
-    }
+    // 記述子の照合(VERR/VERW/LAR/LSL)で見る記述子。ヌルセレクタ、LDT(未対応)、GDT の範囲外は null。
+    static Descriptor? EnvFindDescriptor(EmuEnvironment env, CPU cpu, ushort sel) =>
+        (sel & 0xFFFC) == 0 || (sel & 4) != 0 || (sel & 0xFFF8) + 7 > cpu.gdt_limit ? null : EnvReadDescriptor(env, cpu, sel);
 
-    // LAR/LSL: アクセス権(hi の 0x00FFFF00)またはリミット(G ビットで 4K 単位を展開)。照合に通らなければ null。
-    // 許されるシステム記述子は LAR が TSS/LDT/コールゲート/タスクゲート、LSL が TSS/LDT。非コンフォーミングなら特権の検査も。
-    static internal uint? EnvDescriptorQuery(EmuEnvironment env, CPU cpu, ushort sel, bool limit)
-    {
-        if (EnvDescriptorRaw(env, cpu, sel) is not (var lo, var hi)) return null;
-        var access = (hi >> 8) & 0xFF;
-        var type = access & 0x0F;
-        if ((access & 0x10) == 0 && !(limit ? type is 1 or 2 or 3 or 9 or 11 : type is 1 or 2 or 3 or 4 or 5 or 9 or 11 or 12)) return null;
-        var conforming = (access & 0x18) == 0x18 && (access & 0x04) != 0;
-        var dpl = (int)(access >> 5) & 3;
-        if (!conforming && (dpl < cpu.cpl || dpl < (sel & 3))) return null;
-        if (!limit) return hi & 0x00FFFF00;
-        var segmentLimit = (lo & 0xFFFF) | (hi & 0x000F0000);
-        return (hi & 0x00800000) != 0 ? (segmentLimit << 12) | 0xFFF : segmentLimit;
-    }
+    // CPL と RPL から届く特権か。コンフォーミングのコードは常に届き、それ以外は DPL >= CPL かつ DPL >= RPL が要る。
+    static bool Reachable(Descriptor descriptor, CPU cpu, ushort sel) =>
+        descriptor.Conforming || (descriptor.Dpl >= cpu.cpl && descriptor.Dpl >= (sel & 3));
 
-    // GDT からセグメント記述子を読み、基底アドレスと D/B ビットを返す。
-    static internal (uint base_, bool d) EnvReadDescriptor(EmuEnvironment env, CPU cpu, ushort sel)
-    {
-        var off = cpu.gdt_base + (uint)(sel & 0xFFF8);
-        var lo = EnvGetMemoryData32(env, off);
-        var hi = EnvGetMemoryData32(env, off + 4);
-        var base_ = (lo >> 16) | ((hi & 0xFF) << 16) | (hi & 0xFF000000);
-        return (base_, (hi & 0x400000) != 0); // bit22 = D/B
-    }
+    // VERR/VERW: セレクタのセグメントが CPL と RPL から読める(書ける)か。システム記述子は否。読みは実行専用のコードが否、
+    // 書きはコードと読み取り専用のデータが否。例外は出さず真偽だけ返す。
+    static internal bool EnvSegmentAccessible(EmuEnvironment env, CPU cpu, ushort sel, bool write) =>
+        EnvFindDescriptor(env, cpu, sel) is { IsSegment: true } descriptor
+        && (write ? !descriptor.IsCode && descriptor.ReadableOrWritable : !descriptor.IsCode || descriptor.ReadableOrWritable)
+        && Reachable(descriptor, cpu, sel);
+
+    // LAR/LSL: アクセス権またはリミット。照合に通らなければ null。
+    // 許されるシステム記述子は LAR が TSS/LDT/コールゲート/タスクゲート、LSL が TSS/LDT。
+    static internal uint? EnvDescriptorQuery(EmuEnvironment env, CPU cpu, ushort sel, bool limit) =>
+        EnvFindDescriptor(env, cpu, sel) is { } descriptor
+        && (descriptor.IsSegment || descriptor.IsTssOrLdt || (!limit && descriptor.IsCallOrTaskGate))
+        && Reachable(descriptor, cpu, sel)
+            ? limit ? descriptor.Limit : descriptor.AccessRights
+            : null;
 
     // セグメントレジスタへのロード。
     // リアルモードは セレクタ*16 を基底に(セッタが自動設定)、
     // プロテクトモードは GDT 記述子から基底を読む。CS の場合は D ビットで code32 を更新する。
     static public State<Unit> LoadSReg(int reg, ushort sel) =>
-        from _1 in ArraySreg[reg].Set(sel)                                   // セレクタ(リアルモードの基底 セレクタ*16 はセッタが置く)
-        from descriptors in GetDataFromCpu(cpu => cpu.pe && !cpu.vm)         // V86 モードはリアルモードと同じく セレクタ*16
-        from descriptor in descriptors ? GetDataFromEnvCpu((env, cpu) => EnvReadDescriptor(env, cpu, sel)) : default((uint base_, bool d)).ToState()
-        from _2 in When(descriptors, ArraySregBase[reg].Set(descriptor.base_))
-        from _3 in When(reg == 1, Effect(cpu => cpu.code32 = descriptor.d))  // CS: D ビットで 32 ビットコードか決まる(リアルモードは 16 ビット)
-        from _4 in When(reg == 2, Effect(cpu => cpu.stack32 = descriptor.d)) // SS: B ビットで 32 ビットスタックか決まる
+        from _1 in ArraySreg[reg].Set(sel)                                           // セレクタ(リアルモードの基底 セレクタ*16 はセッタが置く)
+        from descriptors in GetDataFromCpu(cpu => cpu.pe && !cpu.vm)                 // V86 モードはリアルモードと同じく セレクタ*16
+        from descriptor in descriptors ? GetDataFromEnvCpu((env, cpu) => EnvReadDescriptor(env, cpu, sel)) : default(Descriptor).ToState()
+        from _2 in When(descriptors, ArraySregBase[reg].Set(descriptor.Base))
+        from _3 in When(reg == 1, Effect(cpu => cpu.code32 = descriptor.Default32))  // CS: D ビットで 32 ビットコードか決まる(リアルモードは 16 ビット)
+        from _4 in When(reg == 2, Effect(cpu => cpu.stack32 = descriptor.Default32)) // SS: B ビットで 32 ビットスタックか決まる
         select Unit.unit;
 
     // MOV Sreg, r/m は常に下位16ビットのみロードする

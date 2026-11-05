@@ -3,6 +3,8 @@ using Emu86;
 
 // 差分実行ハーネス(README.md)。同じ命令列・同じ初期状態を通常コア(Instructions.Execute2 = 翻訳なしの InstructionExecutor)で
 // 1 命令だけ実行し、CPU(スナップショット形式。FPU スタックと TR/LDTR を含む)・メモリ・I/O ポート・MSR・DR の結果を 1 ケース 1 行で書き出す。
+// 続けて、特権レベルと記述子の内容で分かれる場面(Scenes)を同じ形の行で、末尾には、命令の実行ではない固定の結果
+// (ROM、PCI コンフィグ空間、モード設定後の BIOS データ領域、IDENTIFY)を "table ..." の行で足す。
 // Compare.ps1 が基準コミットの本体と作業ツリーの本体に対してこれを 2 回ビルド・実行し、出力を比べる。
 // 使い方: Emu86.Tests.exe [出力ファイル](省略時は標準出力へ)
 static class Diff
@@ -15,7 +17,7 @@ static class Diff
             from mode in new[] { "real", "pm32" }
             from preset in new[] { 0, 1 }
             from code in Cases(mode)
-            select Run(mode, preset, code)).ToList();
+            select Run(mode, preset, code)).Concat(Scenes()).Concat(Tables()).ToList();
         if (args.Length == 0)
         {
             foreach (var line in lines) Console.WriteLine(line);
@@ -35,6 +37,8 @@ static class Diff
         // [bx+disp8] / [ebx+disp8] (mod=1)
         byte[] Mem8(int reg, byte disp) => [(byte)(0x40 | (reg << 3) | (m32 ? 3 : 7)), disp];
         byte[] Disp16or32(uint v) => m32 ? [(byte)v, (byte)(v >> 8), (byte)(v >> 16), (byte)(v >> 24)] : [(byte)v, (byte)(v >> 8)];
+        // [bx+disp16] / [ebx+disp32] (mod=2)
+        byte[] MemDisp(int reg, uint disp) => [(byte)(0x80 | (reg << 3) | (m32 ? 3 : 7)), .. Disp16or32(disp)];
 
         List<byte[]> list =
         [
@@ -114,6 +118,13 @@ static class Diff
             [0x0F, 0x00, Mem(0)], [0x0F, 0x00, Mem(1)], [0x0F, 0x00, Mem(2)], [0x0F, 0x00, Mem(3)], [0x0F, 0x00, Mem(4)], [0x0F, 0x00, Mem(5)],
             [0x0F, 0x00, .. Mem8(2, 2)], [0x0F, 0x00, .. Mem8(3, 2)], [0x0F, 0x00, .. Mem8(4, 2)], [0x0F, 0x00, .. Mem8(5, 2)], [0x66, 0x0F, 0x00, 0xC3], [0x66, 0x0F, 0x00, 0xCB],
             [0x0F, 0x02, 0xC3], [0x0F, 0x03, 0xC3], [0x0F, 0x02, .. Mem8(0, 2)], [0x0F, 0x03, .. Mem8(0, 2)], [0x66, 0x0F, 0x02, .. Mem8(0, 2)], [0x66, 0x0F, 0x03, .. Mem8(0, 2)],
+            // 記述子の照合: Selectors の各セレクタ([bx+0x200+2k] に並べてある)を VERR、VERW、LAR、LSL に通す
+            .. (from slot in Enumerable.Range(0, Selectors.Length)
+                let disp = 0x200u + 2 * (uint)slot
+                from code in new byte[][] { [0x0F, 0x00, .. MemDisp(4, disp)], [0x0F, 0x00, .. MemDisp(5, disp)], [0x0F, 0x02, .. MemDisp(0, disp)], [0x0F, 0x03, .. MemDisp(0, disp)] }
+                select code),
+            // トラップゲート(型 0xF)経由の INT: IF を保つ
+            [0xCD, 0x22],
             // FPU: 環境と全体の保存・復元、制御/状態ワード、初期化
             [0xD9, Mem(4)], [0xD9, Mem(5)], [0xD9, Mem(6)], [0xD9, Mem(7)], [0xDD, Mem(4)], [0xDD, Mem(6)], [0xDD, Mem(7)], [0xDF, 0xE0], [0xDB, 0xE2], [0xDB, 0xE3], [0x9B],
             // FPU: メモリ形式のロード/ストアと算術(D8 = f32、DA = int32、DC = f64、DE = int16)
@@ -132,8 +143,102 @@ static class Diff
         return list;
     }
 
+    // 記述子の照合(VERR/VERW/LAR/LSL)に通すセレクタ。GDT(Run が置く 16 項)の各種の記述子を、RPL を変えて指す。
+    //   00 ヌル、08 コード、10 データ、18 コード DPL3、20 データ DPL3、28 16 ビットコード、30 コンフォーミング、38 実行専用、40 読み取り専用データ、
+    //   48 TSS、50 LDT、58 コールゲート DPL3、60 タスクゲート、68 割り込みゲート、70 不在のデータ、78 コンフォーミング DPL3(バイト単位のリミット)。
+    //   80 と FFF8 は GDT の外、0C は LDT を指すセレクタ(TI=1)。
+    static readonly ushort[] Selectors =
+    [
+        0x0000, 0x0003, 0x0008, 0x000B, 0x0010, 0x0013, 0x0018, 0x001B, 0x0023, 0x0028, 0x0030, 0x0033, 0x0038, 0x0040,
+        0x0048, 0x0050, 0x0058, 0x005B, 0x0060, 0x0068, 0x0070, 0x0078, 0x007B, 0x0080, 0x000C, 0xFFF8,
+    ];
+
+    // 特権レベルと記述子の内容で分かれる経路。pm32 の状態(preset 0)から、場面ごとに CPL・スタックの枠・GDT の項を置き換えて 1 命令実行する。
+    //   iret : 32 ビット IRET の復帰先 CS の検査(ヌル、データ、システム記述子、DPL と RPL の組、コンフォーミング、CPL 3 から、V86 への復帰)
+    //   cpl3 / v86 : リング 3 と V86 モードからの INT(TSS の SS0:ESP0 へのスタック切り替え、ゲートの DPL と IOPL の検査)と IRET、フラグ操作。
+    //                リング 3 からは記述子の照合(VERR/VERW/LAR/LSL)も
+    //   load : 基底が 0 でない記述子と D/B ビットが落ちた記述子を、DS・SS・FS・CS へロードする
+    static IEnumerable<string> Scenes()
+    {
+        static void Dwords(EmuEnvironment env, int address, params uint[] values)
+        {
+            for (var i = 0; i < values.Length; i++) BitConverter.GetBytes(values[i]).CopyTo(env.Ram, address + i * 4);
+        }
+        // TR = 0x48(GDT の TSS の基底は 0x7000。ESP0 = 0x9000、SS0 = 0x10)
+        static void Tss(EmuEnvironment env, CPU cpu)
+        {
+            cpu.tr = 0x48;
+            Dwords(env, 0x7000, 0, 0x00009000, 0x00000010);
+        }
+        static void Ring3(EmuEnvironment env, CPU cpu)
+        {
+            Tss(env, cpu);
+            CPU._cs.setter(cpu)(0x1B); cpu.cs_base = 0;
+            CPU._ss.setter(cpu)(0x23); cpu.ss_base = 0;
+        }
+        // V86 モード: セグメントは セレクタ*16(CS = SS = DS = ES = 0、FS = 0x100、GS = 0x200)、コードもスタックも 16 ビット。
+        static void V86(EmuEnvironment env, CPU cpu, uint iopl)
+        {
+            Tss(env, cpu);
+            cpu.eflags = 0x00020202 | (iopl << 12);
+            foreach (var segment in new[] { CPU._cs, CPU._ss, CPU._ds, CPU._es }) segment.setter(cpu)(0);
+            CPU._fs.setter(cpu)(0x0100);
+            CPU._gs.setter(cpu)(0x0200);
+            cpu.code32 = false; cpu.stack32 = false;
+        }
+
+        // IRET の枠: EIP、CS、EFLAGS、ESP、SS、(V86 への復帰で)ES、DS、FS、GS。
+        var iret =
+            from target in new (ushort cs, uint flags, bool ring3)[]
+            {
+                (0x0000, 0x0202, false), (0x0003, 0x0202, false), (0x0008, 0x0202, false), (0x000B, 0x0202, false), (0x0010, 0x0202, false),
+                (0x0018, 0x0202, false), (0x001B, 0x0202, false), (0x0030, 0x0202, false), (0x0033, 0x0202, false), (0x0038, 0x0202, false),
+                (0x0048, 0x0202, false), (0x0068, 0x0202, false), (0x0070, 0x0202, false), (0x0078, 0x0202, false), (0x007B, 0x0202, false),
+                (0x0000, 0x00023202, false), (0x0008, 0x00023202, false),
+                (0x0008, 0x0202, true), (0x001B, 0x0202, true), (0x0033, 0x0202, true), (0x007B, 0x0202, true), (0x0000, 0x00023202, true), (0x001B, 0x00023202, true),
+            }
+            select Run("pm32", 0, [0xCF], $"iret cs={target.cs:x4} fl={target.flags:x} {(target.ring3 ? "cpl3" : "cpl0")}", (env, cpu) =>
+            {
+                Dwords(env, 0x8000, 0x00001234, target.cs, target.flags, 0x00007000, 0x00000023, 0x0100, 0x0200, 0x0300, 0x0400);
+                if (target.ring3) Ring3(env, cpu);
+            });
+
+        var interrupts =
+            from scene in new (string name, Action<EmuEnvironment, CPU> setup)[]
+            {
+                ("cpl3", Ring3),
+                ("v86 iopl3", (env, cpu) => V86(env, cpu, 3)),
+                ("v86 iopl0", (env, cpu) => V86(env, cpu, 0)),
+            }
+            from code in new byte[][] { [0xCD, 0x21], [0xCD, 0x22], [0xCD, 0x23], [0xCC], [0xCF], [0x9C], [0x9D], [0xFA], [0xFB] }
+            select Run("pm32", 0, code, scene.name, scene.setup);
+
+        var loads =
+            from descriptor in new (string name, uint low, uint high)[]
+            {
+                ("load base", 0x5678FFFF, 0x12CF9234),  // 基底 0x12345678、32 ビット
+                ("load 16bit", 0x3000FFFF, 0x00009200), // 基底 0x00003000、D/B = 0
+            }
+            from code in new byte[][] { [0x8E, 0xD8], [0x8E, 0xD0], [0x8E, 0xE0], [0xEA, 0x00, 0x10, 0x00, 0x00, 0x40, 0x00], [0x9A, 0x00, 0x10, 0x00, 0x00, 0x40, 0x00] }
+            select Run("pm32", 0, code, descriptor.name, (env, cpu) =>
+            {
+                Dwords(env, 0x5000 + 0x40, descriptor.low, descriptor.high);
+                cpu.eax = 0x40;
+            });
+
+        // 記述子の照合を CPL 3 から(DPL >= CPL の検査が効く): Selectors の各セレクタを VERR、VERW、LAR、LSL に通す。
+        var checks =
+            from slot in Enumerable.Range(0, Selectors.Length)
+            let disp = 0x200 + 2 * slot
+            from code in new byte[][] { [0x0F, 0x00, 0xA3], [0x0F, 0x00, 0xAB], [0x0F, 0x02, 0x83], [0x0F, 0x03, 0x83] } // [ebx+disp32]
+            select Run("pm32", 0, [.. code, (byte)disp, (byte)(disp >> 8), 0, 0], "cpl3", Ring3);
+
+        return iret.Concat(interrupts).Concat(loads).Concat(checks);
+    }
+
     // 1 ケース: 64KB の環境に命令列・データ・スタック・GDT・IVT/IDT を置き、決まったレジスタで 1 命令実行して結果を 1 行にする。
-    static string Run(string mode, int preset, byte[] code)
+    // scene があれば、実行の直前に setup で状態を置き換える(行の先頭に scene の名前が入る)。
+    static string Run(string mode, int preset, byte[] code, string scene = null, Action<EmuEnvironment, CPU> setup = null)
     {
         var env = new EmuEnvironment(memory: new byte[0x10000]);
         var ram = env.Ram;
@@ -144,6 +249,8 @@ static class Diff
         BitConverter.GetBytes(0x00001000u).CopyTo(ram, 0x3000);
         BitConverter.GetBytes((ushort)0x0008).CopyTo(ram, 0x3004);
         BitConverter.GetBytes((ushort)0x0008).CopyTo(ram, 0x3002); // 16 ビット far ポインタの selector
+        // 0x3200-: 記述子の照合に使うセレクタの表。
+        for (var i = 0; i < Selectors.Length; i++) BitConverter.GetBytes(Selectors[i]).CopyTo(ram, 0x3200 + 2 * i);
         // スタック 0x8000-: 戻り番地・CS(RPL 3)・外側スタックの ESP/SS、以降はパターン。
         for (var i = 0; i < 0x100; i++) ram[0x8000 + i] = (byte)(i * 3 + 7);
         if (preset == 0)
@@ -160,12 +267,19 @@ static class Diff
             BitConverter.GetBytes((ushort)0x0008).CopyTo(ram, 0x8002);
             BitConverter.GetBytes((ushort)0x0202).CopyTo(ram, 0x8004);
         }
-        // GDT at 0x5000: 08=code32, 10=data32, 18=code32 DPL3, 20=data32 DPL3, 28=code16
-        uint[] gdt = [0, 0, 0x0000FFFF, 0x00CF9A00, 0x0000FFFF, 0x00CF9200, 0x0000FFFF, 0x00CFFA00, 0x0000FFFF, 0x00CFF200, 0x0000FFFF, 0x008F9A00];
+        // GDT at 0x5000(16 項、下位 dword・上位 dword の順): 08=code32, 10=data32, 18=code32 DPL3, 20=data32 DPL3, 28=code16、
+        // 30 以降は記述子の照合用(Selectors の説明を参照)。
+        uint[] gdt =
+        [
+            0, 0, 0x0000FFFF, 0x00CF9A00, 0x0000FFFF, 0x00CF9200, 0x0000FFFF, 0x00CFFA00, 0x0000FFFF, 0x00CFF200, 0x0000FFFF, 0x008F9A00,
+            0x0000FFFF, 0x00CF9E00, 0x0000FFFF, 0x00CF9800, 0x0000FFFF, 0x00CF9000, 0x70000067, 0x00008900, 0x00000FFF, 0x00008200,
+            0x00081234, 0x0000EC00, 0x00480000, 0x00008500, 0x00080300, 0x00008E00, 0x0000FFFF, 0x00CF1200, 0x00002345, 0x0041FE00,
+        ];
         for (var i = 0; i < gdt.Length; i++) BitConverter.GetBytes(gdt[i]).CopyTo(ram, 0x5000 + i * 4);
-        // IVT: ベクタ 3/0x21 を 0x0100:0x0200 へ。
+        // IVT: ベクタ 3/0x21 を 0x0100:0x0200 へ、0x22 を 0x0100:0x0300 へ。
         BitConverter.GetBytes(0x01000200u).CopyTo(ram, 3 * 4);
         BitConverter.GetBytes(0x01000200u).CopyTo(ram, 0x21 * 4);
+        BitConverter.GetBytes(0x01000300u).CopyTo(ram, 0x22 * 4);
         for (var i = 0; i < 8; i++) { env.IoPort[0x10 + i] = (byte)(0xA0 + i); env.IoPort[0x200 + i] = (byte)(0xB0 + i); }
         env.Tsc = 0x1122334455667788;
         env.Msrs[0x10] = 0x0123456789ABCDEF;
@@ -199,14 +313,19 @@ static class Diff
         if (mode == "pm32")
         {
             CPU._cr0.setter(cpu)(1);
-            cpu.gdt_base = 0x5000; cpu.gdt_limit = 0x2F;
+            cpu.gdt_base = 0x5000; cpu.gdt_limit = 0x7F;
             cpu.idt_base = 0x6000; cpu.idt_limit = 0x7FF;
-            // IDT: ベクタ 3/0x21 を 0008:00000300 の割り込みゲートへ。
+            // IDT: ベクタ 3/0x21 を 0008:00000300 の割り込みゲートへ、0x22 を 0008:00000400 のトラップゲートへ、
+            // 0x23 を 0008:12340500 の割り込みゲート(DPL 3: V86 モードの INT n が通る)へ。
             foreach (var vector in new[] { 3, 0x21 })
             {
                 BitConverter.GetBytes(0x00080300u).CopyTo(ram, 0x6000 + vector * 8);
                 BitConverter.GetBytes(0x00008E00u).CopyTo(ram, 0x6000 + vector * 8 + 4);
             }
+            BitConverter.GetBytes(0x00080400u).CopyTo(ram, 0x6000 + 0x22 * 8);
+            BitConverter.GetBytes(0x00008F00u).CopyTo(ram, 0x6000 + 0x22 * 8 + 4);
+            BitConverter.GetBytes(0x00080500u).CopyTo(ram, 0x6000 + 0x23 * 8);
+            BitConverter.GetBytes(0x1234EE00u).CopyTo(ram, 0x6000 + 0x23 * 8 + 4);
             CPU._cs.setter(cpu)(0x08); cpu.cs_base = 0; cpu.code32 = true;
             CPU._ss.setter(cpu)(0x10); cpu.ss_base = 0; cpu.stack32 = true;
             CPU._ds.setter(cpu)(0x10); cpu.ds_base = 0;
@@ -220,6 +339,7 @@ static class Diff
             CPU._gs.setter(cpu)(0x0200);
         }
         cpu.eip = 0;
+        setup?.Invoke(env, cpu);
         env.Paging.Sync(cpu);
 
         string result;
@@ -242,6 +362,43 @@ static class Diff
         var ports = Convert.ToHexString(SHA256.HashData(env.IoPort))[..16];
         var msrs = string.Join(",", env.Msrs.OrderBy(pair => pair.Key).Select(pair => $"{pair.Key:x}={pair.Value:x}"));
         var dr = string.Join(",", env.Dr.Select(value => value.ToString("x")));
-        return $"{mode} p{preset} {Convert.ToHexString(code)}: {result} cpu={state} mem={memory} io={ports} msr={msrs} dr={dr}";
+        return $"{mode} p{preset} {(scene == null ? "" : $"[{scene}] ")}{Convert.ToHexString(code)}: {result} cpu={state} mem={memory} io={ports} msr={msrs} dr={dr}";
+    }
+
+    // 命令の実行ではない固定の結果を 1 項 1 行で: VGA BIOS の ROM、PCI コンフィグ空間の初期値、
+    // モード設定後の BIOS データ領域(0x400-0x4FF)と VGA の状態、ATA の IDENTIFY の応答。
+    static List<string> Tables()
+    {
+        static byte[] Saved(Action<BinaryWriter> save)
+        {
+            using var stream = new MemoryStream();
+            using var writer = new BinaryWriter(stream);
+            save(writer);
+            writer.Flush();
+            return stream.ToArray();
+        }
+
+        var lines = new List<string> { $"table rom: {Convert.ToHexString(VgaBiosStub.Rom)}" };
+        using (var env = new EmuEnvironment(memory: new byte[0x100000]))
+            lines.Add($"table pci: {Convert.ToHexString(Saved(env.Pci.SaveState))}");
+        foreach (var mode in new[] { 0x03, 0x12, 0x13, 0x83, 0x0D, 0x6A, 0x01 })
+        {
+            using var env = new EmuEnvironment(memory: new byte[0x100000]);
+            for (var i = 0; i < 0x100; i++) env.Ram[0x400 + i] = (byte)(i * 3 + 1); // 書かない番地が変わらないことも見る
+            VgaBiosStub.SetMode(env, mode);
+            var vga = Convert.ToHexString(SHA256.HashData(Saved(env.Vga.SaveState)));
+            lines.Add($"table mode {mode:x2}: bda={Convert.ToHexString(env.Ram, 0x400, 0x100)} vga={vga}");
+        }
+        // IDENTIFY: 4MB の生イメージをつないだ ATA デバイスにコマンドを出し、応答の 512 バイトを読む。
+        var image = Path.Combine(Path.GetTempPath(), $"emu86-diff-{Guid.NewGuid():N}.img");
+        File.WriteAllBytes(image, new byte[4 << 20]);
+        try
+        {
+            using var ata = new AtaDevice(new DiskImage(image));
+            ata.WriteReg(0x1F7, 0xEC);
+            lines.Add($"table identify: {Convert.ToHexString([.. Enumerable.Range(0, 512).Select(_ => (byte)ata.ReadData(1))])}");
+        }
+        finally { File.Delete(image); }
+        return lines;
     }
 }

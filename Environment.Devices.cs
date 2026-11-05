@@ -42,5 +42,4 @@ public partial class EmuEnvironment
     public ushort Pm1Cnt { get => Acpi.Pm1Cnt; set => Acpi.Pm1Cnt = value; }
     public ushort Gpe0Sts { get => Acpi.Gpe0Sts; set => Acpi.Gpe0Sts = value; }
     public ushort Gpe0En { get => Acpi.Gpe0En; set => Acpi.Gpe0En = value; }
-    public uint PmTimer => Acpi.Timer(Tsc);
 }

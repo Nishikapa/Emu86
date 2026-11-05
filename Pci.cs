@@ -1,6 +1,7 @@
 namespace Emu86;
 
 using System.Buffers.Binary;
+using static Emu86.Writers;
 
 // 最小限の PCI ホスト(コンフィグ機構 #1: ポート 0xCF8 CONFIG_ADDRESS / 0xCFC CONFIG_DATA)。
 // Linux の ata_piix ドライバを bind させるだけの目的で、QEMU/Bochs 相当の
@@ -60,74 +61,69 @@ public class PciHost
         UpdateLfbBase();
     }
 
-    // PIIX3 IDE のバスマスタ I/O ベース(BAR4)。SeaBIOS/OS が割り当て直す。
-    public uint IdeBmBase
-    {
-        get
-        {
-            var v = BinaryPrimitives.ReadUInt32LittleEndian(cfg[(1 << 3) | 1].AsSpan(0x20));
-            return (v & 1) != 0 ? v & 0xFFF0 : 0;
-        }
-    }
+    // ファンクションのキー(dev<<3 | fn)。
+    static int Key(int device, int function) => (device << 3) | function;
 
+    const int IdeKey = (1 << 3) | 1;
+    public const int VgaKey = 2 << 3;
+
+    // コンフィグ空間の dword レジスタ(BAR など)。
+    uint Register(int key, int offset) => BinaryPrimitives.ReadUInt32LittleEndian(cfg[key].AsSpan(offset));
+
+    // PIIX4 IDE のバスマスタ I/O ベース(BAR4)。SeaBIOS/OS が割り当て直す。
+    public uint IdeBmBase => Register(IdeKey, 0x20) is var bar && (bar & 1) != 0 ? bar & 0xFFF0 : 0;
+
+    // 各ファンクションのコンフィグ空間(Function: 共通ヘッダ + そのデバイスの項目。At はコンフィグ空間の先頭からの位置)。
     public PciHost()
     {
         // 00:00.0 Intel 440FX ホストブリッジ
-        cfg[(0 << 3) | 0] = Make(0x8086, 0x1237, baseClass: 0x06, subClass: 0x00, progIf: 0x00, header: 0x00);
+        cfg[Key(0, 0)] = Function(0x8086, 0x1237, baseClass: 0x06, subClass: 0x00, progIf: 0x00, header: 0x00, revision: 0x02);
         // 00:01.0 PIIX4 ISA ブリッジ(マルチファンクション: header bit7=1 で fn1/fn3 も走査させる)
         // 00:01.1 PIIX4 IDE(mass storage / IDE / prog-if=0x80: 両チャネル互換モード + バスマスタ能力)
         // デバイス ID は PIIX3(7000/7010)ではなく PIIX4(7110/7111)にする。Windows XP のディスクイメージ
         // (Virtual PC 由来)の CriticalDeviceDatabase には pci#ven_8086&dev_7111 -> intelide しか無く、
         // 7010 だとブート時にドライバが結び付かず INACCESSIBLE_BOOT_DEVICE(0x7B)になるため。
         // SeaBIOS/Linux はどちらの ID でも同じ扱い(piix_isa_setup / piix_ide_setup / ata_piix)。
-        cfg[(1 << 3) | 0] = Make(0x8086, 0x7110, baseClass: 0x06, subClass: 0x01, progIf: 0x00, header: 0x80);
-        cfg[(1 << 3) | 0][0x08] = 0x01; // リビジョン(PIIX4)
-        cfg[(1 << 3) | 1] = Make(0x8086, 0x7111, baseClass: 0x01, subClass: 0x01, progIf: 0x80, header: 0x00);
-        cfg[(1 << 3) | 1][0x08] = 0x01;
+        // 割り込み: IDE はレガシー IRQ14/15 を使うため PCI INTx は使わない(pin=0)。
+        cfg[Key(1, 0)] = Function(0x8086, 0x7110, baseClass: 0x06, subClass: 0x01, progIf: 0x00, header: 0x80, revision: 0x01);
         // IDE BAR4: バスマスタ IDE レジスタ(I/O、16 バイト)。Windows の pciidex は資源リストが
         // 空だと FDO の開始に失敗するため、レジスタ自体はほぼダミーでも BAR として露出する。
-        BinaryPrimitives.WriteUInt32LittleEndian(cfg[(1 << 3) | 1].AsSpan(0x20), 0xC001);
-        barMask[((1 << 3) | 1, 0x20)] = 0xFFFFFFF0;
+        cfg[IdeKey] = Function(0x8086, 0x7111, baseClass: 0x01, subClass: 0x01, progIf: 0x80, header: 0x00, revision: 0x01,
+            At(0x20, U32(0xC001)));         // BAR4(bit0 = I/O 空間)
+        barMask[(IdeKey, 0x20)] = 0xFFFFFFF0;
         // 00:01.3 PIIX4 電源管理(ACPI)。SeaBIOS はこのデバイスを見つけたときだけ
         // ACPI テーブル(RSDP/RSDT/FADT/DSDT…)を生成する。Windows の ACPI HAL(halacpi)は
         // ACPI テーブルが無いと MISMATCHED_HAL(0x79) でバグチェックするため必須。
         // PM I/O ブロックは 0xB000、SMBus は 0xB100(QEMU の PIIX4 と同じ配置)。
-        var pm = Make(0x8086, 0x7113, baseClass: 0x06, subClass: 0x80, progIf: 0x00, header: 0x00);
-        pm[0x08] = 0x03;                                             // リビジョン
-        pm[0x3D] = 0x01;                                             // 割り込みピン INTA(SCI)
-        BinaryPrimitives.WriteUInt32LittleEndian(pm.AsSpan(0x40), 0xB001); // PMBA(bit0=I/O 空間)
-        pm[0x80] = 0x01;                                             // PMREGMISC: PM I/O 有効
-        BinaryPrimitives.WriteUInt32LittleEndian(pm.AsSpan(0x90), 0xB101); // SMBBA
-        pm[0xD2] = 0x09;                                             // SMBus ホスト有効
         // DEVACTB(0x58) bit25 = APMC_EN。SeaBIOS はこれが立っていると「SMM 初期化済み」と
         // みなして SMM の再配置(APM ポート 0xB2/0xB3 経由の SMI 待ち)を省略する。
         // SMM は未実装なので、待ちに入ると永久にループするため最初から立てておく。
-        BinaryPrimitives.WriteUInt32LittleEndian(pm.AsSpan(0x58), 0x02000000);
-        cfg[(1 << 3) | 3] = pm;
+        cfg[Key(1, 3)] = Function(0x8086, 0x7113, baseClass: 0x06, subClass: 0x80, progIf: 0x00, header: 0x00, revision: 0x03,
+            At(0x3D, U8(0x01)),             // 割り込みピン INTA(SCI)
+            At(0x40, U32(0xB001)),          // PMBA(bit0 = I/O 空間)
+            At(0x58, U32(0x02000000)),      // DEVACTB: APMC_EN
+            At(0x80, U8(0x01)),             // PMREGMISC: PM I/O 有効
+            At(0x90, U32(0xB101)),          // SMBBA
+            At(0xD2, U8(0x09)));            // SMBus ホスト有効
         // 00:02.0 VGA 互換ディスプレイ(QEMU の標準 VGA と同じ 1234:1111)。SeaBIOS はこのクラスのデバイスを
         // 見つけると拡張 ROM BAR(0x30)から VGA BIOS を 0xC0000 へ取り込んで実行し、画面出力を有効にする。
         // ROM は VgaBiosStub(64KB 窓、実体は 2KB)。BAR0 は Bochs VBE の線形フレームバッファ(16MB、プリフェッチ可能なメモリ空間。
         // SeaBIOS/OS が番地を割り当て、Environment は RAM 外のアクセスをこの範囲で VgaDevice.Lfb へ振り分ける)。
         // XP の vga.sys は旧来の VGA 窓を使い、Linux の bochs_drm はこの BAR を使う。
-        cfg[VgaKey] = Make(0x1234, 0x1111, baseClass: 0x03, subClass: 0x00, progIf: 0x00, header: 0x00);
-        BinaryPrimitives.WriteUInt32LittleEndian(cfg[VgaKey].AsSpan(0x10), 0x00000008); // bit3 = プリフェッチ可能
+        cfg[VgaKey] = Function(0x1234, 0x1111, baseClass: 0x03, subClass: 0x00, progIf: 0x00, header: 0x00, revision: 0x02,
+            At(0x10, U32(0x00000008)));     // BAR0(bit3 = プリフェッチ可能)
         barMask[(VgaKey, 0x10)] = 0xFF000000; // 16MB
         barMask[(VgaKey, 0x30)] = 0xFFFF0001; // 64KB、bit0 = ROM デコード有効
     }
 
-    public const int VgaKey = 2 << 3;
-
     // VGA の BAR0(線形フレームバッファ)の物理アドレス(0 = 未割り当て)。コンフィグ書き込みと状態の読み込みで更新する。
     public uint LfbBase { get; private set; }
 
-    void UpdateLfbBase() => LfbBase = BinaryPrimitives.ReadUInt32LittleEndian(cfg[VgaKey].AsSpan(0x10)) & 0xFF000000;
+    void UpdateLfbBase() => LfbBase = Register(VgaKey, 0x10) & 0xFF000000;
 
     // VGA の拡張 ROM BAR が有効なら、その 64KB 窓の物理アドレス範囲に VgaBiosStub.Rom を見せる。
-    public bool RomContains(uint physical)
-    {
-        var bar = BinaryPrimitives.ReadUInt32LittleEndian(cfg[VgaKey].AsSpan(0x30));
-        return (bar & 1) != 0 && physical - (bar & 0xFFFF0000) < 0x10000;
-    }
+    public bool RomContains(uint physical) =>
+        Register(VgaKey, 0x30) is var bar && (bar & 1) != 0 && physical - (bar & 0xFFFF0000) < 0x10000;
 
     public byte RomRead(uint physical)
     {
@@ -135,23 +131,19 @@ public class PciHost
         return offset < VgaBiosStub.Rom.Length ? VgaBiosStub.Rom[offset] : (byte)0xFF;
     }
 
-    static byte[] Make(ushort vendor, ushort device, byte baseClass, byte subClass, byte progIf, byte header)
-    {
-        var c = new byte[256];
-        BinaryPrimitives.WriteUInt16LittleEndian(c.AsSpan(0x00), vendor);
-        BinaryPrimitives.WriteUInt16LittleEndian(c.AsSpan(0x02), device);
-        // コマンド: I/O 空間 + メモリ空間 + バスマスタを有効化済みにしておく。
-        BinaryPrimitives.WriteUInt16LittleEndian(c.AsSpan(0x04), 0x0007);
-        // ステータス: DEVSEL=medium(0x0200)。
-        BinaryPrimitives.WriteUInt16LittleEndian(c.AsSpan(0x06), 0x0200);
-        c[0x08] = 0x02;      // リビジョン
-        c[0x09] = progIf;
-        c[0x0A] = subClass;
-        c[0x0B] = baseClass;
-        c[0x0E] = header;
-        // 割り込み: IDE はレガシー IRQ14/15 を使うため PCI INTx は使わない(pin=0)。
-        return c;
-    }
+    // コンフィグ空間(256 バイト)。共通ヘッダに、デバイスごとの項目(extra)を続ける。
+    static byte[] Function(ushort vendor, ushort device, byte baseClass, byte subClass, byte progIf, byte header, byte revision, params Writer[] extra) => Sequence(
+        At(0x00, U16(vendor)),
+        At(0x02, U16(device)),
+        At(0x04, U16(0x0007)),              // コマンド: I/O 空間 + メモリ空間 + バスマスタを有効化済みにしておく
+        At(0x06, U16(0x0200)),              // ステータス: DEVSEL=medium
+        At(0x08, U8(revision)),
+        At(0x09, U8(progIf)),
+        At(0x0A, U8(subClass)),
+        At(0x0B, U8(baseClass)),
+        At(0x0E, U8(header)),               // ヘッダ種別(bit7 = マルチファンクション)
+        Sequence(extra))
+        .Build(256);
 
     // CONFIG_ADDRESS の分解: enable(bit31)、bus(23:16)、dev(15:11)、fn(10:8)、reg(7:2 = dword 境界のレジスタ番号)。
     (bool enabled, int bus, int dev, int fn, int reg) Decoded =>
@@ -162,7 +154,7 @@ public class PciHost
     {
         var (enabled, bus, dev, fn, register) = Decoded;
         reg = register;
-        return enabled && bus == 0 && cfg.TryGetValue((dev << 3) | fn, out var c) ? c : null;
+        return enabled && bus == 0 && cfg.TryGetValue(Key(dev, fn), out var c) ? c : null;
     }
 
     // CONFIG_DATA 読み出し。存在しないデバイスは 0xFFFF...(ベンダ ID = 0xFFFF)。
@@ -181,7 +173,7 @@ public class PciHost
         return v;
     }
 
-    int KeyOf() => (Decoded.dev << 3) | Decoded.fn;
+    int KeyOf() => Key(Decoded.dev, Decoded.fn);
 
     string Bdf() => $"{Decoded.bus:x2}:{Decoded.dev:x2}.{Decoded.fn}";
 
