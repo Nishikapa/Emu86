@@ -70,6 +70,13 @@ dotnet run --project tests/Emu86.Tests -c Release -- core/fpu vga/palette
 
 `core` は通常コアと IR（解釈器・コンパイル済み）の状態一致、`state` は CPU 状態更新・オペランド幅選択・制御レジスタ同期、`devices` は周辺デバイスの入出力と分離前の状態・ログとの一致、`vga` は VGA の VRAM 振り分け・レジスタ・描画と V86 モード遷移・キーボード IRQ1、`decode` は ModRM/SIB・プレフィックス・ページ境界での命令取得、`snapshot` は CPU 復元と新旧スナップショット、`runner` は引数解析・実行・診断・リソース解放、`completion` は例外後も含む上限・定期保存、`disk` は小容量・チャンク境界・BAT 領域境界と異常系を検証します。テスト用ディスクは専用の一時ディレクトリに作成し、終了時に削除します。OS の長時間ブート検証とは別のテストです。
 
+通常コアにしか実装がない命令（far CALL/RET、PUSHA/POPA、IN/OUT、LOOP、MOV CR/DR など IR の対象外）の挙動がリファクタリングで変わっていないことは、`tools/diff-harness` の差分実行で確かめます。基準コミット（既定 HEAD）を `git worktree` に取り出し、同じハーネスを基準側と作業ツリー側の本体に対してビルドして、実モードと 32 ビット保護モード × 2 つの初期状態 × 命令列を 1 命令ずつ実行し、CPU・メモリ・I/O ポート・MSR・DR の結果を行単位で比べます（詳細は `tools/diff-harness/README.md`）。
+
+```sh
+pwsh tools/diff-harness/Compare.ps1               # 作業ツリー vs HEAD
+pwsh tools/diff-harness/Compare.ps1 -Base HEAD~1  # 作業ツリー vs 1 つ前のコミット
+```
+
 ### 必要なファイル（いずれもリポジトリには含まれません）
 
 | ファイル | 役割 |
@@ -224,6 +231,7 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | `VhdxBatLayout.cs` | VHDX のペイロード・ビットマップの位置、BAT の必要エントリ数・領域サイズ。 |
 | `tests/Emu86.Tests/` | 本体を参照する回帰テストと、実行状態・トレースの比較用データ。 |
 | `tools/win-debug/` | Windows ブート解析用の Python スクリプト（スナップショットの CPU/メモリ読み出し、Unicorn との差分トレース、シンボル付きスタック表示など）。 |
+| `tools/diff-harness/` | 通常コアの差分実行ハーネス（`Diff.cs`: 命令列 × モード × 初期状態を 1 命令ずつ実行して結果を 1 行に、`Compare.ps1`: 基準コミットの `git worktree` と作業ツリーの両方に対してビルドして比べる）。 |
 | `docs/` | ブート進捗メモ（`boot-progress.md`）、設計判断の記録（`adr/`）、用語集（`glossary.md`）。 |
 
 ## 実装済み命令

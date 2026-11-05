@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    差分実行ハーネス(Compare.ps1 が使う。README.md)。
+    本体の internal(Instructions.Execute2 など)に触るため、回帰テストと同じアセンブリ名(本体の InternalsVisibleTo の対象)にする。
+    過去のコミットの本体に対しても、この名前ならそのまま通る。
+    Compare.ps1 はこのファイルを一時フォルダへコピーして(bin/obj をリポジトリの外に置くため)基準側と作業ツリー側を別々にビルドするので、
+    ハーネスのソースの場所(HarnessDir)と比較対象の本体(Emu86Project)はプロパティで差し替えられるようにしてある。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Emu86.Tests</AssemblyName>
+    <RootNamespace>Emu86.Diff</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <HarnessDir Condition="'$(HarnessDir)' == ''">$(MSBuildProjectDirectory)</HarnessDir>
+    <Emu86Project Condition="'$(Emu86Project)' == ''">$(MSBuildProjectDirectory)/../../Emu86.csproj</Emu86Project>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="$(HarnessDir)/Diff.cs" />
+    <ProjectReference Include="$(Emu86Project)" />
+  </ItemGroup>
+
+</Project>

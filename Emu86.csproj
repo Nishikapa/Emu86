@@ -17,6 +17,7 @@
   -->
   <ItemGroup>
     <Compile Remove="tests/**/*.cs" />
+    <Compile Remove="tools/**/*.cs" />
     <InternalsVisibleTo Include="Emu86.Tests" />
     <EmbeddedResource Include="bios.bin" Condition="Exists('bios.bin')" />
   </ItemGroup>
