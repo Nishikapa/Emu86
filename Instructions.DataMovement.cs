@@ -30,7 +30,7 @@ static partial class Instructions
         from m in ModRegRm()
         from addr in GetMemOrRegAddr(m.mod, m.rm)
         from type in OperandTypeW
-        from imm in GetMemoryDataIp_(type)
+        from imm in GetMemoryDataIp(type)
         from _2 in SetMemOrRegData(addr, imm)
         select unit;
 
@@ -66,7 +66,7 @@ static partial class Instructions
         from _1 in SetLog("Mov_8E")
         from m in ModRegRm()
         from data in GetMemOrRegData(m.mod, m.rm, true)
-        from _2 in SetSReg3(m.reg, data.data)
+        from _2 in SetSReg3(m.reg, data)
         select unit;
 
     // BSWAP r32 (0F C8+r): 32 ビットレジスタのバイト順を反転する(ModRM なし)。
@@ -86,7 +86,7 @@ static partial class Instructions
         from m in ModRegRm()
         from src in GetMemOrRegData(m.mod, m.rm, true)
         from f in Jcc(cond)
-        from _2 in When(f, SetRegData(m.reg, src.data))
+        from _2 in When(f, SetRegData(m.reg, src))
         select unit;
 
     // SETcc r/m8 (0F 90-9F): 条件成立なら 1、不成立なら 0 を r/m8 に書く。
@@ -116,13 +116,14 @@ static partial class Instructions
         from _2 in SetRegData(m.reg, (signed ? (uint)source.Signed : source.Value).ToTypeData(type))
         select unit;
 
+    // MOV r, imm (B0-B7: r8, imm8 / B8-BF: r16/32, imm16/32)。レジスタ番号と幅はオペコードの下位ビット。
     static State<Unit> Mov_B0_BF =>
         from _1 in SetLog("Mov_B0_BF")
         from opecode in Opecodes
-        let w = 0 != (opecode[0] & 0x08)
         let reg = opecode[0] & 0x07
-        from data in GetMemoryDataIp(w)
-        from _2 in SetRegData(reg, data.data)
+        from type in OperandType(0 != (opecode[0] & 0x08))
+        from imm in GetMemoryDataIp(type)
+        from _2 in SetRegData(reg, imm)
         select unit;
 
     // d=1: reg <- r/m (0x8A/0x8B)、d=0: r/m <- reg (0x88/0x89)。転送元だけを読む(転送先のメモリは読まない)。

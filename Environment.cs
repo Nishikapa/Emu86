@@ -104,31 +104,6 @@ static public class Mmu
         }
     }
 
-    // ArraySegment を使い、LINQ Skip の O(addr) 走査を避ける。
-    // ページング有効時はページ境界を正しく跨ぐため 1 バイトずつ変換して読む遅延列挙に切り替える。
-    // ページング無効時も BIOS 高位エイリアス(0xFFFxxxxx)を折り返し、RAM 外は 1 バイトずつ読む
-    // (SeaBIOS の 32bit 初期化コードは 0xFFFF1xxx で動くため、ここを直さないとモナド版の ModRM デコードが失敗する)。
-    static public IEnumerable<byte> EnvGetMemoryDatas(EmuEnvironment env, uint addr)
-    {
-        if (env.Paging.Enabled) return EnumerateLinear(env, addr);
-        var physical = EnvAlias(addr);
-        return physical < (uint)env.Ram.Length
-            ? new ArraySegment<byte>(env.Ram, (int)physical, env.Ram.Length - (int)physical)
-            : EnumerateLinear(env, addr);
-    }
-
-    static IEnumerable<byte> EnumerateLinear(EmuEnvironment env, uint addr) =>
-        Enumerable.InfiniteSequence(addr, 1u).Select(linear => EnvGetMemoryData8(env, linear));
-
-    static public IEnumerable<byte> EnvGetMemoryDatas(EmuEnvironment env, ushort segment, ushort offset) =>
-        EnvGetMemoryDatas(env, GetMemoryAddr(segment, offset).addr);
-
-    static public IEnumerable<byte> EnvGetMemoryDatas(EmuEnvironment env, ushort segment, ushort offset, int length) =>
-        EnvGetMemoryDatas(env, segment, offset).Take(length);
-
-    static public MemAddr GetMemoryAddr(ushort segment, ushort offset) =>
-        (true, (uint)(0x10 * segment + offset));
-
     // コードフェッチ用アドレス。CS の基底(記述子キャッシュ)+ IP/EIP。
     // 16ビットコードセグメント(code32=false)では IP(下位16ビット)を使う。
     static public MemAddr GetCodeAddr(CPU cpu) =>
@@ -304,21 +279,27 @@ static public class Mmu
 // I/O ポートの入出力(PortMap の表を引く)。
 static public class Ports
 {
-    // ポートの振り分けは PortMap の表(ポート範囲 → デバイスの読み書き)。該当する項がなければ IoPort 配列を素通しする。
+    // ポートの振り分けは PortMap の表(ポート範囲 → デバイスの読み書き)。port に該当する項のうち、
+    // その向きの処理(Read/Write/ReadWide/WriteWide)を持ち、条件(When)も満たす最初のもの(表の順)の処理。無ければ null。
+    static T Handler<T>(EmuEnvironment env, int port, Func<PortMapping, T> handler) where T : Delegate
+    {
+        foreach (var mapping in PortMap.ByPort[port])
+            if (handler(mapping) is { } found && mapping.Applies(env, port)) return found;
+        return null;
+    }
+
+    // 該当する項がなければ IoPort 配列を素通しする。
     static public byte EnvInPort(EmuEnvironment env, int port)
     {
         port &= 0xFFFF;
-        foreach (var mapping in PortMap.ByPort[port])
-            if (mapping.Read != null && mapping.Applies(env, port)) return mapping.Read(env, port);
-        return env.IoPort[port];
+        return Handler(env, port, mapping => mapping.Read) is { } read ? read(env, port) : env.IoPort[port];
     }
 
     static public void EnvOutPort(EmuEnvironment env, int port, byte val)
     {
         port &= 0xFFFF;
-        foreach (var mapping in PortMap.ByPort[port])
-            if (mapping.Write != null && mapping.Applies(env, port)) { mapping.Write(env, port, val); return; }
-        env.IoPort[port] = val;
+        if (Handler(env, port, mapping => mapping.Write) is { } write) write(env, port, val);
+        else env.IoPort[port] = val;
     }
 
     // 幅付きポート入出力: 幅付きを自分で扱う項(ATA データ、PCI コンフィグ、ACPI の dword など)があればそれに任せ、
@@ -326,8 +307,7 @@ static public class Ports
     static public uint EnvInPortN(EmuEnvironment env, int port, int size)
     {
         var p = port & 0xFFFF;
-        foreach (var mapping in PortMap.ByPort[p])
-            if (mapping.ReadWide != null && mapping.Applies(env, p)) return mapping.ReadWide(env, p, size);
+        if (Handler(env, p, mapping => mapping.ReadWide) is { } readWide) return readWide(env, p, size);
         uint v = 0;
         for (int i = 0; i < size; i++)
             v |= (uint)EnvInPort(env, port + i) << (8 * i);
@@ -337,8 +317,7 @@ static public class Ports
     static public void EnvOutPortN(EmuEnvironment env, int port, int size, uint val)
     {
         var p = port & 0xFFFF;
-        foreach (var mapping in PortMap.ByPort[p])
-            if (mapping.WriteWide != null && mapping.Applies(env, p)) { mapping.WriteWide(env, p, size, val); return; }
+        if (Handler(env, p, mapping => mapping.WriteWide) is { } writeWide) { writeWide(env, p, size, val); return; }
         for (int i = 0; i < size; i++)
             EnvOutPort(env, port + i, (byte)(val >> (8 * i)));
     }
@@ -375,22 +354,9 @@ static public class DataAccess
         _es_base, _cs_base, _ss_base, _ds_base, _fs_base, _gs_base
     ];
 
-    static public readonly Func<byte, Func<int, Func<CPU, CPU>>> EnvSetRegData8 = EnvSetDataFromCPU(ArrayReg8);
+    static public State<Unit> SetRegData16(int reg, ushort dw) => ArrayReg16[reg].Set(dw);
 
-    static public readonly Func<ushort, Func<int, Func<CPU, CPU>>> EnvSetRegData16 = EnvSetDataFromCPU(ArrayReg16);
-
-    static public readonly Func<uint, Func<int, Func<CPU, CPU>>> EnvSetRegData32 = EnvSetDataFromCPU(ArrayReg32);
-
-    static public readonly Func<ushort, Func<int, Func<CPU, CPU>>> EnvSetSReg3 = EnvSetDataFromCPU(ArraySreg);
-
-    static public State<Unit> SetRegData8(int reg, byte db) =>
-        SetCpu(EnvSetRegData8(db)(reg));
-
-    static public State<Unit> SetRegData16(int reg, ushort dw) =>
-        SetCpu(EnvSetRegData16(dw)(reg));
-
-    static public State<Unit> SetRegData32(int reg, uint dd) =>
-        SetCpu(EnvSetRegData32(dd)(reg));
+    static public State<Unit> SetRegData32(int reg, uint dd) => ArrayReg32[reg].Set(dd);
 
     // CR 書き込み後はページング状態を env へ同期する(PG 切替・CR3 変更で TLB もフラッシュ)。
     static public State<Unit> SetCrReg(int reg, uint data) =>
@@ -479,7 +445,7 @@ static public class DataAccess
         GetDataFromCpu(ArraySreg[reg].getter);
 
     static public State<Data> GetRegData(int reg, int type) =>
-        GetDataFromCpu(GetTypeData_(
+        GetDataFromCpu(GetTypeData(
             type,
             ArrayReg8[reg].getter,
             ArrayReg16[reg].getter,
@@ -555,24 +521,11 @@ static public class DataAccess
         )
         select ret;
 
-    static public State<(Data data, MemAddr input)> GetMemOrRegData(
-        ushort segment,
-        ushort offset,
-        bool w) =>
-        from addr in GetMemoryAddr(segment, offset).ToState()
-        from data in GetMemOrRegData(addr, w)
-        select (data, addr);
-
-    static public State<(Data data, MemAddr input)> GetMemOrRegData(
-        int mod,
-        int rm,
-        bool w) =>
+    // ModRM の r/m を読む(実効アドレスのデコードを含む。幅は w と実効オペランドサイズから)。
+    static public State<Data> GetMemOrRegData(int mod, int rm, bool w) =>
         from addr in GetMemOrRegAddr(mod, rm)
         from data in GetMemOrRegData(addr, w)
-        select (data, addr);
-
-    static private Func<T, Func<int, Func<CPU, CPU>>> EnvSetDataFromCPU<T>(Accessor<CPU, T>[] array) =>
-        data => reg => cpu => array[reg].setter(cpu)(data);
+        select data;
 }
 
 // 文字列命令(MOVS/STOS/LODS/CMPS/SCAS/INS/OUTS)の 1 要素分。
@@ -879,7 +832,7 @@ static public class Interrupts
             select Unit.unit);
 
     // セグメントレジスタにヌルセレクタを入れる(記述子は読まない)。
-    static State<Unit> NullSelector(int reg) => SetCpu(EnvSetSReg3(0)(reg));
+    static State<Unit> NullSelector(int reg) => ArraySreg[reg].Set((ushort)0);
 
     // 外側の特権レベル(例: ring0 → ring3)へ戻るときは、さらに ESP と SS を pop してスタックを切り替える。
     // V86 モード内の far 復帰はリアルモード同様で、セレクタの下位ビットは特権を意味しない。
@@ -1028,7 +981,7 @@ static public class Segments
     // リアルモードは セレクタ*16 を基底に(セッタが自動設定)、
     // プロテクトモードは GDT 記述子から基底を読む。CS の場合は D ビットで code32 を更新する。
     static public State<Unit> LoadSReg(int reg, ushort sel) =>
-        from _1 in SetCpu(EnvSetSReg3(sel)(reg))                             // セレクタ(リアルモードの基底 セレクタ*16 はセッタが置く)
+        from _1 in ArraySreg[reg].Set(sel)                                   // セレクタ(リアルモードの基底 セレクタ*16 はセッタが置く)
         from descriptors in GetDataFromCpu(cpu => cpu.pe && !cpu.vm)         // V86 モードはリアルモードと同じく セレクタ*16
         from descriptor in descriptors ? GetDataFromEnvCpu((env, cpu) => EnvReadDescriptor(env, cpu, sel)) : default((uint base_, bool d)).ToState()
         from _2 in When(descriptors, ArraySregBase[reg].Set(descriptor.base_))

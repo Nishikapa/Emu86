@@ -1,5 +1,3 @@
-using static Emu86.Conversions;
-
 namespace Emu86;
 
 public delegate (bool IsSuccess, V value, CPU cpu, string log) State<V>(EmuEnvironment env, CPU param, byte[] opecodes);
@@ -16,7 +14,6 @@ static public class States
 
     // グループ命令(ModRM の reg フィールドで選ぶ)の表。表に無い値は Undefined。
     // 辞書を作らず順に比べる(8 項以下)。params ReadOnlySpan なので呼び出しごとの配列割り当てもない。
-    // 以前の Choice は該当が無いとホスト側の例外で落ちていた。
     static public State<Unit> Group(int key, params ReadOnlySpan<(int key, State<Unit> state)> cases)
     {
         foreach (var (candidate, state) in cases)
@@ -25,7 +22,7 @@ static public class States
     }
 
     // クエリ構文の where 句。述語が偽なら失敗にする(CPU は変更しない)。
-    // 失敗を返す State は CPU を変更する前に置くこと(Choice/Many0 は失敗した枝の変更を巻き戻せない)。
+    // 失敗を返す State は CPU を変更する前に置くこと(失敗しても、それまでの句が加えた CPU の変更は巻き戻されない)。
     static public State<T> Where<T>(this State<T> state, Func<T, bool> predicate)
     {
         if (default == state)
@@ -99,74 +96,24 @@ static public class States
         };
     }
 
-    static public State<T> Choice<T>(params (bool f, State<T> state)[] states) =>
-        Choice(states.Where(s => s.f).Select(s => s.state).ToArray());
-
-    static public State<T> Choice<T>(params State<T>[] states) => (env, cpu, ope) =>
-    {
-        var log = string.Empty;
-
-        foreach (var state in states)
-        {
-            var f = default(bool);
-            var value = default(T);
-
-            (f, value, cpu, log) = state(env, cpu, ope);
-
-            if (f)
-            {
-                return (true, value, cpu, log);
-            }
-        }
-        return (false, default, cpu, log);
-    };
-
-    static public State<IEnumerable<T>> Sequence<T>(params State<T>[] states) =>
-        Sequence((IEnumerable<State<T>>)states);
-
+    // 複数の State を順に実行して値を集める(PUSHA/POPA、ENTER のネスト、IRET のセレクタのクリア)。
+    // 失敗はロールバックできないので、すべて成功しなければならない。
     static public State<IEnumerable<T>> Sequence<T>(this IEnumerable<State<T>> states) => (env, cpu, ope) =>
     {
-        var log_ = string.Empty;
-        var ret = new List<T>();
-
+        var values = new List<T>();
+        var log = string.Empty;
         foreach (var state in states)
         {
-            var f = default(bool);
-            var value = default(T);
-            var log = string.Empty;
-
-            (f, value, cpu, log) = state(env, cpu, ope);
-
-            log_ = log_ + log;
-
-            // envのロールバックはさぽーとされていないため、
-            // すべて成功しなければならない。
-            if (!f)
-                throw new Exception();
-
-            ret.Add(value);
+            var (ok, value, next, stateLog) = state(env, cpu, ope);
+            if (!ok) throw new Exception();
+            cpu = next;
+            log += stateLog;
+            values.Add(value);
         }
-        return (true, ret, cpu, log_);
+        return (true, values, cpu, log);
     };
 
     static public State<Unit> Ignore<T>(this State<T> s) =>
         from data in s
         select Unit.unit;
-
-    static public State<IEnumerable<T>> Many0<T>(this State<T> next) => (env, cpu, ope) =>
-    {
-        var ret = new List<T>();
-
-        while (true)
-        {
-            var t = default(T);
-            var f = default(bool);
-            (f, t, cpu, _) = next(env, cpu, ope);
-
-            if (!f)
-                return (true, ret.AsEnumerable(), cpu, "Many0");
-
-            ret.Add(t);
-        }
-    };
 }

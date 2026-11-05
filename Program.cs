@@ -78,19 +78,22 @@ static class Program
 
     static CPU ResetVector() => _cs.setter(_ip.setter(new CPU())(0xFFF0))(0xF000);
 
-    // --com1/--com2 で指定された名前付きパイプを UART につなぐ(環境を作り直すときは前の接続を引き継ぐ)。
-    static void AttachSerial(RunOptions options, EmuEnvironment env, EmuEnvironment previous = null)
+    // --com1/--com2 で指定された名前付きパイプを UART につなぐ。
+    static void AttachSerial(RunOptions options, EmuEnvironment env)
     {
-        if (previous != null)
-        {
-            env.Com1.Host = previous.Com1.Host; previous.Com1.Host = null;
-            env.Com2.Host = previous.Com2.Host; previous.Com2.Host = null;
-            return;
-        }
         if (options.Com1Pipe != null) env.Com1.Host = new NamedPipeSerialHost(options.Com1Pipe);
         if (options.Com2Pipe != null) env.Com2.Host = new NamedPipeSerialHost(options.Com2Pipe);
         if (options.Com1Pipe != null || options.Com2Pipe != null)
-            Console.Error.WriteLine($"[serial] COM1={(options.Com1Pipe != null ? @"\\.\pipe\" + options.Com1Pipe : "none")} COM2={(options.Com2Pipe != null ? @"\\.\pipe\" + options.Com2Pipe : "none")}");
+            Console.Error.WriteLine($"[serial] COM1={PipeName(options.Com1Pipe)} COM2={PipeName(options.Com2Pipe)}");
+    }
+
+    static string PipeName(string pipe) => pipe != null ? @"\\.\pipe\" + pipe : "none";
+
+    // 環境を作り直すとき(ゲストのリセット)は、ホスト側の接続を前の環境から引き継ぐ(前の環境の破棄で閉じられないよう外す)。
+    static void HandOverSerial(EmuEnvironment previous, EmuEnvironment next)
+    {
+        (next.Com1.Host, previous.Com1.Host) = (previous.Com1.Host, null);
+        (next.Com2.Host, previous.Com2.Host) = (previous.Com2.Host, null);
     }
 
     // 実行→(ゲストのシステムリセット)→環境を作り直してリセットベクタから再実行、を停止まで繰り返す。
@@ -111,7 +114,7 @@ static class Program
             var hadDisk = env.Ata != null;
             var fresh = EnvironmentFactory.Create(disk, attachDisk: hadDisk);
             fresh.CmosRtc.SetClock(env.CmosRtc.Current((ulong)count), (ulong)count); // リセットをまたいでも時計は進み続ける
-            AttachSerial(options, fresh, previous: env);
+            HandOverSerial(env, fresh);
             env.Dispose();
             env = fresh;
             env.Vga.FallbackFont = font;

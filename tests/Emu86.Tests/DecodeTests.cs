@@ -230,7 +230,7 @@ static class DecodeTests
         var cpu = CreateCpu(true, false);
         env.Ram[0] = 0xB5;
         var decode = GetMemOrRegAddr(2, 4);
-        var immediate = GetMemoryDataIp_(2);
+        var immediate = GetMemoryDataIp(2);
         for (var iteration = 0; iteration < 1000; iteration++)
         {
             cpu.eip = 0;

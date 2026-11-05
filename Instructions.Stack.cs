@@ -121,7 +121,7 @@ static partial class Instructions
     static State<Unit> PushImm_68 =>
         from _1 in SetLog("PushImm_68")
         from type in OperandType(true)
-        from value in GetMemoryDataIp_(type)
+        from value in GetMemoryDataIp(type)
         from _2 in Push(value)
         select unit;
 

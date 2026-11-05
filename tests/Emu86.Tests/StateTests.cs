@@ -82,7 +82,7 @@ static class StateTests
             Equal(1, reads[type], "selected state runs once");
             Equal(1, reads.Sum(), "unselected states do not run");
             Array.Clear(reads);
-            var convert = GetTypeData_<uint>(type,
+            var convert = GetTypeData<uint>(type,
                 value => { reads[0]++; return (byte)value; },
                 value => { reads[1]++; return (ushort)value; },
                 value => { reads[2]++; return value; });
@@ -94,7 +94,7 @@ static class StateTests
         foreach (var invalid in new[] { -1, 3 })
         {
             Throws<IndexOutOfRangeException>(() => Choice(invalid, ((byte)0).ToState(), ((ushort)0).ToState(), 0u.ToState()), "invalid operand width");
-            Throws<IndexOutOfRangeException>(() => GetTypeData_<uint>(invalid, value => (byte)value, value => (ushort)value, value => value), "invalid conversion width");
+            Throws<IndexOutOfRangeException>(() => GetTypeData<uint>(invalid, value => (byte)value, value => (ushort)value, value => value), "invalid conversion width");
         }
     }
 

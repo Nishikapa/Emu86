@@ -10,7 +10,7 @@ using static Emu86.CpuStates;
 
 namespace Emu86;
 
-// State で CPU を読み書きする基本操作(SetCpu/GetCpu、Accessor の Get/Set/Modify、EIP の前進、ログ・結果・オペコード列)。
+// State で CPU を読み書きする基本操作(SetCpu/GetCpu、Accessor の Get/Set/Modify、EIP の前進、ログ・オペコード列)。
 static public class CpuStates
 {
     static internal State<T> Get<T>(this Accessor<CPU, T> acc) =>
@@ -58,8 +58,6 @@ static public class CpuStates
 
     static public State<Unit> SetCpu(CPU new_cpu) => (env, cpu, ope) => (true, unit, new_cpu, string.Empty); //無理
 
-    static public State<Unit> SetResult(bool f) => (env, cpu, ope) => (f, unit, cpu, string.Empty);          //無理
-
     static public State<Unit> SetLog(string log) => (env, cpu, ope) => (true, unit, cpu, log);               //無理
 
     static public readonly State<byte[]> Opecodes = (env, cpu, ope) => (true, ope, cpu, string.Empty);       //無理
@@ -68,14 +66,8 @@ static public class CpuStates
 // 命令ストリーム(CS:EIP)からの読み取り: オペコード・即値・ModRM(EIP を進める State)。
 static public partial class Fetch
 {
-    static public State<(Data data, MemAddr input)> GetMemoryDataIp(bool w) =>
-        from cpu in GetCpu
-        let addr = GetCodeAddr(cpu)
-        from data in GetMemOrRegData(addr, w)
-        from _ in IpInc(Bytes(data.type))
-        select (data, (addr.isMem, addr.addr));
-
-    static public State<Data> GetMemoryDataIp_(int type) => MemoryDataIpByType[type];
+    // type(0=byte、1=word、2=dword)の幅の即値を読む。
+    static public State<Data> GetMemoryDataIp(int type) => MemoryDataIpByType[type];
 
     static public State<(int mod, int reg, int rm)> ModRegRm() =>
         from value in GetMemoryDataIp8
@@ -83,11 +75,6 @@ static public partial class Fetch
         let reg = (value >> 3) & 0x7
         let rm = value & 0x7
         select (mod, reg, rm);
-
-    static public State<IEnumerable<byte>> GetMemoryDataIp(int length) =>
-        from data in GetDataFromEnvCpu((env, cpu) => EnvGetMemoryDatas(env, GetCodeAddr(cpu).addr).Take(length))
-        from _ in IpInc(data.Count())
-        select data;
 
     // ホットパスで毎命令アクセスされるため、プロパティではなくキャッシュ済みフィールドにする
     // (プロパティだと参照のたびに SelectMany のデリゲート鎖を再構築してしまう)。
@@ -155,7 +142,8 @@ static public class AluStates
             _ => throw new IndexOutOfRangeException()
         };
 
-    static public Func<T, Data> GetTypeData_<T>(
+    // 幅 index(0/1/2)に応じた変換(値 → Data)を選ぶ。GetRegData が使う。
+    static public Func<T, Data> GetTypeData<T>(
         int index,
         Func<T, byte> func_db,
         Func<T, ushort> func_dw,
@@ -186,18 +174,10 @@ static public class AluStates
             : SetCpu((_cf, res.cf), (_of, res.of)))
         select res.result.ToTypeData(data.type);
 
-    static public State<bool> Not(State<bool> s) =>
-        s.Select(b => !b);
-
     static public State<bool> Jcc(int type) =>
         GetDataFromCpu(cpu => EvaluateCondition(cpu, type));
 
-    static public State<Unit> update_eflags(byte value) => update_eflags(value.ToTypeData());
-
-    static public State<Unit> update_eflags(ushort value) => update_eflags(value.ToTypeData());
-
-    static public State<Unit> update_eflags(uint value) => update_eflags(value.ToTypeData());
-
+    // 論理演算の結果 data のフラグ(CF=OF=0、ZF/SF/PF は結果から)。TEST。
     static public State<Unit> update_eflags(Data data) =>
         Effect(cpu => SetLogicFlags(cpu, data.type, data.Value));
 

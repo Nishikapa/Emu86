@@ -26,7 +26,7 @@ static partial class Instructions
         from _2 in Binary(Rm(addr, type), Const(imm), m.reg)
         select unit;
 
-    static State<Unit> Group1_80_81 => Group1("Group1_80_81", GetMemoryDataIp_);
+    static State<Unit> Group1_80_81 => Group1("Group1_80_81", GetMemoryDataIp);
 
     static State<Unit> Group1_83 => Group1("Group1_83", Imm8SignExtended);
 
@@ -97,8 +97,8 @@ static partial class Instructions
         from _1 in SetLog("Imul_0FAF")
         from m in ModRegRm()
         from src in GetMemOrRegData(m.mod, m.rm, true)
-        from dst in GetRegData(m.reg, src.data.type)
-        from _2 in ImulInto(m.reg, src.data.type, dst.Signed, src.data.Signed)
+        from dst in GetRegData(m.reg, src.type)
+        from _2 in ImulInto(m.reg, src.type, dst.Signed, src.Signed)
         select unit;
 
     // SHLD/SHRD r/m, r, (imm8 | CL): ダブル精度シフト。
@@ -167,7 +167,7 @@ static partial class Instructions
         let forward = opecode[1] == 0xBC
         from m in ModRegRm()
         from src in GetMemOrRegData(m.mod, m.rm, true)
-        from _2 in BitScan(m.reg, src.data, forward)
+        from _2 in BitScan(m.reg, src, forward)
         select unit;
 
     static State<Unit> Arithmetic =>
@@ -191,7 +191,7 @@ static partial class Instructions
 
     static State<Unit> ArithmeticAccImm(int kind, bool w) =>
         from type in OperandType(w)
-        from imm in GetMemoryDataIp_(type)
+        from imm in GetMemoryDataIp(type)
         from _ in Binary(Reg(0, type), Const(imm), kind)
         select unit;
 
@@ -236,7 +236,7 @@ static partial class Instructions
 
     // TEST r/m, imm : AND の結果を捨ててフラグ(CF=OF=0, ZF/SF)だけ更新する。
     static State<Unit> Group3_Test(Data data) =>
-        from imm in GetMemoryDataIp_(data.type)
+        from imm in GetMemoryDataIp(data.type)
         from _ in Test(Const(data), Const(imm))
         select unit;
 
@@ -275,9 +275,9 @@ static partial class Instructions
         let imm8 = 0 != (opecode[0] & 0x02)   // 0x6B は imm8、0x69 は imm16/32
         from m in ModRegRm()
         from src in GetMemOrRegData(m.mod, m.rm, true)
-        let type = src.data.type              // w=true なので 1(16bit) か 2(32bit)
-        from imm in imm8 ? Imm8SignExtended(type) : GetMemoryDataIp_(type)
-        from _2 in ImulInto(m.reg, type, src.data.Signed, imm.Signed)
+        let type = src.type                   // w=true なので 1(16bit) か 2(32bit)
+        from imm in imm8 ? Imm8SignExtended(type) : GetMemoryDataIp(type)
+        from _2 in ImulInto(m.reg, type, src.Signed, imm.Signed)
         select unit;
 
     // DIV r/m : 符号なし除算。商と剰余を AL/AH, AX/DX, EAX/EDX へ(規則は Alu.Divide。IR と共有)。
@@ -344,7 +344,7 @@ static partial class Instructions
     static State<Unit> Test_A8_A9 =>
         from _1 in SetLog("Test_A8_A9")
         from type in OperandTypeW
-        from imm in GetMemoryDataIp_(type)
+        from imm in GetMemoryDataIp(type)
         from _2 in Test(Reg(0, type), Const(imm))
         select unit;
 

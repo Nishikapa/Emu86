@@ -1175,40 +1175,39 @@ public static class Semantics
         cpu.eip = cpu.eip + (uint)length + (taken ? displacement : 0);
     }
 
-    // CMPXCHG: acc と r/m を比べて(CMP のフラグ)、等しければ r/m <- reg、違えば acc <- r/m。メモリは検査してから読む。
+    // 読んで書き戻す r/m オペランド(memory なら address のメモリ、そうでなければレジスタ reg)。CMPXCHG/XADD/BT 系/SHLD/SHRD。
+    // メモリは書き戻す場合、読む前に書き込みまで検査する(Probe。読んだ後の Store がフォルトしないように)。
+    static uint ReadPlace(EmuEnvironment env, CPU cpu, bool memory, uint address, int reg, int type, bool writesBack = true)
+    {
+        if (!memory) return ReadRegister(cpu, reg, type);
+        if (writesBack) Probe(env, address, type, readsFirst: true);
+        return Load(env, address, type);
+    }
+
+    static void WritePlace(EmuEnvironment env, CPU cpu, bool memory, uint address, int reg, int type, uint value)
+    {
+        if (memory) Store(env, address, type, value);
+        else WriteRegister(cpu, reg, type, value);
+    }
+
+    // CMPXCHG: acc と r/m を比べて(CMP のフラグ)、等しければ r/m <- reg、違えば acc <- r/m。
     public static void CompareExchange(EmuEnvironment env, CPU cpu, bool memory, uint address, int dstReg, int reg, int type)
     {
-        uint destination;
-        if (memory) { Probe(env, address, type, readsFirst: true); destination = Load(env, address, type); }
-        else destination = ReadRegister(cpu, dstReg, type);
+        var destination = ReadPlace(env, cpu, memory, address, dstReg, type);
         var accumulator = ReadRegister(cpu, 0, type);
         CalculateAlu(cpu, type, accumulator, destination, 7);
-        if (accumulator == destination)
-        {
-            var source = ReadRegister(cpu, reg, type);
-            if (memory) Store(env, address, type, source); else WriteRegister(cpu, dstReg, type, source);
-        }
+        if (accumulator == destination) WritePlace(env, cpu, memory, address, dstReg, type, ReadRegister(cpu, reg, type));
         else WriteRegister(cpu, 0, type, destination);
     }
 
-    // XADD: reg <- r/m の旧値、r/m <- r/m + reg(ADD のフラグ)。レジスタ形式は通常コアと同じ順(reg を先に書く: 同じレジスタなら和が残る)。
+    // XADD: reg <- r/m の旧値、r/m <- r/m + reg(ADD のフラグ)。reg を先に書く(通常コアと同じ順: 同じレジスタなら和が残る)。
     public static void ExchangeAdd(EmuEnvironment env, CPU cpu, bool memory, uint address, int dstReg, int reg, int type)
     {
         var source = ReadRegister(cpu, reg, type);
-        if (memory)
-        {
-            Probe(env, address, type, readsFirst: true);
-            var destination = Load(env, address, type);
-            Store(env, address, type, CalculateAlu(cpu, type, destination, source, 0));
-            WriteRegister(cpu, reg, type, destination);
-        }
-        else
-        {
-            var destination = ReadRegister(cpu, dstReg, type);
-            var sum = CalculateAlu(cpu, type, destination, source, 0);
-            WriteRegister(cpu, reg, type, destination);
-            WriteRegister(cpu, dstReg, type, sum);
-        }
+        var destination = ReadPlace(env, cpu, memory, address, dstReg, type);
+        var sum = CalculateAlu(cpu, type, destination, source, 0);
+        WriteRegister(cpu, reg, type, destination);
+        WritePlace(env, cpu, memory, address, dstReg, type, sum);
     }
 
     // BT 系: r/m の bit 番目を CF へ。BTS/BTR/BTC は書き戻す(BT は書かない)。bitString ならビット番号(符号付き)でワードを選ぶ。
@@ -1217,17 +1216,10 @@ public static class Semantics
         var bits = Bits(type);
         if (memory && bitString) address += (uint)(((int)bit >> (type == 1 ? 4 : 5)) * Bytes(type));
         var mask = 1u << ((int)bit & (bits - 1));
-        uint value;
-        if (memory)
-        {
-            if (op != 0) Probe(env, address, type, readsFirst: true);
-            value = Load(env, address, type);
-        }
-        else value = ReadRegister(cpu, dstReg, type);
+        var value = ReadPlace(env, cpu, memory, address, dstReg, type, writesBack: op != 0);
         cpu.cf = (value & mask) != 0;
         if (op == 0) return;
-        value = op switch { 1 => value | mask, 2 => value & ~mask, _ => value ^ mask };
-        if (memory) Store(env, address, type, value); else WriteRegister(cpu, dstReg, type, value);
+        WritePlace(env, cpu, memory, address, dstReg, type, op switch { 1 => value | mask, 2 => value & ~mask, _ => value ^ mask });
     }
 
     // BSF/BSR: 源が 0 なら ZF=1 で書かない。そうでなければ ZF=0 でビット位置を書く。
@@ -1243,11 +1235,9 @@ public static class Semantics
     {
         var n = (int)(count & 0x1F);
         if (n == 0) return;
-        uint destination;
-        if (memory) { Probe(env, address, type, readsFirst: true); destination = Load(env, address, type); }
-        else destination = ReadRegister(cpu, dstReg, type);
+        var destination = ReadPlace(env, cpu, memory, address, dstReg, type);
         var (result, cf, of) = Emu86.Alu.DoubleShift(destination, ReadRegister(cpu, srcReg, type), n, Bits(type), left);
-        if (memory) Store(env, address, type, result); else WriteRegister(cpu, dstReg, type, result);
+        WritePlace(env, cpu, memory, address, dstReg, type, result);
         cpu.cf = cf; cpu.of = of; cpu.zf = (result & Mask(type)) == 0; cpu.sf = (result & Msb(type)) != 0;
     }
 

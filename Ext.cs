@@ -7,16 +7,6 @@ public class Unit
 
 static public class Conversions
 {
-    private static readonly Func<byte[], Data>[] funcArray =
-    [
-        data => data[0].ToTypeData(),
-        data => BitConverter.ToUInt16(data, 0).ToTypeData(),
-        data => BitConverter.ToUInt32(data, 0).ToTypeData()
-    ];
-
-    static public Data ToTypeData(this IEnumerable<byte> data, int type)
-        => funcArray[type]([.. data]);
-
     static public Data ToTypeData(this byte _db) => (0, db: _db, dw: default, dd: default);
     static public Data ToTypeData(this ushort _dw) => (1, db: default, dw: _dw, dd: default);
     static public Data ToTypeData(this uint _dd) => (2, db: default, dw: default, dd: _dd);
@@ -44,11 +34,4 @@ static public class Conversions
     static public int Bits(int type) => 8 << type;
     static public uint Mask(int type) => type == 2 ? 0xFFFFFFFF : (1u << Bits(type)) - 1;
     static public uint Msb(int type) => 1u << (Bits(type) - 1);
-
-    static public uint ToUint32(this IEnumerable<byte> data) => BitConverter.ToUInt32([.. data.Take(4)], 0);
-    static public ushort ToUint16(this IEnumerable<byte> data) => BitConverter.ToUInt16([.. data.Take(4)], 0);
-
-    static public byte[] ToByteArray(this byte db) => [db];
-    static public byte[] ToByteArray(this ushort dw) => BitConverter.GetBytes(dw);
-    static public byte[] ToByteArray(this uint dd) => BitConverter.GetBytes(dd);
 }
