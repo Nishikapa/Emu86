@@ -35,6 +35,7 @@ internal sealed class RunDiagnostics
         this.output = output;
         this.trace = options.Trace ? trace : null;
         env.Ata?.Log = options.AtaLog;
+        env.Cdrom?.Log = options.AtaLog;
         env.Pci.Log = options.PciLog;
         env.Pci.Caller = () => WindowsDiagnostics.Caller(env, cpu);
         env.PicMaster.Log = env.PicSlave.Log = options.PicLog;

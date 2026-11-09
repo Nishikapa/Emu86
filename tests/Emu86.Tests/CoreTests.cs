@@ -609,7 +609,10 @@ static class CoreTests
         using var timing = new EmuEnvironment(memory: new byte[0x10000]);
         Loop(0x3000).CopyTo(timing.Ram, 0x100);
         timing.Ram[0x110] = 0xF4; // ループを抜けた先の HLT で連結が止まる
-        double PerInstruction(bool translate, int blockLimit = 64)
+        // x87 のループ(0x200): fld m32、fmul m32、fadd st0,st0、fstp m32、jmp(スタックは 1 周で元に戻る)。
+        byte[] x87Loop = [0xD9, 0x05, 0x00, 0x30, 0x00, 0x00, 0xD8, 0x0D, 0x04, 0x30, 0x00, 0x00, 0xD8, 0xC0, 0xD9, 0x1D, 0x08, 0x30, 0x00, 0x00, 0xEB, 0xEA];
+        x87Loop.CopyTo(timing.Ram, 0x200);
+        double PerInstruction(bool translate, int blockLimit = 64, uint entry = 0x100)
         {
             timing.Translations.Enabled = translate;
             timing.Translations.BlockLimit = blockLimit;
@@ -617,6 +620,7 @@ static class CoreTests
             timing.Translations.InvalidateAll();
             var executor = new InstructionExecutor(true) { Budget = 1000 };
             var state = Start();
+            state.eip = entry;
             long executed = 0;
             void Run(long target)
             {
@@ -630,6 +634,9 @@ static class CoreTests
             return watch.Elapsed.TotalMilliseconds * 1_000_000.0 / executed;
         }
         Console.WriteLine($"executor ns/instruction over a 5-instruction loop: reference core {PerInstruction(false):F1}, translated block {PerInstruction(true):F1}, one instruction per step {PerInstruction(true, 1):F1}");
+        BitConverter.GetBytes(1.5f).CopyTo(timing.Ram, 0x3000); BitConverter.GetBytes(2.0f).CopyTo(timing.Ram, 0x3004); // 上の整数のループが 0x3000 に書いた後で置く
+        Console.WriteLine($"executor ns/instruction over an x87 loop (fld m32, fmul m32, fadd st, fstp m32, jmp): reference core {PerInstruction(false, entry: 0x200):F1}, translated block {PerInstruction(true, entry: 0x200):F1}");
+        Equal(6.0f, BitConverter.ToSingle(timing.Ram, 0x3008), "the x87 loop stores (1.5 * 2) * 2");
         // デコードと IR への下ろしの費用(ADD eax, ebx / MOV [ebx+8], eax / Jcc を順に)。
         byte[] sample = [0x01, 0xD8, 0x89, 0x43, 0x08, 0x75, 0x10];
         sample.CopyTo(timing.Ram, 0x200);
@@ -653,6 +660,7 @@ static class CoreTests
 
     // FPU: 全エンコーディング(メモリ形式は [ebx]、レジスタ形式は ST(1) など)を 3 通りの初期状態(フラグ・丸めモード)で
     // 通常コアに流し、成否と CPU・メモリの結果のハッシュを固定値と照合する(表とレンズへの書き換え前に採取)。
+    // 同じ命令を IR(1 命令ずつ)でも実行して、通常コアと同じ結果になることを見る。
     static void FpuRegression()
     {
         List<byte[]> codes = [];
@@ -680,22 +688,36 @@ static class CoreTests
         foreach (var variant in new (uint flags, ushort cw)[] { (0x202, 0x037F), (0x247, 0x037F), (0x202, 0x0F7F) })
         foreach (var code in codes)
         {
-            Reset(SlowEnv, code);
-            var memory = SlowEnv.Ram;
-            BitConverter.GetBytes(1.5f).CopyTo(memory, 0x3000);
-            BitConverter.GetBytes(2.25).CopyTo(memory, 0x3008);
-            BitConverter.GetBytes((short)-7).CopyTo(memory, 0x3010);
-            BitConverter.GetBytes(100000).CopyTo(memory, 0x3014);
-            BitConverter.GetBytes(-5L).CopyTo(memory, 0x3018);
-            BitConverter.GetBytes(mant).CopyTo(memory, 0x3020);
-            BitConverter.GetBytes(se).CopyTo(memory, 0x3028);
-            for (var offset = 0; offset < 108; offset++) memory[0x3100 + offset] = (byte)(offset * 7 + 1);
-            var cpu = CreateCpu(0x12345678, 0x3000, variant.flags);
-            cpu.fpu_cw = variant.cw; cpu.fpu_top = 5; cpu.fpu_valid = 0xE0;
-            cpu.fpu_st[5] = 2.0; cpu.fpu_st[6] = -0.5; cpu.fpu_st[7] = 8.0;
+            CPU Prepare(EmuEnvironment env)
+            {
+                Reset(env, code);
+                var memory = env.Ram;
+                BitConverter.GetBytes(1.5f).CopyTo(memory, 0x3000);
+                BitConverter.GetBytes(2.25).CopyTo(memory, 0x3008);
+                BitConverter.GetBytes((short)-7).CopyTo(memory, 0x3010);
+                BitConverter.GetBytes(100000).CopyTo(memory, 0x3014);
+                BitConverter.GetBytes(-5L).CopyTo(memory, 0x3018);
+                BitConverter.GetBytes(mant).CopyTo(memory, 0x3020);
+                BitConverter.GetBytes(se).CopyTo(memory, 0x3028);
+                for (var offset = 0; offset < 108; offset++) memory[0x3100 + offset] = (byte)(offset * 7 + 1);
+                var prepared = CreateCpu(0x12345678, 0x3000, variant.flags);
+                prepared.fpu_cw = variant.cw; prepared.fpu_top = 5; prepared.fpu_valid = 0xE0;
+                prepared.fpu_st[5] = 2.0; prepared.fpu_st[6] = -0.5; prepared.fpu_st[7] = 8.0;
+                return prepared;
+            }
+            var cpu = Prepare(SlowEnv);
             var ok = SlowStep(SlowEnv, cpu, null).IsSuccess;
             writer.Write(ok);
-            if (ok) { writer.Write(CpuBytes(cpu)); writer.Write(SHA256.HashData(memory.AsSpan(0x3000, 0x200))); }
+            if (ok) { writer.Write(CpuBytes(cpu)); writer.Write(SHA256.HashData(SlowEnv.Ram.AsSpan(0x3000, 0x200))); }
+            // IR: 表にあるエンコーディングは通常コアの State を呼ぶ文に下りて同じ結果になり、表に無いものは IR に下りない。
+            var irCpu = Prepare(FastEnv);
+            var irOk = IrStep.Step(FastEnv, irCpu).IsSuccess;
+            Equal((ok, ok), (irOk, IrStep.UsedTranslation), $"x87 {Convert.ToHexString(code)} is lowered to the IR exactly when the reference core defines it");
+            if (ok)
+            {
+                Equal(Convert.ToHexString(CpuBytes(cpu)), Convert.ToHexString(CpuBytes(irCpu)), $"IR x87 CPU {Convert.ToHexString(code)}");
+                Equal(true, SlowEnv.Ram.AsSpan().SequenceEqual(FastEnv.Ram), $"IR x87 memory {Convert.ToHexString(code)}");
+            }
             cases++;
         }
         writer.Flush();
@@ -772,11 +794,11 @@ static class CoreTests
         Equal((3u, 0x22222222u, 0x8000u), Run([0xF3, 0x89, 0xD8]), "rep mov eax, ebx moves");
     }
 
-    // グループ命令の表に無い reg 値(0F 01 /4 SMSW、/5、/6 LMSW、FE /2 など)は失敗(#UD)になり、ホスト側の例外にはならない。
+    // グループ命令の表に無い reg 値(0F 01 /5、FE /2、0F 00 /6 と /7)は失敗(#UD)になり、ホスト側の例外にはならない。
     static void UndefinedGroupMembers()
     {
         var env = SlowEnv;
-        foreach (var code in new byte[][] { [0x0F, 0x01, 0xE0], [0x0F, 0x01, 0xE8], [0x0F, 0x01, 0xF0], [0xFE, 0xD0], [0x0F, 0x00, 0xF0], [0x0F, 0x00, 0xF8] })
+        foreach (var code in new byte[][] { [0x0F, 0x01, 0xE8], [0xFE, 0xD0], [0x0F, 0x00, 0xF0], [0x0F, 0x00, 0xF8] })
         {
             Reset(env, code);
             var cpu = CreateCpu();

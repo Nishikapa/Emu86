@@ -291,11 +291,23 @@ static class SnapshotTests
         ata.WriteReg(0x1F5, 0x65); ata.WriteReg(0x1F6, 0xE7); ata.WriteReg(0x1F7, 0x30); // WRITE SECTORS: 1 セクタ分のバッファを待つ
         ata.WriteData(4, 0x44434241); ata.IrqPending = true;
         env.Ata = ata;
+        var cdrom = new AtapiDevice(null);
+        cdrom.WriteReg(0x174, 0x10); cdrom.WriteReg(0x175, 0x00); cdrom.WriteReg(0x177, 0xA0); // PACKET、1 回の上限 16 バイト
+        foreach (var word in new uint[] { 0x0012, 0x0000, 0x0024, 0, 0, 0 }) cdrom.WriteData(2, word); // INQUIRY(36 バイト)
+        cdrom.ReadData(4); // 最初の区切りの途中まで読んだ状態
+        env.Cdrom = cdrom;
+        // VGA BIOS スタブの呼び出し: VBE のモード情報(256 バイト)を返している途中(結果を 2 語、データを 3 バイト読んだところ)。
+        env.VgaBios.Begin(0x4F01);
+        foreach (var argument in new ushort[] { 0x1B1B, 0x0118 }) env.VgaBios.Argument(argument);
+        env.VgaBios.Result(env); env.VgaBios.Result(env);
+        for (var index = 0; index < 3; index++) env.VgaBios.Data();
     }
 
     static string Sha256(byte[] data) => Convert.ToHexString(SHA256.HashData(data));
 
-    // v12 形式のバイト列を固定する。直列化の実装を差し替えても、同じ状態からは同じバイト列が出ること。
+    // v14 形式のバイト列を固定する。直列化の実装を差し替えても、同じ状態からは同じバイト列が出ること。
+    // (v13 = v12 + CD/DVD-ROM の有無 1 バイトと、あればその状態 88 バイト。v14 = v13 + VGA BIOS スタブの呼び出し口:
+    //  引数 6 語、結果 5 語、受け取った数、返した数、返すバイト列(長さ + 中身)、位置。)
     static void Layout()
     {
         var env = Environment(); var cpu = Cpu(); PopulateAll(env, cpu);
@@ -305,8 +317,8 @@ static class SnapshotTests
             cpu.WriteTo(writer); env.SaveState(writer); env.SaveRuntimeState(writer); cpu.SaveRuntimeState(writer);
             env.SaveDeviceState(writer); env.Vga.SaveState(writer); env.Mouse.SaveState(writer); env.Com1.SaveState(writer); env.Com2.SaveState(writer);
         }
-        Equal(396488L + 24 + VgaDevice.LfbSize, stream.Length, "v12 state length");
-        Equal("FFF5D3EB7C41518B482587ABAB7CD0AC686BC41BED1D8725062E267EA9EE8AC2", Sha256(stream.ToArray()), "v12 state layout (RTC 2026-10-28, guest clock and PIT channels 2026-11-01, Bochs VBE 2026-11-01, legacy PIT slots reserved 2026-11-02)");
+        Equal(396488L + 24 + VgaDevice.LfbSize + 1 + 88 + (12 + 10 + 4 + 4 + 4 + 256 + 4), stream.Length, "v14 state length");
+        Equal("54C8F492880A88D01FC3A1E72E2FABEF923910B73E53D28BA5A5DB87751E8D9F", Sha256(stream.ToArray()), "v14 state layout (RTC 2026-10-28, guest clock and PIT channels 2026-11-01, Bochs VBE 2026-11-01, legacy PIT slots reserved 2026-11-02, CD-ROM and VGA BIOS call port 2026-11-06)");
         var restored = Environment();
         using (var reader = new BinaryReader(new MemoryStream(stream.ToArray()), Encoding.UTF8))
         {
@@ -322,7 +334,7 @@ static class SnapshotTests
         }
         Close(restored.Ata); Close(env.Ata); env.Ata = null;
         SnapshotStore.Save("layout.snap", 777, cpu, env);
-        Equal("ED980E9ABFDC6A35717F36ABFFC97173E197B0FF60B4167ABBA1B5FE13765BCB", Sha256(File.ReadAllBytes("layout.snap")), "v12 file layout");
+        Equal("A496232B5BF16D64518FE779323669124476B2643C41AAA2EBB7BE765D10D0BE", Sha256(File.ReadAllBytes("layout.snap")), "v14 file layout");
     }
 
     // フォルトの統一経路: #GP は例外として命令開始時の状態へ戻り、Raise が #PF/#UD と同じ形で IDT 経由で配送する。

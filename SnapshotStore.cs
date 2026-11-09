@@ -6,7 +6,7 @@ namespace Emu86;
 public static class SnapshotStore
 {
     const string Magic = "EMU86SNP";
-    internal const int Version = 12;
+    internal const int Version = 14;
     const int HashSize = 32;
 
     public static void Save(string path, long count, CPU cpu, EmuEnvironment env)

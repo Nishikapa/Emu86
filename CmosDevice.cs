@@ -4,13 +4,17 @@ namespace Emu86;
 // 時計はゲストの時刻(命令数。GuestClock が秒に換算する。ランナーが Tsc に入れる)で進む。Data の時刻レジスタ(0/2/4/7/8/9/0x32)は
 // 「Tsc = 0 のときの時刻」を常に BCD・24 時間制で保持し(電池で動く時計の初期値に相当)、読むときに Tsc 秒を足して
 // 状態 B の形式(BCD/二進、24/12 時間)で返し、書くときは Tsc 秒を引いて戻す。状態は CMOS RAM だけで持てるので、
-// スナップショットの再開でも時刻は連続する。曜日(6)は日付から求める。アラーム・周期割り込み(IRQ8)は未実装。
+// スナップショットの再開でも時刻は連続する。曜日(6)は日付から求める。状態 A の UIP(更新中)は秒が変わる直前に立つ
+// (Windows 7 の HAL は UIP の立ち上がりから次の立ち上がりまでの TSC を数えて CPU の速さを測る)。
+// アラーム・周期割り込み(IRQ8)は未実装。
 internal sealed class CmosDevice(GuestClock clock)
 {
     public byte[] Data = new byte[128];
     public int Index;
 
     const int StatusA = 0x0A, StatusB = 0x0B, StatusC = 0x0C, StatusD = 0x0D, Century = 0x32;
+    // 更新周期: 予告の 244 マイクロ秒と更新の 1984 マイクロ秒。この間だけ UIP が立ち、終わりに秒が進む。
+    const ulong UpdateMicroseconds = 244 + 1984, Microsecond = 1_000_000;
     static readonly DateTime Default = new(2000, 1, 1, 0, 0, 0);
 
     // 時刻レジスタの表(Lens): レジスタ番号と、DateTime から項目を読む/項目を置き換える関数。
@@ -54,11 +58,15 @@ internal sealed class CmosDevice(GuestClock clock)
         : Index switch
         {
             6 => Encode((int)Current(tsc).DayOfWeek + 1),
-            StatusA => (byte)(Data[StatusA] & 0x7F), // UIP: 更新中になることはない
+            StatusA => (byte)(Data[StatusA] & 0x7F | (Updating(tsc) ? 0x80 : 0)),
             StatusC => (byte)0,                      // 割り込み要因なし
             StatusD => (byte)0x80,
             _ => Data[Index],
         };
+
+    // UIP: 秒が変わる直前の更新周期の間。SET(状態 B の bit7)で更新を止めている間は立たない。
+    bool Updating(ulong tsc) =>
+        (Data[StatusB] & 0x80) == 0 && clock.Ticks(tsc, (long)Microsecond) % Microsecond >= Microsecond - UpdateMicroseconds;
 
     public void Write(byte value, ulong tsc)
     {

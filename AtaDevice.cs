@@ -265,10 +265,11 @@ public class AtaDevice(DiskImage disk) : IDisposable
         Word(60, U32((uint)Math.Min(disk.TotalSectors, 0x0FFFFFFF))))           // LBA28 での総セクタ数
         .Build(512);
 
-    static Writer Word(int index, Writer writer) => At(index * 2, writer);
+    // IDENTIFY の項目の位置(ワード番号)。ATAPI の IDENTIFY PACKET DEVICE(AtapiDevice)も同じ形。
+    internal static Writer Word(int index, Writer writer) => At(index * 2, writer);
 
     // ATA の文字列: length 文字まで空白で埋めた ASCII を、ワード(2 バイト)ごとに前後を入れ替えて置く。
-    static Writer AtaString(string text, int length) => Bytes(
+    internal static Writer AtaString(string text, int length) => Bytes(
     [
         .. from pair in Encoding.ASCII.GetBytes(text.PadRight(length)).Chunk(2)
            from value in new[] { pair[1], pair[0] }

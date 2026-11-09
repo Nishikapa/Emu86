@@ -19,11 +19,12 @@ trace.log
 # Claude Code local settings
 .claude/
 
-# Disk images and their copy-on-write overlays
-sample.vhd
-sample.vhdx
+# Disk images, their copy-on-write overlays, and CD/DVD images
+*.vhd
+*.vhdx
 *.avhdx
 *.avhdx.old
+*.iso
 
 # Emulator execution snapshots (CPU + memory + I/O state)
 *.snap

@@ -44,9 +44,10 @@ static public class Interrupts
         select Unit.unit;
 
     // リアルモードの INT 19h(SeaBIOS の POST 完了後のブート)で VGA BIOS スタブを導入する
-    // (SeaBIOS はレガシー ROM 領域を走査しないため、この時点で IVT 10h を差し替える)。
+    // (SeaBIOS はレガシー ROM 領域を走査しないため、この時点で IVT 10h を差し替える)。同じ時点で、SeaBIOS が作った
+    // ACPI テーブルから MADT を外す(APIC は無いので、OS に 8259 PIC の機械として見せる)。
     static State<Unit> InterruptReal(int vector) =>
-        from _stub in Effect((env, _) => { if (vector == 0x19) VgaBiosStub.Install(env); })
+        from _stub in Effect((env, _) => { if (vector == 0x19) { VgaBiosStub.Install(env); AcpiTables.HideMadt(env); } })
         from fl in GetDataFromCpu(cpu => (ushort)cpu.eflags)
         from _1 in Push16(fl)
         from cs in GetSRegData(1)

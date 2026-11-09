@@ -80,6 +80,17 @@ static class RunnerTests
         Equal(9_000_000L, RunOptions.Parse(["--limit", "1", "--limit", "9000000"]).Limit, "later option wins");
         Equal(long.MaxValue, RunOptions.Parse(["--limit", "max"]).Limit, "limit max");
         Equal(long.MaxValue, RunOptions.Parse(["--snapshot-interval", "0"]).SnapshotInterval, "interval 0 means at the end");
+        // CD/DVD の媒体、RAM の大きさ、空のディスクの生成。
+        var media = RunOptions.Parse(["--cdrom", "D:", "--ram", "1024", "--create-disk", "new.vhdx", "32"]);
+        Equal(("D:", 1024L << 20, ("new.vhdx", 32L << 30)), (media.CdromPath, media.RamBytes, media.CreateDisk.Value), "cdrom, ram and create-disk");
+        Equal((null, 0L, false), (defaults.CdromPath, defaults.RamBytes, defaults.CreateDisk.HasValue), "no CD-ROM, default RAM, no disk creation by default");
+        Equal("--ram: expected 16..2040 (MB)", Message("--ram", "8"), "RAM size range");
+        Equal("--create-disk: expected a size of 1..2040 (GB)", Message("--create-disk", "x.vhdx", "0"), "disk size range");
+        Equal(("merged.vhdx", (string)null), (RunOptions.Parse(["--disk", "base.vhdx", "--merge-disk", "merged.vhdx"]).MergeDiskPath, defaults.MergeDiskPath), "merge-disk target");
+        foreach (var args in new string[][] { ["--cdrom"], ["--ram"], ["--ram", "4096"], ["--create-disk", "x.vhdx"], ["--create-disk", "x.vhdx", "big"], ["--merge-disk"] })
+            Throws<ArgumentException>(() => RunOptions.Parse(args), "invalid " + string.Join(' ', args));
+        foreach (var name in new[] { "--cdrom", "--ram", "--create-disk", "--merge-disk" })
+            Equal(true, RunOptions.Usage.Contains("  " + name + " "), "usage lists " + name);
         // 使い方は同じ表から生成されるので、すべてのオプションが載っている。
         foreach (var name in arguments.Where(argument => argument.StartsWith("--")).Append("--help").Append("--snapshot-interval"))
             Equal(true, RunOptions.Usage.Contains("  " + name + " ") || RunOptions.Usage.Contains("  " + name + "\n") || RunOptions.Usage.Contains("  " + name + "\r"), "usage lists " + name);
@@ -413,6 +424,17 @@ static class RunnerTests
             var resetResult = SnapshotStore.Load("reset.snap", afterReset);
             Equal(20100L, resetResult.count, "count continues across the reset");
             Equal(true, resetResult.cpu.cs is 0xF000 or 0x0008, "restarted from the reset vector (SeaBIOS may have entered protected mode): " + resetResult.cpu.cs.ToString("x"));
+            // ディスクと CD-ROM をつないだままのリセット: 古い環境がファイルを閉じてから新しい環境が開き直す(閉じる前に開くと共有違反になる)。
+            DiskImage.CreateVhdx("reset-base.vhdx", 8L << 20);
+            File.WriteAllBytes("reset.iso", new byte[4 * CdMedia.SectorSize]);
+            using (var withMedia = EnvironmentFactory.Create(new DiskConfiguration("reset-base.vhdx"), cdromPath: "reset.iso"))
+            {
+                reset.CopyTo(withMedia.Ram, 0x100);
+                SnapshotStore.Save("reset-media.snap", 20, new CPU { eip = 0x100, code32 = true, stack32 = true, esp = 0x8000 }, withMedia);
+            }
+            error.GetStringBuilder().Clear();
+            Equal(0, Run("--disk", "reset-base.vhdx", "--cdrom", "reset.iso", "--resume", "--snapshot", "reset-media.snap", "--limit", "20100", "--notrace", "--noirq"), "CLI reset with media exit code: " + error);
+            Equal(true, error.ToString().Contains("[system] reset at instruction") && !error.ToString().Contains("used by another process"), "the disk and the CD-ROM are reopened across the reset: " + error);
             using var restored = new EmuEnvironment();
             var result = SnapshotStore.Load("resume.snap", restored);
             Equal(11L, result.count, "CLI saves final count");

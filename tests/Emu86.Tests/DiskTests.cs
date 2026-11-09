@@ -238,6 +238,117 @@ static class DiskTests
         Equal(((byte)0x51, (byte)0x04), (ata.ReadReg(0x3F6), ata.ReadReg(0x1F1)), "IDENTIFY PACKET DEVICE aborts");
     }
 
+    // 新しい空の VHDX(--create-disk): 親なしの可変長ディスクとして開け、全セクタがゼロ。差分を重ねて書くと差分側に入り、
+    // 元のファイルは変わらない。既存のファイルは上書きしない。
+    static void CreateEmptyDisk()
+    {
+        const string basePath = "empty.vhdx";
+        const long size = 3L << 30; // 3GB(2MB ブロック 1536 個)
+        DiskImage.CreateVhdx(basePath, size);
+        var created = File.ReadAllBytes(basePath);
+        Equal(0x300000 + (1 << 20), created.Length, "headers, log, metadata and a 1MB BAT region");
+        Equal("vhdxfile", System.Text.Encoding.ASCII.GetString(created, 0, 8), "file identifier");
+        Equal("Emu86", System.Text.Encoding.Unicode.GetString(created, 8, 10), "creator");
+        Equal(true, created.AsSpan(0x300000).IndexOfAnyExcept((byte)0) < 0, "every BAT entry is unallocated");
+        using (var disk = new DiskImage(basePath))
+        {
+            Equal((size / DiskImage.SectorSize, (string)null), (disk.TotalSectors, disk.ParentPath), "a dynamic disk of the requested size without a parent");
+            var sector = Enumerable.Repeat((byte)0xEE, DiskImage.SectorSize).ToArray();
+            disk.ReadSector(disk.TotalSectors - 1, sector, 0);
+            Equal(true, sector.All(value => value == 0), "unallocated sectors read as zero");
+        }
+        Throws<IOException>(() => DiskImage.CreateVhdx(basePath, size), "an existing file is not overwritten");
+        Throws<InvalidDataException>(() => DiskImage.CreateVhdx("odd.vhdx", 1000), "the size must be a whole number of sectors");
+        Equal(false, File.Exists("odd.vhdx"), "nothing is created for an invalid size");
+        Throws<InvalidOperationException>(() => new DiskImage(basePath, writable: true).Dispose(), "the empty disk itself is not opened for writing");
+        DiskImage.EnsureOverlay("empty.avhdx", basePath);
+        var data = Enumerable.Range(0, DiskImage.SectorSize).Select(index => (byte)index).ToArray();
+        using (var overlay = new DiskImage("empty.avhdx", writable: true))
+        {
+            overlay.WriteSector(0, data, 0);
+            overlay.WriteSector(overlay.TotalSectors - 1, data, 0);
+        }
+        using (var reopened = new DiskImage("empty.avhdx"))
+        {
+            var sector = new byte[DiskImage.SectorSize];
+            reopened.ReadSector(reopened.TotalSectors - 1, sector, 0);
+            Equal(true, sector.AsSpan().SequenceEqual(data), "the last sector reads back through the overlay");
+            reopened.ReadSector(1, sector, 0);
+            Equal(true, sector.All(value => value == 0), "untouched sectors still read as zero");
+        }
+        Equal(true, File.ReadAllBytes(basePath).AsSpan().SequenceEqual(created), "the base file is unchanged by writes to the overlay");
+    }
+
+    // --merge-disk: 差分を重ねた中身を、親を持たない新しい VHDX に書き出す。書いたセクタはそのまま、書いていない範囲はゼロで読め、
+    // データのあるブロックだけが割り当てられる(全部ゼロのブロックは割り当てない)。元のイメージと差分は変わらず、既存のファイルは上書きしない。
+    static void MergeDisk()
+    {
+        const string basePath = "merge-base.vhdx";
+        const string overlayPath = "merge-base.avhdx";
+        const long size = 64L << 20; // 64MB(2MB ブロック 32 個)
+        const int sectorsPerBlock = 0x200000 / DiskImage.SectorSize;
+        DiskImage.CreateVhdx(basePath, size);
+        DiskImage.EnsureOverlay(overlayPath, basePath);
+        static byte[] Pattern(long seed) => [.. Enumerable.Range(0, DiskImage.SectorSize).Select(index => (byte)(index * 7 + seed))];
+        long[] written = [0, 1, sectorsPerBlock - 1, 5L * sectorsPerBlock + 17, size / DiskImage.SectorSize - 1];
+        using (var overlay = new DiskImage(overlayPath, writable: true))
+        {
+            foreach (var lba in written) overlay.WriteSector(lba, Pattern(lba), 0);
+            overlay.WriteSector(9L * sectorsPerBlock, new byte[DiskImage.SectorSize], 0);   // ゼロだけを書いたブロック
+        }
+        var (baseBefore, overlayBefore) = (File.ReadAllBytes(basePath), File.ReadAllBytes(overlayPath));
+        long blocks;
+        using (var source = new DiskImage(overlayPath)) blocks = source.MergeInto("merged.vhdx");
+        Equal(3L, blocks, "blocks holding data are written (a block of zeros is not)");
+        Equal(0x300000L + (1 << 20) + 3 * 0x200000, new FileInfo("merged.vhdx").Length, "headers, BAT and three payload blocks");
+        using (var merged = new DiskImage("merged.vhdx"))
+        using (var source = new DiskImage(overlayPath))
+        {
+            Equal((source.TotalSectors, (string)null), (merged.TotalSectors, merged.ParentPath), "same size, no parent");
+            var expected = new byte[DiskImage.SectorSize];
+            var actual = new byte[DiskImage.SectorSize];
+            var mismatches = 0;
+            for (var lba = 0L; lba < merged.TotalSectors; lba++)
+            {
+                source.ReadSector(lba, expected, 0); merged.ReadSector(lba, actual, 0);
+                if (!expected.AsSpan().SequenceEqual(actual)) mismatches++;
+            }
+            Equal(0, mismatches, "every sector reads the same as through the overlay");
+            merged.ReadSector(5L * sectorsPerBlock + 17, actual, 0);
+            Equal(true, actual.AsSpan().SequenceEqual(Pattern(5L * sectorsPerBlock + 17)), "a written sector keeps its data");
+        }
+        Equal(true, File.ReadAllBytes(basePath).AsSpan().SequenceEqual(baseBefore) && File.ReadAllBytes(overlayPath).AsSpan().SequenceEqual(overlayBefore), "the base and the overlay are unchanged");
+        using (var source = new DiskImage(overlayPath)) Throws<IOException>(() => source.MergeInto("merged.vhdx"), "an existing file is not overwritten");
+        // 差分の無いディスク(親なしの VHDX)も同じ中身で書き出せる。
+        using (var alone = new DiskImage("merged.vhdx")) Equal(3L, alone.MergeInto("merged-again.vhdx"), "a standalone image merges into an equal one");
+        // コマンドライン: --disk と --merge-disk。
+        Program.MergeDisk(new DiskConfiguration(basePath), "merged-cli.vhdx");
+        Equal(new FileInfo("merged.vhdx").Length, new FileInfo("merged-cli.vhdx").Length, "--merge-disk picks up the overlay next to the base image");
+    }
+
+    // CD/DVD の媒体(ISO ファイル): 2048 バイトセクタで読む。読み取りは 32 セクタのチャンク単位で、チャンクの境界や
+    // 媒体の末尾(半端なチャンク)をまたぐ読み取りも正しい。範囲外は拒む。
+    static void CdImage()
+    {
+        const int sectors = 70; // 32 セクタのチャンクが 2 個と、6 セクタの半端
+        var image = new byte[sectors * CdMedia.SectorSize + 100]; // 末尾の 100 バイトはセクタに満たない
+        for (var sector = 0; sector < sectors; sector++) Array.Fill(image, (byte)(sector + 1), sector * CdMedia.SectorSize, CdMedia.SectorSize);
+        File.WriteAllBytes("media.iso", image);
+        using var media = new CdMedia("media.iso");
+        Equal((long)sectors, media.TotalSectors, "whole sectors only");
+        Equal("media.iso", media.Path, "the path as given");
+        var buffer = new byte[5 * CdMedia.SectorSize];
+        media.Read(30, 4, buffer, CdMedia.SectorSize);
+        Equal("00,1f,20,21,22", string.Join(",", Enumerable.Range(0, 5).Select(index => buffer[index * CdMedia.SectorSize + 7].ToString("x2"))), "a read across a chunk boundary lands at the offset");
+        media.Read(69, 1, buffer, 0);
+        Equal((byte)70, buffer[CdMedia.SectorSize - 1], "the last sector (in a short chunk)");
+        media.Read(0, 1, buffer, 0);
+        Equal((byte)1, buffer[0], "back to the first chunk");
+        Throws<ArgumentOutOfRangeException>(() => media.Read(69, 2, buffer, 0), "a read past the end");
+        Throws<ArgumentOutOfRangeException>(() => media.Read(-1, 1, buffer, 0), "a negative sector");
+        Throws<FileNotFoundException>(() => new CdMedia("missing.iso").Dispose(), "a missing image");
+    }
+
     // 名前付きのケース(ランナーが順に実行し、失敗したケース名を報告する)。
     public static (string Name, Action Run)[] Cases =>
     [
@@ -249,5 +360,8 @@ static class DiskTests
         ("round-trips", RoundTrips),
         ("invalid-regions", InvalidRegions),
         ("ata-commands", AtaCommands),
+        ("create-empty-disk", CreateEmptyDisk),
+        ("merge-disk", MergeDisk),
+        ("cd-image", CdImage),
     ];
 }

@@ -8,7 +8,7 @@ public partial class EmuEnvironment : IDisposable
     // 1MBちょうどではなく拡張メモリを持たせる。BIOS(bios.bin)は先頭1MBの末尾に配置される。
     public const int RamSize = 256 * 1024 * 1024; // 256MB(Debian の initramfs をロードするには 32MB では不足)
 
-    public EmuEnvironment(byte[] memory = null, byte[] bios = null, AtaDevice ata = null)
+    public EmuEnvironment(byte[] memory = null, byte[] bios = null, AtaDevice ata = null, AtapiDevice cdrom = null)
     {
         Ram = memory ?? new byte[RamSize];
         if (bios is { Length: > 0 })
@@ -22,17 +22,28 @@ public partial class EmuEnvironment : IDisposable
         Acpi = new AcpiPmDevice(Clock);
         Translations = new TranslationCache(Ram.Length);
         Ata = ata;
+        Cdrom = cdrom;
     }
 
     public void Dispose()
     {
-        Ata?.Dispose();
+        ReleaseMedia();
         Com1.Host?.Dispose(); Com1.Host = null;
         Com2.Host?.Dispose(); Com2.Host = null;
     }
 
+    // ディスクと CD/DVD-ROM を閉じて外す(ゲストのリセットで環境を作り直すとき、新しい環境が同じファイルを開く前に呼ぶ)。
+    public void ReleaseMedia()
+    {
+        Ata?.Dispose(); Ata = null;
+        Cdrom?.Dispose(); Cdrom = null;
+    }
+
     // プライマリ ATA チャネルのマスタドライブ(未接続なら null)。
     public AtaDevice Ata;
+
+    // セカンダリ ATA チャネルのマスタの CD/DVD-ROM ドライブ(ATAPI。未接続なら null)。
+    public AtapiDevice Cdrom;
 
     // PCI ホスト(コンフィグ機構 #1)。ata_piix を bind させるため PIIX3 IDE を露出する。
     public PciHost Pci = new();

@@ -123,6 +123,15 @@ public static partial class Semantics
         from _2 in Advance(length)
         select Unit.unit;
 
+    // POP m: 書き込み先のアドレスに ESP を使う形(pop [esp+8])は、ESP を進めた後の値で実効アドレスを求める(通常コアの Pop_8F と同じ)。
+    // ESP を進めてアドレスを一時変数に束縛し、ESP を戻してから「書き込み先の検査 → pop → 書く」を行うので、フォルト時の CPU は命令の先頭のまま。
+    static Emit<Unit> PopIntoMemory(Expr address, int type, int length) =>
+        from _1 in Statement(new AdjustStackStmt(Bytes(type)))
+        from bound in Let(address)
+        from _2 in Statement(new AdjustStackStmt(-Bytes(type)))
+        from _3 in Simple(new PopIntoMemoryStmt(bound, type), length)
+        select Unit.unit;
+
     static Emit<Unit> Exchange(Place a, Place b, int type, int length) =>
         from x in Read(a, type)
         from y in Read(b, type)
@@ -300,7 +309,7 @@ public static partial class Semantics
             0x61 => Simple(new PopAllStmt(typeW), length),
             0x6C or 0x6D or 0x6E or 0x6F or (>= 0xA4 and <= 0xA7) or (>= 0xAA and <= 0xAF) =>
                 Simple(new StringStmt(op, (op & 1) != 0 ? Bytes(typeW) : 1, instruction.AddressSize32, prefixes, repeat), length),
-            0x8F when reg == 0 => instruction.ModRm is { Mod: 3 } ? PopInto(Rm(), typeW, length) : Simple(new PopIntoMemoryStmt(Rm().Address, typeW), length),
+            0x8F when reg == 0 => instruction.ModRm is { Mod: 3 } ? PopInto(Rm(), typeW, length) : PopIntoMemory(Rm().Address, typeW, length),
             0x9C => PushValue(typeW, _ => new FlagsExpr(typeW), length),
             0x9D => Simple(new PopFlagsStmt(typeW), length),
             0x9E => Simple(new FlagStmt(7), length),
@@ -327,10 +336,16 @@ public static partial class Semantics
                 from _ in Statement(new ArgumentStateStmt(selector, value => Segments.LoadSReg(reg, (ushort)value).Then(CpuStates.IpInc(length)), "MOV Sreg"))
                 select Unit.unit,
             0x9A => Statement(new StateStmt(CpuStates.IpInc(length).Then(Instructions.PushReturnFar(typeW)).Then(Instructions.FarTransfer((instruction.Immediate, (ushort)instruction.Immediate2))), "CALL far")),
-            0x9B => Advance(length),
+            0x9B => Statement(new StateStmt(Fpu.WaitAvailable.Then(CpuStates.IpInc(length)), "FWAIT")),
+            // x87(D8-DF): 表にあるエンコーディングを、通常コアの State のまま 1 つの文にする(#NM の検査も State の中)。
+            // メモリ形式は実効アドレスを式で求めてから、その番地の命令を組み立てる。
+            >= 0xD8 and <= 0xDF when instruction.ModRm is { Mod: 3 } st =>
+                Fpu.RegisterInstruction(op, st.Reg, st.Rm) is { } x87 ? Statement(new StateStmt(x87.Then(CpuStates.IpInc(length)), "x87")) : null,
+            >= 0xD8 and <= 0xDF =>
+                Fpu.MemoryInstruction(op, reg) is { } x87 ? Statement(new ArgumentStateStmt(Rm().Address, address => x87(address).Then(CpuStates.IpInc(length)), "x87 m")) : null,
             0xC4 or 0xC5 when instruction.ModRm is { Mod: not 3 } =>
                 Statement(new ArgumentStateStmt(Rm().Address, address => Instructions.LoadFarPointer(reg, op == 0xC4 ? 0 : 3, (true, address), typeW).Then(CpuStates.IpInc(length)), "LES/LDS")),
-            0xC8 => Statement(new StateStmt(DataAccess.Enter((ushort)instruction.Immediate, (int)instruction.Immediate2).Then(CpuStates.IpInc(length)), "ENTER")),
+            0xC8 => Statement(new StateStmt(DataAccess.Enter((ushort)instruction.Immediate, (int)instruction.Immediate2, typeW).Then(CpuStates.IpInc(length)), "ENTER")),
             0xCA => Statement(new StateStmt(Instructions.FarReturnOf(typeW, (ushort)instruction.Immediate), "RETF imm16")),
             0xCB => Statement(new StateStmt(Instructions.FarReturnOf(typeW, 0), "RETF")),
             0xCC => Statement(new StateStmt(CpuStates.IpInc(length).Then(Interrupts.Interrupt(3)), "INT3")),

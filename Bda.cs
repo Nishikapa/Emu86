@@ -20,4 +20,5 @@ static class Bda
     public const int CharacterHeight = 0x485;   // 文字の高さ(ワード)
     public const int VideoControl = 0x487;      // ビデオ制御(bit7 = モード設定で画面を消さなかった)
     public const int VideoSwitches = 0x488;     // スイッチ、モード設定の制御、表示結合コードの表の番号
+    public const int VbeMode = 0x4BA;           // 現在の VBE のモード(ワード。0 = 従来のモード。Bochs の VGA BIOS と同じ場所)
 }

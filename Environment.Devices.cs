@@ -9,6 +9,8 @@ public partial class EmuEnvironment
     internal KeyboardController Keyboard { get; } = new();
     internal AcpiPmDevice Acpi { get; }
     public VgaDevice Vga { get; } = new();
+    // VGA BIOS スタブのサービスの呼び出し口(ROM のハンドラが I/O ポートで使う)。
+    internal VgaBiosPort VgaBios { get; } = new();
     // COM1(0x3F8, IRQ4)と COM2(0x2F8, IRQ3)。ホスト側(名前付きパイプ)は起動時の指定で接続する。
     public Uart16550 Com1 { get; } = new();
     public Uart16550 Com2 { get; } = new();

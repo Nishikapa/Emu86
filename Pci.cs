@@ -51,15 +51,14 @@ public class PciHost
                         throw new InvalidDataException("Invalid PCI function in snapshot");
                     reader.BaseStream.ReadExactly(config);
                 }
+                // コンフィグ空間から導いて持っている値(線形フレームバッファの番地)を取り直す。環境のスナップショットはこの表を
+                // 直接読むので、ここで行う(以前は LoadState だけが取り直していて、再開後は番地が 0 のままだった)。
+                p.UpdateLfbBase();
             });
 
     public void SaveState(BinaryWriter writer) => Layout.Save(writer, this);
 
-    public void LoadState(BinaryReader reader)
-    {
-        Layout.Load(reader, this, SnapshotStore.Version);
-        UpdateLfbBase();
-    }
+    public void LoadState(BinaryReader reader) => Layout.Load(reader, this, SnapshotStore.Version);
 
     // ファンクションのキー(dev<<3 | fn)。
     static int Key(int device, int function) => (device << 3) | function;

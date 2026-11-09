@@ -8,6 +8,10 @@ public partial class EmuEnvironment
     // 周期ごとに立ち、配送で降りる。スナップショットには含めない(再開時は次の周期から)。
     public bool TimerIrqPending;
 
+    // HLT で次の割り込みまで飛ばした命令数の累計(ランナーが足す)。自動操作がゲストの入力待ちを見分けるのに使う。
+    // スナップショットには含めない。
+    public long IdleInstructions;
+
     // v2 から: RAM・I/O ポート・CMOS・PIT チャネル 0 と、接続中なら ATA のレジスタとバッファ。
     // ディスクの中身(DiskImage)は書き込みのたびにファイルへ反映済みなのでここでは扱わない。
     static readonly Codec<EmuEnvironment> Memory = new Codec<EmuEnvironment>()
@@ -87,13 +91,34 @@ public partial class EmuEnvironment
         // v11: ゲストの時計(1 秒 = N 命令)と、再装填値・モードどおりに数える PIT のチャネル 0/2(docs/adr/0004)。
         .I64(e => e.Clock.InstructionsPerSecond, (e, v) => e.Clock.InstructionsPerSecond = v, since: 11)
         .Nested(e => e.Pit.Channel0, PitDevice.Channel.Layout, since: 11)
-        .Nested(e => e.Pit.Channel2, PitDevice.Channel.Layout, since: 11);
+        .Nested(e => e.Pit.Channel2, PitDevice.Channel.Layout, since: 11)
+        // v13: CD/DVD-ROM(ATAPI)のレジスタと転送中のデータ。媒体そのものは保存しない(再開時に --cdrom で同じものをつなぐ)。
+        // 保存時にドライブが無かったスナップショットを再開するときは、つないであっても外す(ゲストが見ていた構成に合わせる)。
+        .Custom(
+            (writer, e) => { writer.Write(e.Cdrom != null); e.Cdrom?.SaveState(writer); },
+            (reader, e) =>
+            {
+                if (reader.ReadBoolean())
+                {
+                    e.Cdrom ??= new AtapiDevice(null);
+                    e.Cdrom.LoadState(reader);
+                }
+                else
+                {
+                    e.Cdrom?.Dispose();
+                    e.Cdrom = null;
+                }
+            },
+            since: 13)
+        // v14: VGA BIOS スタブの呼び出し口(ROM のハンドラが送った引数と、読み戻している途中の結果)。
+        .Nested(e => e.VgaBios, VgaBiosPort.Layout, since: 14);
 
     public void SaveState(BinaryWriter writer) => Memory.Save(writer, this);
 
     public void LoadState(BinaryReader reader)
     {
         Memory.Load(reader, this, SnapshotStore.Version);
+        VgaBiosStub.Upgrade(this);    // v13 以前のスナップショットの RAM にある VGA BIOS スタブを、今の ROM に置き換える
         Translations.InvalidateAll(); // RAM が差し替わった
     }
 

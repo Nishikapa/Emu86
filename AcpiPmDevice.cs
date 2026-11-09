@@ -5,12 +5,17 @@ internal sealed class AcpiPmDevice(GuestClock clock)
     public ushort Pm1Sts, Pm1En, Pm1Cnt;
     public ushort Gpe0Sts, Gpe0En;
 
+    // 電源断の要求: PM1_CNT に SLP_EN と S5 の SLP_TYP が書かれた。同梱の SeaBIOS の DSDT では _S5(ソフトオフ)が SLP_TYP 0
+    // (_S3 は 1、_S4 は 2。これらは記録するだけ)。ランナーが見て実行を終える。スナップショットには含めない。
+    public bool PowerOffRequested;
+    const int SoftOff = 0;
+
     // PM タイマ(3.579545 MHz、24 ビット)はゲストの時計で進む。
     public uint Timer(ulong tsc) => (uint)clock.PmTicks(tsc) & 0xFFFFFF;
 
     // 16 ビットレジスタの表(Lens): 偶数番地 → 読む/書く関数。バイト単位の入出力は番地の下位ビットでレーン(下位/上位)を選ぶ。
     // ClearOnWrite は状態レジスタ(W1C: 書いた 1 のビットを落とす)、そうでなければ値をそのまま置く。
-    // PM1_CNT の SLP_EN(bit13)は書き込み専用で、スリープ要求を記録して読み戻しは 0。タイマ(+0x08)は読み出し専用なので表に無い。
+    // PM1_CNT の SLP_EN(bit13)は書き込み専用で、スリープ要求を記録して読み戻しは 0(S5 なら電源断の要求)。タイマ(+0x08)は読み出し専用なので表に無い。
     readonly record struct Word(Func<AcpiPmDevice, ushort> Get, Action<AcpiPmDevice, ushort> Set, bool ClearOnWrite = false);
 
     static readonly Dictionary<int, Word> Words = new()
@@ -20,7 +25,11 @@ internal sealed class AcpiPmDevice(GuestClock clock)
         [0xB004] = new(acpi => acpi.Pm1Cnt, (acpi, value) =>
         {
             if ((value & 0x2000) != 0)
-                Console.Error.WriteLine($"[acpi] sleep requested: SLP_TYP={(value >> 10) & 7} (PM1_CNT={value:x4})");
+            {
+                var type = (value >> 10) & 7;
+                Console.Error.WriteLine($"[acpi] sleep requested: SLP_TYP={type} (PM1_CNT={value:x4})");
+                if (type == SoftOff) acpi.PowerOffRequested = true;
+            }
             acpi.Pm1Cnt = (ushort)(value & 0xDFFF);
         }),
         [0xAFE0] = new(acpi => acpi.Gpe0Sts, (acpi, value) => acpi.Gpe0Sts = value, ClearOnWrite: true),

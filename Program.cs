@@ -15,6 +15,12 @@ static class Program
                 Console.WriteLine(RunOptions.Usage);
                 return 0;
             }
+            if (options.CreateDisk is { } created)
+            {
+                DiskImage.CreateVhdx(created.Path, created.Bytes);
+                Console.WriteLine($"created {Path.GetFullPath(created.Path)}: empty dynamic VHDX, {created.Bytes >> 30} GB");
+                return 0;
+            }
             var disk = options.DiskPath != null
                 ? new DiskConfiguration(options.DiskPath, options.OverlayPath)
                 : DiskConfiguration.Discover(Directory.GetCurrentDirectory());
@@ -23,7 +29,12 @@ static class Program
                 DumpSectors(disk?.OverlayPath ?? "sample.avhdx", dump.Start, dump.Count);
                 return 0;
             }
-            var env = EnvironmentFactory.Create(disk, attachDisk: !options.Resume);
+            if (options.MergeDiskPath is { } merged)
+            {
+                MergeDisk(disk ?? throw new ArgumentException("--merge-disk needs a disk image (--disk)"), merged);
+                return 0;
+            }
+            var env = EnvironmentFactory.Create(disk, attachDisk: !options.Resume, options.CdromPath, options.RamBytes);
             try
             {
                 AttachSerial(options, env);
@@ -112,8 +123,12 @@ static class Program
             Console.Error.WriteLine($"[system] reset at instruction {count}");
             var font = env.Vga.FallbackFont;
             var hadDisk = env.Ata != null;
-            var fresh = EnvironmentFactory.Create(disk, attachDisk: hadDisk);
-            fresh.CmosRtc.SetClock(env.CmosRtc.Current((ulong)count), (ulong)count); // リセットをまたいでも時計は進み続ける
+            var cdromPath = env.Cdrom?.MediaPath;
+            var now = env.CmosRtc.Current((ulong)count);
+            // 新しい環境が同じディスクと媒体を開けるように、古い環境の分を先に閉じる(差分は書き込みのたびにファイルへ反映済み)。
+            env.ReleaseMedia();
+            var fresh = EnvironmentFactory.Create(disk, attachDisk: hadDisk, cdromPath, env.Ram.LongLength);
+            fresh.CmosRtc.SetClock(now, (ulong)count); // リセットをまたいでも時計は進み続ける
             HandOverSerial(env, fresh);
             env.Dispose();
             env = fresh;
@@ -175,5 +190,13 @@ static class Program
             output.Write(buffer);
         }
         Console.WriteLine($"dumped LBA {start}..{start + count - 1} to lba_dump.bin");
+    }
+
+    // --merge-disk: ディスク(差分があればそれを重ねた中身)を、親を持たない新しい VHDX に書き出す。元のイメージと差分は変えない。
+    internal static void MergeDisk(DiskConfiguration disk, string path)
+    {
+        using var source = new DiskImage(File.Exists(disk.OverlayPath) ? disk.OverlayPath : disk.BaseImagePath);
+        var blocks = source.MergeInto(path);
+        Console.WriteLine($"merged {source.FilePath} into {Path.GetFullPath(path)}: {blocks} blocks written, {new FileInfo(path).Length >> 20} MB");
     }
 }

@@ -61,6 +61,12 @@ internal sealed class RunOptions
     public string VramDumpPath { get; private set; }
     public string DiskPath { get; private set; }
     public string OverlayPath { get; private set; }
+    public string CdromPath { get; private set; }
+    public (string Path, long Bytes)? CreateDisk { get; private set; }
+    // --disk に差分を重ねた中身を書き出す先(新しい VHDX)。
+    public string MergeDiskPath { get; private set; }
+    // RAM の大きさ(バイト。0 = 既定の EmuEnvironment.RamSize)。
+    public long RamBytes { get; private set; }
     public (long Start, int Count)? DumpLba { get; private set; }
     public DiagnosticOptions Diagnostics { get; } = new();
 
@@ -76,6 +82,18 @@ internal sealed class RunOptions
         from count in Integer
         from _ in Require(count is > 0 and <= int.MaxValue && start <= long.MaxValue - count, "invalid sector range")
         select (start, (int)count);
+
+    // 新しい空のディスク: パスと大きさ(GB)。
+    static readonly ArgParser<(string Path, long Bytes)> NewDisk =
+        from path in Value
+        from gigabytes in Integer
+        from _ in Require(gigabytes is >= 1 and <= 2040, "expected a size of 1..2040 (GB)")
+        select (path, gigabytes << 30);
+
+    static readonly ArgParser<long> Megabytes =
+        from megabytes in Integer
+        from _ in Require(megabytes is >= 16 and <= 2040, "expected 16..2040 (MB)")
+        select megabytes << 20;
 
     static readonly ArgParser<DateTime> Timestamp = Value.Select(text =>
         DateTime.TryParseExact(text, "yyyy-MM-dd'T'HH:mm:ss", CultureInfo.InvariantCulture, DateTimeStyles.None, out var time)
@@ -95,6 +113,7 @@ internal sealed class RunOptions
         Of("Run", "--ips", "count", "Instructions per guest second: the PIT, ACPI PM timer and RTC advance at this rate (default 50,000,000; a resumed snapshot keeps its own)",
             Integer, (o, v) => GuestClock.DefaultInstructionsPerSecond = v < 1 ? throw new ArgumentException("--ips: expected 1 or more") : (long)v),
         Of("Run", "--rtc", "yyyy-MM-ddTHH:mm:ss", "Start the real-time clock at this guest time on a cold boot (default: the host's local time)", Timestamp, (o, v) => o.Rtc = v),
+        Of("Run", "--ram", "megabytes", "Guest RAM size (default 256; a resumed snapshot needs the size it was saved with)", Megabytes, (o, v) => o.RamBytes = v),
         Of("Run", "--screen", "path", "Save the VGA display as a PNG at each snapshot and when the run stops", Value, (o, v) => o.ScreenPath = v),
         Of("Run", "--limit", "count|max", "Stop after count instructions (max = run until the window closes)",
             Word("max").Select(_ => long.MaxValue).Or(Integer), (o, v) => o.Limit = v),
@@ -109,10 +128,13 @@ internal sealed class RunOptions
         Of("Run", "--com1", "name", @"Serve COM1 on \\.\pipe\name (WinDbg: com:pipe,port=\\.\pipe\name,resets=0,reconnect)", Value, (o, v) => o.Com1Pipe = v),
         Of("Run", "--com2", "name", @"Serve COM2 on \\.\pipe\name", Value, (o, v) => o.Com2Pipe = v),
         Flag("Run", "--boot-debug", "Drive NTLDR's F8 menu to boot Windows in Debugging Mode (COM2, 19200 bps)", o => o.BootDebug = true),
-        Of("Run", "--type", "[prompt=>]keys", "Type keys into the guest once the last screen line ends with prompt (repeatable, in order; \n is Enter, <down> <end> <c-x> <a-f2> are special keys; <graphics>, <text> or <2s> instead of a prompt waits for the display mode or guest seconds); the run stops when the last prompt returns", Value, (o, v) => o.Type.Add(v)),
+        Of("Run", "--type", "[prompt=>]keys", "Type keys into the guest once the last screen line ends with prompt (repeatable, in order; \n is Enter, <down> <end> <c-x> <a-f2> <w-r> are special keys, <mouse dx,dy> moves the PS/2 mouse and <click>/<rclick> clicks; <graphics>, <text>, <2s> or <idle> instead of a prompt waits for the display mode, guest seconds, or the guest to sit waiting for input); the run stops when the last prompt returns", Value, (o, v) => o.Type.Add(v)),
         Flag("Run", "--help", "Show this help and exit", o => o.Help = true),
         Of("Disk", "--disk", "path", "Base disk image (default: sample.vhd or sample.vhdx in the current directory)", Value, (o, v) => o.DiskPath = v),
         Of("Disk", "--overlay", "path", "Writable overlay for --disk (default: the base path with .avhdx)", Value, (o, v) => o.OverlayPath = v),
+        Of("Disk", "--cdrom", "path|drive", @"CD/DVD medium on the secondary IDE channel (ATAPI): an ISO image, or a host optical drive such as D: (read sector by sector from \\.\D:)", Value, (o, v) => o.CdromPath = v),
+        Of("Disk", "--create-disk", "path gigabytes", "Create a new empty dynamic VHDX of that size and exit (use it with --disk; an existing file is not overwritten)", NewDisk, (o, v) => o.CreateDisk = v),
+        Of("Disk", "--merge-disk", "path", "Write --disk with its overlay applied to a new standalone dynamic VHDX and exit (the base image and the overlay are left as they are; an existing file is not overwritten)", Value, (o, v) => o.MergeDiskPath = v),
         Of("Disk", "--dumplba", "start count", "Dump sectors from the existing overlay to lba_dump.bin", SectorRange, (o, v) => o.DumpLba = v),
         Of("Diagnostics", "--dumpvram", "path", "Write the VGA registers and the four VRAM planes to the file when the run stops", Value, (o, v) => o.VramDumpPath = v),
         Flag("Diagnostics", "--trace-all", "Trace every instruction to trace.log, not only control transfers", o => o.Diagnostics.TraceAll = true),

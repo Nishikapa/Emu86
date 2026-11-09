@@ -136,6 +136,11 @@ public partial class CPU
     // 書き込み保護(CR0.WP)。リング0 でも読み取り専用ページへの書き込みを #PF にする。
     public bool wp => 0 != (this.cr0 & 0x10000);
 
+    // FPU を使えるか(#NM の判定): EM(FPU なし)か TS(タスク切り替え後)なら x87 命令は #NM。FWAIT は MP と TS の両方。
+    public bool mp => 0 != (this.cr0 & 0x2);
+    public bool em => 0 != (this.cr0 & 0x4);
+    public bool ts => 0 != (this.cr0 & 0x8);
+
     public DecodeContext Decode;
     public bool cs_prefix { get => Decode.Cs; set => Decode.Cs = value; }
     public bool es_prefix { get => Decode.Es; set => Decode.Es = value; }

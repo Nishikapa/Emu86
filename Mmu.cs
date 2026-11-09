@@ -10,8 +10,11 @@ static public class Mmu
     static internal uint EnvTranslate(EmuEnvironment env, uint lin, bool write) =>
         env.Paging.TryLookup(lin, write, out var physical) ? physical : EnvWalkPageTable(env, lin, write);
 
-    static uint EnvWalkPageTable(EmuEnvironment env, uint lin, bool write) =>
-        env.Paging.Fill(lin, write, EnvWalk(env, lin, write, env.Paging.Pae ? PaeLevels : LegacyLevels));
+    static uint EnvWalkPageTable(EmuEnvironment env, uint lin, bool write)
+    {
+        env.Paging.Walks++;
+        return env.Paging.Fill(lin, write, EnvWalk(env, lin, write, env.Paging.Pae ? PaeLevels : LegacyLevels));
+    }
 
     // ページテーブルの 1 段。Shift/IndexBits が線形アドレス中のインデックス、EntrySize がエントリ幅。
     // HasAccessBits は R/W と Accessed を持つ段(PAE の PDPT は持たない)、LargePageMask は PS ビットで

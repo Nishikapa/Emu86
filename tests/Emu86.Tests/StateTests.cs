@@ -98,6 +98,158 @@ static class StateTests
         }
     }
 
+    // ENTER: フレームポインタの幅はオペランドサイズ、スタックポインタの幅は SS の B ビット。32 ビットでは EBP を 4 バイトで積み、
+    // LEAVE と対になる(Windows 7 の HAL が 32 ビットコードで ENTER 8,0 を使う。16 ビット幅で積むとスタックが 2 バイトずれる)。
+    static void EnterFrames()
+    {
+        using var env = new EmuEnvironment(memory: new byte[0x10000]);
+        uint Dword(int address) => BitConverter.ToUInt32(env.Ram, address);
+        ushort Word(int address) => BitConverter.ToUInt16(env.Ram, address);
+        var cpu = new CPU { stack32 = true, esp = 0x8000, ebp = 0x12345678 };
+        Enter(8, 0, 2)(env, cpu, null);
+        Equal((0x7FF4u, 0x7FFCu, 0x12345678u), (cpu.esp, cpu.ebp, Dword(0x7FFC)), "32-bit ENTER 8,0: EBP pushed as a dword, EBP = frame, ESP below the locals");
+        // 外側のフレーム(0x9000)のリンクを 2 個持つ入れ子: level 3 = リンク 2 個 + 自分のフレーム。
+        BitConverter.GetBytes(0x11111111u).CopyTo(env.Ram, 0x8FFC); BitConverter.GetBytes(0x22222222u).CopyTo(env.Ram, 0x8FF8);
+        cpu = new CPU { stack32 = true, esp = 0x8000, ebp = 0x9000 };
+        Enter(0x10, 3, 2)(env, cpu, null);
+        Equal((0x7FFCu, 0x7FE0u), (cpu.ebp, cpu.esp), "32-bit ENTER 16,3: frame pointer and stack pointer");
+        Equal((0x00009000u, 0x11111111u, 0x22222222u, 0x00007FFCu), (Dword(0x7FFC), Dword(0x7FF8), Dword(0x7FF4), Dword(0x7FF0)), "32-bit ENTER 16,3: saved EBP, two outer links, own frame");
+        // 16 ビット(リアルモードの形): BP を 2 バイトで積み、上位 16 ビットには触らない。
+        Array.Clear(env.Ram, 0x7F00, 0x100);
+        BitConverter.GetBytes((ushort)0x3333).CopyTo(env.Ram, 0x8FFE);
+        cpu = new CPU { esp = 0xAAAA8000, ebp = 0xBBBB9000 };
+        Enter(4, 2, 1)(env, cpu, null);
+        Equal((0xAAAA7FF6u, 0xBBBB7FFEu), (cpu.esp, cpu.ebp), "16-bit ENTER 4,2 leaves the upper halves alone");
+        Equal(((ushort)0x9000, (ushort)0x3333, (ushort)0x7FFE), (Word(0x7FFE), Word(0x7FFC), Word(0x7FFA)), "16-bit ENTER 4,2: saved BP, one outer link, own frame");
+        // 16 ビットのオペランドサイズ(66h)を 32 ビットスタックで: BP だけを 2 バイトで積み、スタックは ESP で動く。
+        cpu = new CPU { stack32 = true, esp = 0x00018000, ebp = 0xCCCC9000 };
+        Array.Clear(env.Ram, 0x7F00, 0x100);
+        Enter(2, 0, 1)(env, cpu, null);
+        Equal((0x00017FFCu, 0xCCCC7FFEu), (cpu.esp, cpu.ebp), "16-bit ENTER on a 32-bit stack");
+    }
+
+    // POP m の書き込み先のアドレスに ESP を使う形: ESP を進めた後の値で実効アドレスを求める。pop [esp] は先頭の値を 1 つ上の枠へ移す
+    // (Windows の ExInterlockedPushEntrySList は、これで戻り番地を 3 番目の引数の上へ移してから 2 引数の本体へ続く。進める前の ESP で
+    // 計算すると戻り番地がずれ、Windows 7 のセットアップが NTFS_FILE_SYSTEM で止まった)。通常コア・IR の解釈器・コンパイル済みで同じ。
+    static void PopStackRelative()
+    {
+        using var env = new EmuEnvironment(memory: new byte[0x10000]);
+        uint Dword(int address) => BitConverter.ToUInt32(env.Ram, address);
+        foreach (var mode in new[] { "reference", "interpreted", "compiled" })
+        {
+            // スタック(0x8000 から)に 3 語を置いて 1 命令実行し、ESP とスタックの 3 語、0x9000 の語を返す。
+            (uint esp, uint first, uint second, uint third, uint other) Run(params byte[] code)
+            {
+                Array.Clear(env.Ram);
+                code.CopyTo(env.Ram, 0x100);
+                foreach (var (address, value) in new[] { (0x8000, 0xAAAA5555u), (0x8004, 0x22222222u), (0x8008, 0x33333333u) }) BitConverter.GetBytes(value).CopyTo(env.Ram, address);
+                var cpu = new CPU { code32 = true, stack32 = true, eip = 0x100, esp = 0x8000, ebx = 0x9000 };
+                if (mode == "reference")
+                {
+                    var result = Instructions.Execute2(env, cpu, null);
+                    Equal(true, result.IsSuccess, $"{mode} executes {Convert.ToHexString(code)}");
+                    cpu = result.cpu;
+                }
+                else
+                {
+                    var block = Semantics.Lower(Decoder.DecodeInstruction(env, cpu));
+                    if (mode == "interpreted") Semantics.Interpret(block, env, cpu); else Semantics.Compile(block)(env, cpu);
+                }
+                Equal(0x100u + (uint)code.Length, cpu.eip, $"{mode} advances past {Convert.ToHexString(code)}");
+                return (cpu.esp, Dword(0x8000), Dword(0x8004), Dword(0x8008), Dword(0x9000));
+            }
+            Equal((0x8004u, 0xAAAA5555u, 0xAAAA5555u, 0x33333333u, 0u), Run(0x8F, 0x04, 0x24), $"{mode}: pop [esp] stores the top one slot up");
+            Equal((0x8004u, 0xAAAA5555u, 0x22222222u, 0xAAAA5555u, 0u), Run(0x8F, 0x44, 0x24, 0x04), $"{mode}: pop [esp+4] counts from the incremented ESP");
+            Equal((0x8004u, 0xAAAA5555u, 0x22222222u, 0x33333333u, 0xAAAA5555u), Run(0x8F, 0x03), $"{mode}: pop [ebx] does not depend on ESP");
+            Equal((0x8002u, 0x55555555u, 0x22222222u, 0x33333333u, 0u), Run(0x66, 0x8F, 0x04, 0x24), $"{mode}: pop word [esp] moves the word up by two bytes");
+        }
+    }
+
+    // マシンステータスワード(CR0 の下位): CLTS は TS だけを落とす。SMSW は CR0 を r/m へ(メモリは 16 ビット、レジスタは
+    // オペランドサイズの幅)。LMSW は下位 4 ビット(PE、MP、EM、TS)を読み込み、PE は落とせない。
+    static void MachineStatusWord()
+    {
+        using var env = new EmuEnvironment(memory: new byte[0x10000]);
+        CPU Run(CPU cpu, params byte[] code)
+        {
+            code.CopyTo(env.Ram, 0x100);
+            cpu.eip = 0x100;
+            var result = Instructions.Execute2(env, cpu, null);
+            Equal(true, result.IsSuccess, "executes " + Convert.ToHexString(code));
+            return result.cpu;
+        }
+        var cpu = new CPU { code32 = true, stack32 = true };
+        CPU._cr0.setter(cpu)(0x0001003B); // PE、MP、TS、ET、NE、WP
+        cpu = Run(cpu, 0x0F, 0x06);
+        Equal(0x00010033u, CPU._cr0.getter(cpu), "CLTS clears TS only");
+        cpu.ebx = 0xFFFFFFFF;
+        cpu = Run(cpu, 0x0F, 0x01, 0xE3);
+        Equal(0x00010033u, cpu.ebx, "SMSW r32 stores CR0");
+        cpu.ebx = 0xFFFFFFFF;
+        cpu = Run(cpu, 0x66, 0x0F, 0x01, 0xE3);
+        Equal(0xFFFF0033u, cpu.ebx, "SMSW r16 stores the low word only");
+        cpu.ebx = 0x2000;
+        BitConverter.GetBytes(0xEEEEEEEEu).CopyTo(env.Ram, 0x2000);
+        cpu = Run(cpu, 0x0F, 0x01, 0x23);
+        Equal(0xEEEE0033u, BitConverter.ToUInt32(env.Ram, 0x2000), "SMSW m16 writes two bytes");
+        cpu.ebx = 0x0000FFFE; // PE = 0(落とせない)、MP・EM・TS = 1、上位は無視
+        cpu = Run(cpu, 0x0F, 0x01, 0xF3);
+        Equal(0x0001003Fu, CPU._cr0.getter(cpu), "LMSW loads MP, EM and TS and cannot clear PE");
+        BitConverter.GetBytes((ushort)0x0001).CopyTo(env.Ram, 0x2000);
+        cpu.ebx = 0x2000;
+        cpu = Run(cpu, 0x0F, 0x01, 0x33);
+        Equal(0x00010031u, CPU._cr0.getter(cpu), "LMSW m16 clears MP, EM and TS");
+    }
+
+    // #NM(ベクタ 7): CR0.EM か CR0.TS が立っていれば x87 命令は実行されずにフォルトになる(OS が FPU の状態を入れ替える合図)。
+    // FWAIT は CR0.MP と CR0.TS の両方が立っているときだけ。リアルモードでは検査しない。IR(解釈器とコンパイル済み)の FWAIT も同じ。
+    static void DeviceNotAvailable()
+    {
+        using var env = new EmuEnvironment(memory: new byte[0x10000]);
+        CPU Machine(uint cr0)
+        {
+            var cpu = new CPU { code32 = (cr0 & 1) != 0, stack32 = (cr0 & 1) != 0, eip = 0x100 };
+            CPU._cr0.setter(cpu)(cr0);
+            return cpu;
+        }
+        // 命令を 1 つ実行して、フォルトのベクタ(完了したら null)と FPU スタックの深さを返す。
+        (int? vector, int depth) Run(uint cr0, params byte[] code)
+        {
+            code.CopyTo(env.Ram, 0x100);
+            var cpu = Machine(cr0);
+            try
+            {
+                var result = Instructions.Execute2(env, cpu, null);
+                Equal(true, result.IsSuccess, "executes " + Convert.ToHexString(code));
+                return (null, System.Numerics.BitOperations.PopCount(result.cpu.fpu_valid));
+            }
+            catch (CpuFaultException exception) { return (exception.Fault.Vector, System.Numerics.BitOperations.PopCount(cpu.fpu_valid)); }
+        }
+        const uint pe = 1, mp = 2, em = 4, ts = 8;
+        Equal(((int?)null, 1), Run(pe, 0xD9, 0xE8), "FLD1 runs while EM and TS are clear");
+        Equal(((int?)7, 0), Run(pe | ts, 0xD9, 0xE8), "TS: an x87 instruction raises #NM and changes nothing");
+        Equal(((int?)7, 0), Run(pe | em, 0xD9, 0xE8), "EM: an x87 instruction raises #NM");
+        Equal(((int?)7, 0), Run(pe | mp | ts, 0xDB, 0xE3), "FNINIT is not exempt");
+        Equal(((int?)null, 1), Run(em | ts, 0xD9, 0xE8), "real mode: not checked (faults are delivered through the IDT only)");
+        Equal(((int?)null, 0), Run(pe | ts, 0x9B), "FWAIT with TS alone runs");
+        Equal(((int?)null, 0), Run(pe | mp | em, 0x9B), "FWAIT with MP and EM runs");
+        Equal(((int?)7, 0), Run(pe | mp | ts, 0x9B), "FWAIT with MP and TS raises #NM");
+        Equal((7, false, "#NM"), (Fault.DeviceNotAvailable.Vector, Fault.DeviceNotAvailable.ErrorCode.HasValue, Fault.DeviceNotAvailable.Name), "#NM is vector 7 without an error code");
+        // IR: FWAIT は通常コアの State を呼ぶ文になり、同じ条件でフォルトする。
+        new byte[] { 0x9B }.CopyTo(env.Ram, 0x100);
+        var block = Semantics.Lower(Decoder.DecodeInstruction(env, Machine(pe)));
+        Equal(true, block is { Statements: [StateStmt { Name: "FWAIT" }] }, "FWAIT lowers to the reference core's state");
+        int? Vector(Action<CPU> run, uint cr0)
+        {
+            var cpu = Machine(cr0);
+            try { run(cpu); return cpu.eip == 0x101 ? null : -1; }
+            catch (CpuFaultException exception) { return exception.Fault.Vector; }
+        }
+        var compiled = Semantics.Compile(block);
+        Equal(((int?)null, (int?)7), (Vector(cpu => Semantics.Interpret(block, env, cpu), pe | ts), Vector(cpu => Semantics.Interpret(block, env, cpu), pe | mp | ts)), "interpreted FWAIT");
+        Equal(((int?)null, (int?)7), (Vector(cpu => compiled(env, cpu), pe | ts), Vector(cpu => compiled(env, cpu), pe | mp | ts)), "compiled FWAIT");
+    }
+
     static void ControlRegisters()
     {
         using var env = new EmuEnvironment(memory: new byte[0x10000]);
@@ -262,6 +414,10 @@ static class StateTests
         ("cpu-updates", CpuUpdates),
         ("combinators", Combinators),
         ("operand-widths", OperandWidths),
+        ("enter-frames", EnterFrames),
+        ("pop-stack-relative", PopStackRelative),
+        ("machine-status-word", MachineStatusWord),
+        ("device-not-available", DeviceNotAvailable),
         ("control-registers", ControlRegisters),
         ("script", ScriptMonad),
     ];

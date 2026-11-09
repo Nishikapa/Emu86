@@ -36,12 +36,13 @@ static partial class Instructions
             .Ignore()
         select unit;
 
-    // ENTER imm16, imm8 (0xC8): スタックフレームを構築する。
+    // ENTER imm16, imm8 (0xC8): スタックフレームを構築する(フレームポインタの幅はオペランドサイズ)。
     static State<Unit> Enter_C8 =>
         from _1 in SetLog("Enter_C8")
         from alloc in GetMemoryDataIp16
         from level in GetMemoryDataIp8
-        from _2 in Enter(alloc, level)
+        from type in OperandType(true)
+        from _2 in Enter(alloc, level, type)
         select unit;
 
     // LEAVE (0xC9): (E)SP <- (E)BP(幅は SS.B); (E)BP <- pop()(幅はオペランドサイズ)。スタックフレームを破棄する。
@@ -89,8 +90,12 @@ static partial class Instructions
         from _1 in SetLog("Pop_8F")
         from m in ModRegRm()
         where 0 == m.reg
-        from addr in GetMemOrRegAddr(m.mod, m.rm)
         from type in OperandType(true)
+        // 書き込み先のアドレスに ESP を使う形(pop [esp+8])は、ESP を進めた後の値で実効アドレスを求める(Intel の規定)。
+        // ESP を進めた状態でアドレスを計算してから戻し、その後で通常どおり pop して書く。
+        from _a in StackAdjust(Bytes(type))
+        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from _b in StackAdjust(-Bytes(type))
         from _3 in Move(Rm(addr, type), Stack(type))
         select unit;
 

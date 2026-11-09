@@ -28,6 +28,8 @@ static class PortMap
     static readonly Action<EmuEnvironment, int, byte> Ignore = (_, _, _) => { };
     static readonly Func<EmuEnvironment, int, byte> Zero = (_, _) => 0;
     static bool HasAta(EmuEnvironment env, int _) => env.Ata != null;
+    static bool HasCdrom(EmuEnvironment env, int _) => env.Cdrom != null;
+    static bool NoCdrom(EmuEnvironment env, int _) => env.Cdrom == null;
     static uint Mask(int size) => size >= 4 ? 0xFFFFFFFF : (1u << (8 * size)) - 1;
 
     // 表(順に試す。重なる範囲は先の項が勝つ)。
@@ -66,6 +68,12 @@ static class PortMap
         Port("VGA (color status)", 0x3DA, read: (env, p) => env.Vga.ReadPort(p, env.Tsc), write: (env, p, v) => env.Vga.WritePort(p, v)),
         // Bochs VBE(DISPI): 0x1CE インデックス、0x1CF データ。16 ビット幅で読み書きする。
         new("Bochs VBE", 0x1CE, 0x1CF, ReadWide: (env, p, size) => env.Vga.VbeRead(p) & Mask(size), WriteWide: (env, p, _, v) => env.Vga.VbeWrite(p, (ushort)v)),
+        // VGA BIOS スタブのサービスの呼び出し口: ROM の INT 10h ハンドラがレジスタを語で送り(0x1D0 で開始、0x1D2 で続き)、
+        // 結果の語(0x1D2)と ES:DI へ書くバイト(0x1D4)を読む。
+        new("VGA BIOS call", VgaBiosPort.CallPort, VgaBiosPort.CallPort, WriteWide: (env, _, _, v) => env.VgaBios.Begin((ushort)v)),
+        new("VGA BIOS arguments and results", VgaBiosPort.WordPort, VgaBiosPort.WordPort,
+            ReadWide: (env, _, size) => env.VgaBios.Result(env) & Mask(size), WriteWide: (env, _, _, v) => env.VgaBios.Argument((ushort)v)),
+        Port("VGA BIOS data", VgaBiosPort.DataPort, read: (env, _) => env.VgaBios.Data()),
         Range("COM1", 0x3F8, 0x3FF, read: (env, p) => env.Com1.Read(p - 0x3F8), write: (env, p, v) => env.Com1.Write(p - 0x3F8, v)),
         Range("COM2", 0x2F8, 0x2FF, read: (env, p) => env.Com2.Read(p - 0x2F8), write: (env, p, v) => env.Com2.Write(p - 0x2F8, v)),
         // ATA データポート: 16/32 ビットアクセスでデバイスバッファから連続バイトを転送する(隣接ポートへは波及しない)。
@@ -73,9 +81,14 @@ static class PortMap
             ReadWide: (env, _, size) => env.Ata.ReadData(size), WriteWide: (env, _, size, v) => env.Ata.WriteData(size, v), When: HasAta),
         Range("ATA registers", 0x1F1, 0x1F7, read: (env, p) => env.Ata.ReadReg(p), write: (env, p, v) => env.Ata.WriteReg(p, v), when: HasAta),
         Port("ATA control", 0x3F6, read: (env, p) => env.Ata.ReadReg(p), write: (env, p, v) => env.Ata.WriteReg(p, v), when: HasAta),
-        // 第 2 IDE チャネル(ディスク無し)はフローティングバス 0xFF を返し、libata に「デバイス無し」と即断させる(幅付き読み出しのみ)。
-        new("secondary IDE (no device)", 0x170, 0x177, ReadWide: (_, _, size) => Mask(size)),
-        new("secondary IDE control (no device)", 0x376, 0x376, ReadWide: (_, _, size) => Mask(size)),
+        // 第 2 IDE チャネル: CD/DVD-ROM(ATAPI)。データポートは幅付きアクセスでデバイスのバッファから連続バイトを転送する。
+        new("ATAPI data", 0x170, 0x170, (env, _) => (byte)env.Cdrom.ReadData(1), (env, _, v) => env.Cdrom.WriteData(1, v),
+            ReadWide: (env, _, size) => env.Cdrom.ReadData(size), WriteWide: (env, _, size, v) => env.Cdrom.WriteData(size, v), When: HasCdrom),
+        Range("ATAPI registers", 0x171, 0x177, read: (env, p) => env.Cdrom.ReadReg(p), write: (env, p, v) => env.Cdrom.WriteReg(p, v), when: HasCdrom),
+        Port("ATAPI control", 0x376, read: (env, p) => env.Cdrom.ReadReg(p), write: (env, p, v) => env.Cdrom.WriteReg(p, v), when: HasCdrom),
+        // 第 2 IDE チャネルにデバイスが無いときはフローティングバス 0xFF を返し、libata に「デバイス無し」と即断させる(幅付き読み出しのみ)。
+        new("secondary IDE (no device)", 0x170, 0x177, ReadWide: (_, _, size) => Mask(size), When: NoCdrom),
+        new("secondary IDE control (no device)", 0x376, 0x376, ReadWide: (_, _, size) => Mask(size), When: NoCdrom),
         // PCI コンフィグ: CONFIG_ADDRESS(0xCF8、バイト位置に合わせて更新)と CONFIG_DATA(0xCFC)。幅付きアクセスのみ。
         // 0xCF9 の 1 バイト書き込みはリセット制御(上の項)。
         new("PCI CONFIG_ADDRESS", 0xCF8, 0xCFB,

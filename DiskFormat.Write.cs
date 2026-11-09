@@ -23,6 +23,7 @@ internal static class Writers
     public static Writer U32(uint value) => Primitive(4, span => BinaryPrimitives.WriteUInt32LittleEndian(span, value));
     public static Writer U64(ulong value) => Primitive(8, span => BinaryPrimitives.WriteUInt64LittleEndian(span, value));
     public static Writer I64(long value) => Primitive(8, span => BinaryPrimitives.WriteInt64LittleEndian(span, value));
+    public static Writer U16BE(ushort value) => Primitive(2, span => BinaryPrimitives.WriteUInt16BigEndian(span, value));
     public static Writer U32BE(uint value) => Primitive(4, span => BinaryPrimitives.WriteUInt32BigEndian(span, value));
     public static Writer U64BE(ulong value) => Primitive(8, span => BinaryPrimitives.WriteUInt64BigEndian(span, value));
     public static Writer Uuid(Guid value) => Primitive(16, span => value.TryWriteBytes(span));
@@ -73,8 +74,11 @@ public partial class DiskImage
     // 版数を上げると、古い版で作られた overlay は自動的に作り直される。
     const string OverlayCreator = "Emu86-avhdx-1";
 
-    // File Identifier(0): "vhdxfile" と Creator(フォーマット版数を埋め、旧版 overlay を判別できるようにする)。
-    static Writer VhdxFileIdentifier => Magic("vhdxfile").Then(At(8, Utf16(OverlayCreator)));
+    // 新しい空の VHDX(--create-disk)の Creator。
+    const string DiskCreator = "Emu86";
+
+    // File Identifier(0): "vhdxfile" と Creator(overlay はフォーマット版数を埋め、旧版 overlay を判別できるようにする)。
+    static Writer VhdxFileIdentifier(string creator) => Magic("vhdxfile").Then(At(8, Utf16(creator)));
 
     // ヘッダ(0x10000 と 0x20000、4096 バイト): 連番、FileWriteGuid、DataWriteGuid、LogGuid = 0(クリーン)、版 1、
     // ログ領域(0x100000 から 1MB)、CRC-32C。2 つのヘッダは連番以外同じ。
@@ -88,13 +92,16 @@ public partial class DiskImage
         At(0x48, U64(0x100000)),
         Checksum(4, 4096, Crc32C));
 
+    // このファイルが作る VHDX の BAT の位置(メタデータ領域の直後)。
+    const long VhdxBatPosition = 0x300000;
+
     // リージョン表(0x30000 と 0x40000、64KB): "regi"、項数、(GUID、位置、長さ、必須)× 2、CRC-32C。BAT は 0x300000、メタデータは 0x200000 から 1MB。
     static Writer VhdxRegionEntry(Guid guid, long offset, uint length) => Sequence(Uuid(guid), I64(offset), U32(length), U32(1));
 
     static Writer VhdxRegionTable(uint batLength) => Sequence(
         Magic("regi"),
         At(8, U32(2)),
-        At(16, Sequence(VhdxRegionEntry(BatRegionGuid, 0x300000, batLength), VhdxRegionEntry(MetaRegionGuid, 0x200000, 0x100000))),
+        At(16, Sequence(VhdxRegionEntry(BatRegionGuid, VhdxBatPosition, batLength), VhdxRegionEntry(MetaRegionGuid, 0x200000, 0x100000))),
         Checksum(4, 0x10000, Crc32C));
 
     // メタデータ表: "metadata"、項数(offset 10)、(GUID、領域内の位置、長さ、フラグ)× 項数(offset 32 から)。
@@ -115,14 +122,20 @@ public partial class DiskImage
             Sequence(placed.Select(item => At(item.Offset, Bytes(item.Data)))));
     }
 
-    // 差分 VHDX のメタデータ項目: File Parameters(ブロックサイズ、HasParent = bit1)、仮想サイズ、論理/物理セクタ長、Page 83 の ID、ペアレントロケータ。
-    static IReadOnlyList<(Guid Id, byte[] Data, uint Flags)> VhdxOverlayMetadata(string path, string parentPath, long virtualSize, int blockSize, Guid parentDataWriteGuid) =>
+    // 仮想ディスクのメタデータ項目: File Parameters(ブロックサイズ、HasParent = bit1)、仮想サイズ、論理/物理セクタ長、Page 83 の ID。
+    static IReadOnlyList<(Guid Id, byte[] Data, uint Flags)> VhdxDiskMetadata(long virtualSize, int blockSize, bool hasParent) =>
     [
-        (FileParamsGuid, Sequence(U32((uint)blockSize), U32(2)).Build(8), 0x04),
+        (FileParamsGuid, Sequence(U32((uint)blockSize), U32(hasParent ? 2u : 0u)).Build(8), 0x04),
         (DiskSizeGuid, I64(virtualSize).Build(8), 0x06),
         (LogicalSectorGuid, U32(SectorSize).Build(4), 0x06),
         (PhysicalSectorGuid, U32(4096).Build(4), 0x06),
         (Page83Guid, Uuid(Guid.NewGuid()).Build(16), 0x06),
+    ];
+
+    // 差分 VHDX のメタデータ項目: 仮想ディスクの項目(HasParent 付き)とペアレントロケータ。
+    static IReadOnlyList<(Guid Id, byte[] Data, uint Flags)> VhdxOverlayMetadata(string path, string parentPath, long virtualSize, int blockSize, Guid parentDataWriteGuid) =>
+    [
+        .. VhdxDiskMetadata(virtualSize, blockSize, hasParent: true),
         (ParentLocatorGuid, VhdxParentLocatorData(VhdxParentLocatorPairs(parentPath, path, parentDataWriteGuid)), 0x04),
     ];
 
@@ -159,20 +172,84 @@ public partial class DiskImage
         ];
     }
 
-    // 差分 VHDX を生成する。構造: FileID / Header x2 / RegionTable x2 / Log(1MB、空) / Metadata(1MB) / BAT。
-    static void CreateAvhdx(string path, string parentPath, long virtualSize, int blockSize, Guid parentDataWriteGuid)
+    // VHDX のファイル全体(ブロックはまだ 1 つも割り当てていない)。
+    // 構造: FileID / Header x2 / RegionTable x2 / Log(1MB、空) / Metadata(1MB) / BAT(全エントリ 0 = 未割り当て)。
+    static byte[] VhdxImage(string creator, int batLength, IReadOnlyList<(Guid Id, byte[] Data, uint Flags)> metadata)
     {
-        var batLength = new VhdxBatLayout(virtualSize, blockSize, hasParent: true).RegionLength;
         var fileWriteGuid = Guid.NewGuid();
         var dataWriteGuid = Guid.NewGuid();
-        var image = Sequence(
-            VhdxFileIdentifier,
+        return Sequence(
+            VhdxFileIdentifier(creator),
             At(0x10000, VhdxHeader(1, fileWriteGuid, dataWriteGuid)),
             At(0x20000, VhdxHeader(2, fileWriteGuid, dataWriteGuid)),
             At(0x30000, VhdxRegionTable((uint)batLength)),
             At(0x40000, VhdxRegionTable((uint)batLength)),
-            At(0x200000, VhdxMetadataTable(VhdxOverlayMetadata(path, parentPath, virtualSize, blockSize, parentDataWriteGuid))))
-            .Build(checked(0x300000 + batLength));
-        File.WriteAllBytes(path, image);
+            At(0x200000, VhdxMetadataTable(metadata)))
+            .Build(checked((int)VhdxBatPosition + batLength));
     }
+
+    // 差分 VHDX を生成する(既存のファイルは置き換える)。
+    static void CreateAvhdx(string path, string parentPath, long virtualSize, int blockSize, Guid parentDataWriteGuid)
+    {
+        var batLength = new VhdxBatLayout(virtualSize, blockSize, hasParent: true).RegionLength;
+        File.WriteAllBytes(path, VhdxImage(OverlayCreator, batLength, VhdxOverlayMetadata(path, parentPath, virtualSize, blockSize, parentDataWriteGuid)));
+    }
+
+    // 新しい空の可変長 VHDX(親なし)を生成する。どのブロックも未割り当てなので、全セクタがゼロとして読める。
+    // 書き込みはこのファイルを親にした差分(AVHDX)へ積まれる(--disk で指定する)。既存のファイルは上書きしない。
+    public static void CreateVhdx(string path, long virtualSize, int blockSize = 0x200000)
+    {
+        var batLength = new VhdxBatLayout(virtualSize, blockSize, hasParent: false).RegionLength;
+        var image = VhdxImage(DiskCreator, batLength, VhdxDiskMetadata(virtualSize, blockSize, hasParent: false));
+        using var file = new FileStream(path, FileMode.CreateNew, FileAccess.Write);
+        file.Write(image);
+    }
+
+    // 差分をたどって読める中身を、親を持たない新しい可変長 VHDX に書き出す(--merge-disk: 差分に積まれた書き込みを 1 つのイメージにまとめる)。
+    // チェーンのどのイメージもブロックを割り当てていない範囲と、読んだ結果が全部ゼロのブロックは割り当てない(ゼロとして読める)。
+    // 割り当てるブロックは全セクタを書いて FULLY_PRESENT にし、ヘッダ・メタデータ・BAT の後ろへ順に置く。
+    // 既存のファイルは上書きしない。元のイメージは変えない。書いたブロックの数を返す。
+    public long MergeInto(string path, int blockSize = 0x200000)
+    {
+        var virtualSize = TotalSectors * SectorSize;
+        CreateVhdx(path, virtualSize, blockSize);
+        var layout = new VhdxBatLayout(virtualSize, blockSize, hasParent: false);
+        var sectors = blockSize / SectorSize;
+        var data = new byte[blockSize];
+        var bat = new byte[layout.EntryCount * sizeof(ulong)];
+        using var target = new FileStream(path, FileMode.Open, FileAccess.ReadWrite);
+        var next = target.Length;   // BAT の直後(1MB 境界)
+        var written = 0L;
+        for (var block = 0L; block < layout.PayloadBlockCount; block++)
+        {
+            var first = block * sectors;
+            var count = (int)Math.Min(sectors, TotalSectors - first);
+            if (!MayHoldData(first, count)) continue;
+            Array.Clear(data);
+            for (var sector = 0; sector < count; sector++) ReadSector(first + sector, data, sector * SectorSize);
+            if (data.AsSpan().IndexOfAnyExcept((byte)0) < 0) continue;
+            target.Seek(next, SeekOrigin.Begin);
+            target.Write(data);
+            BinaryPrimitives.WriteUInt64LittleEndian(bat.AsSpan((int)layout.PayloadIndex(block) * sizeof(ulong)), (ulong)next | PayloadFullyPresent);
+            next += blockSize;
+            written++;
+        }
+        target.Seek(VhdxBatPosition, SeekOrigin.Begin);
+        target.Write(bat);
+        target.Flush(flushToDisk: true);
+        return written;
+    }
+
+    // この範囲に、チェーンのどれかのイメージがブロックを割り当てているか(読まずに飛ばすための粗い判定。生イメージは常に真)。
+    bool MayHoldData(long lba, long count) => OwnBlocksAllocated(lba, count) || (parent?.MayHoldData(lba, count) ?? false);
+
+    bool OwnBlocksAllocated(long lba, long count) =>
+        lba < TotalSectors && (!vhd && !vhdx
+            || BlocksOf(lba, Math.Min(count, TotalSectors - lba)).Any(block => vhd
+                ? vhdBat[block] != VhdBatUnallocated
+                : (int)(vhdxBat[vhdxLayout.PayloadIndex(block)] & 7) is PayloadFullyPresent or PayloadPartiallyPresent));
+
+    // セクタの範囲にかかるブロックの番号。
+    IEnumerable<long> BlocksOf(long lba, long count) =>
+        Enumerable.Range(0, (int)((lba + count - 1) / sectorsPerBlock - lba / sectorsPerBlock + 1)).Select(offset => lba / sectorsPerBlock + offset);
 }

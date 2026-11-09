@@ -4,12 +4,20 @@ namespace Emu86;
 
 public static class EnvironmentFactory
 {
-    public static EmuEnvironment Create(DiskConfiguration disk = null, bool attachDisk = true)
+    // 通常起動用の環境: 埋め込み BIOS、指定されたディスク(attachDisk が偽なら後からスナップショットがつなぐ)、
+    // CD/DVD-ROM の媒体(cdromPath。ISO ファイルか "D:" のようなドライブ)、RAM の大きさ(ramBytes。0 なら既定)。
+    public static EmuEnvironment Create(DiskConfiguration disk = null, bool attachDisk = true, string cdromPath = null, long ramBytes = 0)
     {
-        var env = new EmuEnvironment(bios: LoadEmbeddedBios());
+        var env = new EmuEnvironment(memory: ramBytes > 0 ? new byte[ramBytes] : null, bios: LoadEmbeddedBios());
         try
         {
             if (attachDisk && disk != null) env.Ata = new AtaDevice(disk.OpenOverlay());
+            if (cdromPath != null)
+            {
+                var media = new CdMedia(cdromPath);
+                env.Cdrom = new AtapiDevice(media);
+                Console.Error.WriteLine($"[cdrom] {cdromPath}: {media.TotalSectors} sectors ({media.TotalSectors * CdMedia.SectorSize / (1024 * 1024)} MB)");
+            }
             return env;
         }
         catch

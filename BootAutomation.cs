@@ -88,8 +88,10 @@ internal static class Scripts
 //     3. OS 選択メニュー(「Please select the operating system」)が出たら Enter。
 //   Typing (--type): 「プロンプト=>キー列」の手順を順に。画面の最後の行がプロンプトで終わるのを待ってキー列を打ち(\n は Enter、
 //     <down> <end> <c-x>(Ctrl+x)<a-f2>(Alt+F2)などの特殊キーは <名前>)、最後の手順のプロンプトが戻ったら画面を出力して完了する
-//     (ランナーはそこで止まる)。プロンプトの代わりに <graphics>/<text>(表示モードの切り替わりを待つ)、<2s>(ゲスト時間で待つ)も書ける。
-//     ヘッドレスでゲストのシェルや GRUB のメニューを操作する用。キーの間隔はゲストの時計(GuestClock)で 0.2 秒。
+//     (ランナーはそこで止まる)。プロンプトの代わりに <graphics>/<text>(表示モードの切り替わりを待つ)、<2s>(ゲスト時間で待つ)、
+//     <idle>(ゲストが HLT で割り込みを待つだけになる = 入力待ちになるのを待つ)も書ける。キー列には PS/2 マウスの動作も書ける:
+//     <mouse dx,dy>(画面座標で相対移動。右と下が正)、<click>/<rclick>(左/右ボタンを押して離す)。
+//     ヘッドレスでゲストのシェルや GRUB のメニュー、グラフィック画面のインストーラを操作する用。キーの間隔はゲストの時計(GuestClock)で 0.2 秒。
 public sealed class BootAutomation
 {
     long KeyInterval => env.Clock.InstructionsPerSecond / 5; // 命令数(ゲスト時間で 0.2 秒)
@@ -175,7 +177,7 @@ public sealed class BootAutomation
 
     // --type の手順: 各手順は「プロンプト=>キー列」(プロンプト省略可)。プロンプトは画面の最後の空でない行の末尾と比べる
     // (シェルがコマンドを終えてプロンプトを出し直したことの判定)。打った直後はまだエコーが出ていないので、少し待ってから見る。
-    // プロンプトの代わりに <graphics>/<text>(表示モードが切り替わるまで)、<2s>(ゲスト時間で 2 秒)も書ける。
+    // プロンプトの代わりに <graphics>/<text>(表示モードが切り替わるまで)、<2s>(ゲスト時間で 2 秒)、<idle>(ゲストが入力待ちになるまで)も書ける。
     // 最後の手順のプロンプトが戻ったら(プロンプトが無ければ少し待ってから)画面を出力して終える。
     Script<Unit> TypingScript(IReadOnlyList<string> steps) =>
         from _1 in Do(() => Status = "Type")
@@ -184,7 +186,7 @@ public sealed class BootAutomation
             from _a in WaitPrompt(step.prompt)
             from _b in ShowScreen
             from _c in Do(() => Log($"typing \"{step.keys.Replace("\n", "\\n")}\""))
-            from _d in ForEach(Scancodes(step.keys), TypeKey)
+            from _d in ForEach(Actions(step.keys), action => action)
             from _e in Delay(KeyInterval * 5)
             select Unit.unit)
         let lastPrompt = plan.Count > 0 ? plan[^1].prompt : ""
@@ -206,6 +208,58 @@ public sealed class BootAutomation
         }
         return plan;
     }
+
+    // キー列を動作の列に分ける: <mouse dx,dy> と <click>/<rclick> はマウスの動作、それ以外は Scancodes の 1 キーずつ
+    // (キー名でもマウスでもない '<' は Scancodes がそのまま文字として打つ)。
+    IEnumerable<Script<Unit>> Actions(string text)
+    {
+        for (var position = 0; position < text.Length;)
+        {
+            var close = text[position] == '<' ? text.IndexOf('>', position + 1) : -1;
+            if (close > position && MouseAction(text[(position + 1)..close]) is { } mouse)
+            {
+                yield return mouse;
+                position = close + 1;
+                continue;
+            }
+            var next = close > position ? close + 1 : position + 1;
+            foreach (var key in Scancodes(text[position..next])) yield return TypeKey(key);
+            position = next;
+        }
+    }
+
+    // "mouse dx,dy" は相対移動、"click"/"rclick" は左/右クリック。マウスの動作でなければ null。
+    Script<Unit> MouseAction(string name)
+    {
+        if (name.Equals("click", StringComparison.OrdinalIgnoreCase)) return Click(1);
+        if (name.Equals("rclick", StringComparison.OrdinalIgnoreCase)) return Click(2);
+        var parts = name.Split([' ', ','], StringSplitOptions.RemoveEmptyEntries);
+        return parts.Length == 3 && parts[0].Equals("mouse", StringComparison.OrdinalIgnoreCase)
+            && int.TryParse(parts[1], out var dx) && int.TryParse(parts[2], out var dy) ? MouseMove(dx, dy) : null;
+    }
+
+    // マウスを画面座標で (dx, dy) 動かす。OS のポインタ加速(速い動きほど余計に進む)を抑えるため、1 パケット MouseStep カウント以内に分けて
+    // 間隔を置いて送る(PS/2 は上が正なので dy は反転)。送り終えたら少し待つ。
+    Script<Unit> MouseMove(int dx, int dy) =>
+        ForEach(MousePackets(dx, dy), packet => Do(() => env.Mouse.Move(packet.dx, -packet.dy, 0, 0)).Then(Delay(KeyInterval / 25)))
+            .Then(Delay(KeyInterval));
+
+    const int MouseStep = 4;
+
+    static IEnumerable<(int dx, int dy)> MousePackets(int dx, int dy)
+    {
+        while (dx != 0 || dy != 0)
+        {
+            var step = (dx: Math.Clamp(dx, -MouseStep, MouseStep), dy: Math.Clamp(dy, -MouseStep, MouseStep));
+            yield return step;
+            dx -= step.dx;
+            dy -= step.dy;
+        }
+    }
+
+    // その場でボタンを押して離す(bit0=左、bit1=右)。
+    Script<Unit> Click(byte button) =>
+        Do(() => env.Mouse.Move(0, 0, 0, button)).Then(Delay(KeyInterval / 4)).Then(Do(() => env.Mouse.Move(0, 0, 0, 0))).Then(Delay(KeyInterval));
 
     // 1 キーを打つ。BIOS 経由でキーを読むゲスト(GRUB など)は 1 キーの処理が遅く、BIOS のバッファ(16 キー)が溢れて取りこぼすので、
     // バッファが空くまで待ってから打つ。保護モードの OS は BDA を使わないので、上限(KeyInterval)で先へ進む。打った後は少し間を置く。
@@ -246,6 +300,7 @@ public sealed class BootAutomation
         if (prompt.Length == 0) return Nothing;
         if (prompt.Equals("<graphics>", StringComparison.OrdinalIgnoreCase)) return Until(() => env.Vga.GraphicsMode, poll: KeyInterval / 4);
         if (prompt.Equals("<text>", StringComparison.OrdinalIgnoreCase)) return Until(() => !env.Vga.GraphicsMode, poll: KeyInterval / 4);
+        if (prompt.Equals("<idle>", StringComparison.OrdinalIgnoreCase)) return WaitIdle;
         if (prompt.Length > 3 && prompt[0] == '<' && prompt.EndsWith("s>", StringComparison.OrdinalIgnoreCase)
             && double.TryParse(prompt[1..^2], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var seconds))
             return Delay((long)(seconds * env.Clock.InstructionsPerSecond));
@@ -254,6 +309,14 @@ public sealed class BootAutomation
 
     bool PromptShown(string prompt) =>
         !env.Vga.GraphicsMode && LastLine(env).EndsWith(prompt, StringComparison.OrdinalIgnoreCase);
+
+    // ゲストが入力待ち(アイドル)になるまで待つ: ゲスト時間の 1 秒のうち 9 割以上を、HLT で次の割り込みを待って過ごしていること
+    // (グラフィック画面のインストーラのように、画面の文字では入力待ちを見分けられない相手に使う)。
+    Script<Unit> WaitIdle =>
+        from start in Get(() => (count, idle: env.IdleInstructions))
+        from _1 in Delay(env.Clock.InstructionsPerSecond)
+        from _2 in (env.IdleInstructions - start.idle) * 10 >= (count - start.count) * 9 ? Nothing : WaitIdle
+        select Unit.unit;
 
     // \n → Enter、\\ → \。
     static string Unescape(string text) => text.Replace("\\n", "\n").Replace("\\\\", "\\");
@@ -271,6 +334,7 @@ public sealed class BootAutomation
     static readonly Dictionary<string, byte[]> SpecialKeys = new(StringComparer.OrdinalIgnoreCase)
     {
         ["esc"] = [0x01], ["bs"] = [0x0E], ["tab"] = [0x0F], ["enter"] = [0x1C], ["space"] = [0x39],
+        ["caps"] = [0x3A], ["num"] = [0x45], ["scroll"] = [0x46],
         ["f1"] = [0x3B], ["f2"] = [0x3C], ["f3"] = [0x3D], ["f4"] = [0x3E], ["f5"] = [0x3F], ["f6"] = [0x40],
         ["f7"] = [0x41], ["f8"] = [0x42], ["f9"] = [0x43], ["f10"] = [0x44], ["f11"] = [0x57], ["f12"] = [0x58],
         ["home"] = [0xE0, 0x47], ["up"] = [0xE0, 0x48], ["pgup"] = [0xE0, 0x49], ["left"] = [0xE0, 0x4B], ["right"] = [0xE0, 0x4D],
@@ -278,7 +342,7 @@ public sealed class BootAutomation
     };
 
     // 1 キー分のスキャンコード列(メイク/ブレーク、シフトが要る文字はシフトで挟む)。配列に無い文字は飛ばす。
-    // <名前> は特殊キー(<down>、<f2>)か修飾キー付き(<c-x> = Ctrl+x、<a-f2> = Alt+F2、<s-tab> = Shift+Tab)。名前が無ければ '<' は文字として打つ。
+    // <名前> は特殊キー(<down>、<f2>)か修飾キー付き(<c-x> = Ctrl+x、<a-f2> = Alt+F2、<s-tab> = Shift+Tab、<w-r> = Windows+R)。名前が無ければ '<' は文字として打つ。
     public static IEnumerable<byte[]> Scancodes(string text)
     {
         for (var position = 0; position < text.Length; position++)
@@ -301,10 +365,10 @@ public sealed class BootAutomation
         }
     }
 
-    // 修飾キーのメイクコード(c = Ctrl、a = Alt、s = Shift)。
-    static readonly Dictionary<string, byte> ModifierKeys = new(StringComparer.OrdinalIgnoreCase)
+    // 修飾キーのメイクコード(c = Ctrl、a = Alt、s = Shift、w = 左 Windows キー(E0 プレフィックス付き))。
+    static readonly Dictionary<string, byte[]> ModifierKeys = new(StringComparer.OrdinalIgnoreCase)
     {
-        ["c"] = 0x1D, ["ctrl"] = 0x1D, ["a"] = 0x38, ["alt"] = 0x38, ["s"] = 0x2A, ["shift"] = 0x2A,
+        ["c"] = [0x1D], ["ctrl"] = [0x1D], ["a"] = [0x38], ["alt"] = [0x38], ["s"] = [0x2A], ["shift"] = [0x2A], ["w"] = [0xE0, 0x5B], ["win"] = [0xE0, 0x5B],
     };
 
     // "c-a-del" のように修飾キーを '-' でつなぎ、最後がキー名か配列にある 1 文字。
@@ -314,15 +378,18 @@ public sealed class BootAutomation
         sequence = null;
         var parts = name.Split('-');
         var modifiers = parts[..^1].Select(part => ModifierKeys.GetValueOrDefault(part)).ToArray();
-        if (modifiers.Contains((byte)0)) return false;
+        if (modifiers.Contains(null)) return false;
         var key = parts[^1];
         byte[] make;
         if (SpecialKeys.TryGetValue(key, out var special)) make = special;
         else if (key.Length == 1 && Unshifted.IndexOf(key[0]) is var index && index >= 0) make = [UnshiftedCodes[index]];
         else return false;
-        sequence = [.. modifiers, .. make, .. make[..^1], (byte)(make[^1] | 0x80), .. Enumerable.Reverse(modifiers).Select(modifier => (byte)(modifier | 0x80))];
+        sequence = [.. modifiers.SelectMany(modifier => modifier), .. make, .. Break(make), .. Enumerable.Reverse(modifiers).SelectMany(Break)];
         return true;
     }
+
+    // ブレークコード: メイクコードの最後のバイトに 0x80(E0 プレフィックスはそのまま)。
+    static IEnumerable<byte> Break(byte[] make) => [.. make[..^1], (byte)(make[^1] | 0x80)];
 
     // その手順に来たときの命令数から interval 命令数だけ待つ。
     Script<Unit> Delay(long interval) => () =>

@@ -1,5 +1,6 @@
 using Emu86;
 using System.Security.Cryptography;
+using System.Text;
 using static Emu86.Conversions;
 using static Emu86.Ports;
 using static Emu86.Mmu;
@@ -236,7 +237,7 @@ static class VgaTests
     }
 
     // INT 19h で VGA BIOS スタブが導入され、リアルモードの INT 10h(モード設定・文字出力・カーソル・情報取得)が
-    // C000:0060 の UD2 経由で処理されることを確認する。
+    // C000:0060 のハンドラ(サービスの呼び出し口へのポート入出力)経由で処理されることを確認する。
     static void BiosStub()
     {
         foreach (var fast in new[] { true, false })
@@ -253,7 +254,8 @@ static class VgaTests
                            0xEB, 0xFE];
             main.CopyTo(env.Ram, 0x100); boot.CopyTo(env.Ram, 0x7C00);
             Write32(env, 0x19 * 4, 0x00007C00);
-            var options = RunOptions.Parse(fast ? ["--limit", "60", "--noirq", "--notrace"] : ["--limit", "60", "--noirq", "--notrace", "--slow"]);
+            // ハンドラは 1 回の呼び出しで 30 命令ほど実行する(6 回呼んで、最後は無限ループで上限まで)。
+            var options = RunOptions.Parse(fast ? ["--limit", "400", "--noirq", "--notrace"] : ["--limit", "400", "--noirq", "--notrace", "--slow"]);
             using var output = new StringWriter();
             EmulationRunner.Run(options, env, cpu, 0, null, output, TextWriter.Null);
             var label = fast ? " (fast)" : " (slow)";
@@ -294,9 +296,22 @@ static class VgaTests
         Equal((byte)0x80, EnvGetMemoryData8(env, 0xFEBF0000u + pcir + 0x15), "PCIR last image");
         Equal((byte)0xFF, EnvGetMemoryData8(env, 0xFEBF0000u + VgaBiosStub.RomSize), "beyond the ROM image");
         Equal(0, Enumerable.Range(0, VgaBiosStub.RomSize).Sum(index => VgaBiosStub.Rom[index]) & 0xFF, "ROM checksum");
-        Equal("B070D8AB830F68C14EF33FBAB98D315E9ED5F08B5D27D4B1717C4FA0B3D3D080", Convert.ToHexString(SHA256.HashData(VgaBiosStub.Rom)), "ROM bytes");
+        Equal("BA60895037B75507C01D1DA5FEA52F6291F2053D4022DE2CF41DB301F7494BEA", Convert.ToHexString(SHA256.HashData(VgaBiosStub.Rom)), "ROM bytes (VBE mode list and the handler that calls the service port, 2026-11-06)");
         Write(0x30, 0xFEBF0000);
         Equal((byte)0xFF, EnvGetMemoryData8(env, 0xFEBF0000), "ROM window hidden again");
+        // 線形フレームバッファの番地(BAR0 から導いて持つ値)は、環境のデバイス状態を読み込んだ後にも正しい
+        // (スナップショットからの再開で 0 のままになっていた)。
+        Write(0x10, 0xFD000000);
+        Equal(0xFD000000u, env.Pci.LfbBase, "LFB base follows BAR0");
+        using (var saved = new MemoryStream())
+        {
+            using (var writer = new BinaryWriter(saved, Encoding.UTF8, leaveOpen: true)) env.SaveDeviceState(writer);
+            using var resumed = new EmuEnvironment(memory: new byte[0x10000]);
+            saved.Position = 0;
+            using (var reader = new BinaryReader(saved)) resumed.LoadDeviceState(reader, SnapshotStore.Version);
+            Equal(0xFD000000u, resumed.Pci.LfbBase, "LFB base restored with the device state");
+        }
+        Write(0x10, 0);
         // 旧スナップショット(VGA デバイス追加前、PCI 関数 4 つ)の PCI 状態は読み込め、VGA は初期値のまま。
         using var stream = new MemoryStream();
         using (var writer = new BinaryWriter(stream, System.Text.Encoding.UTF8, leaveOpen: true))
@@ -633,6 +648,9 @@ static class VgaTests
         Equal(0, BootAutomation.Scancodes("é").Count(), "unknown characters are skipped");
         Equal("e050e0d0,2dad,1d2dad9d,383cbcb8,2a0f8faa,2a33b3aa,2cac,2cac,382cacb8", string.Join(",", BootAutomation.Scancodes("<down>x<c-x><a-f2><s-tab><zz<alt-z>").Select(Convert.ToHexString)).ToLowerInvariant(),
             "special keys: <name>, modifiers c-/a-/s-, unknown names type '<' literally");
+        Equal("3aba,45c5,46c6", string.Join(",", BootAutomation.Scancodes("<caps><num><scroll>").Select(Convert.ToHexString)).ToLowerInvariant(), "lock keys");
+        Equal("e05b1393e0db,1d38e053e0d3b89d", string.Join(",", BootAutomation.Scancodes("<w-r><c-a-del>").Select(Convert.ToHexString)).ToLowerInvariant(),
+            "the Windows key modifier keeps its E0 prefix in the make and break codes");
         using var env = new EmuEnvironment(memory: new byte[0x10000]);
         env.Clock.InstructionsPerSecond = 1_000_000;
         using var output = new StringWriter();
@@ -671,6 +689,41 @@ static class VgaTests
         Equal(0, env.Keyboard.Injected.Count, "next key waits a quarter interval");
         grub.Step(env, typed + 50_000, modes);
         Equal("E0 4F E0 CF", string.Join(" ", env.Keyboard.Injected.Select(scancode => scancode.ToString("X2"))), "<end> follows once the BIOS buffer is empty");
+
+        // <idle>: ゲストが入力待ちになる(ゲスト時間の 1 秒のうち 9 割以上を HLT で飛ばす)まで待つ。忙しい間は打たない。
+        using var waiting = new EmuEnvironment(memory: new byte[0x10000]);
+        waiting.Clock.InstructionsPerSecond = 1_000_000;
+        using var log = new StringWriter();
+        var installer = BootAutomation.Typing(["<idle>=>n"]);
+        var now = 0L;
+        void Advance(long instructions, long idle) { now += instructions; waiting.IdleInstructions += idle; installer.Step(waiting, now, log); }
+        Advance(0, 0);
+        for (var second = 0; second < 3; second++) Advance(1_000_000, 500_000);
+        Equal(0, waiting.Keyboard.Injected.Count, "nothing typed while the guest is busy half of the time");
+        Advance(1_000_000, 950_000);
+        Equal("31 B1", string.Join(" ", waiting.Keyboard.Injected.Select(scancode => scancode.ToString("X2"))), "typed after a second spent waiting in HLT");
+        Advance(2_000_000, 0);
+        Equal(false, installer.Completed, "the run goes on while the guest works on the key");
+        Advance(1_000_000, 1_000_000); Advance(1_000_000, 1_000_000);
+        Equal(true, installer.Completed, "and completes when the guest is idle again");
+
+        // マウス: <mouse dx,dy> は 4 カウント以内のパケットに分けて間隔を置いて送り(画面座標の下向きは PS/2 では負)、<click> は押して離す。
+        // キーはマウスの動作が済んでから打つ。
+        using var pointing = new EmuEnvironment(memory: new byte[0x10000]);
+        pointing.Clock.InstructionsPerSecond = 1_000_000;
+        pointing.Mouse.Enabled = true;
+        using var pointer = new StringWriter();
+        var clicking = BootAutomation.Typing(["=><mouse 9,-3><click>x"]);
+        var packets = new List<string>();
+        void Drain() { while (pointing.Mouse.Pump()) { packets.Add(string.Join(" ", pointing.Mouse.Output.Select(b => b.ToString("X2")))); pointing.Mouse.Output.Clear(); } }
+        var moment = 0L;
+        clicking.Step(pointing, moment, pointer); Drain();
+        Equal("08 04 03", packets[^1], "first packet right away: 4 counts right, 3 counts up");
+        Equal(0, pointing.Keyboard.Injected.Count, "the key waits for the mouse");
+        while (!clicking.Completed && moment < 5_000_000) { moment += 1_000; clicking.Step(pointing, moment, pointer); Drain(); }
+        Equal("08 04 03,08 04 00,08 01 00,09 00 00,08 00 00", string.Join(",", packets.Where(packet => packet.Length > 0)), "packets: the move in steps, then the button press and release");
+        Equal("2D AD", string.Join(" ", pointing.Keyboard.Injected.Select(scancode => scancode.ToString("X2"))), "'x' typed after the click");
+        Equal(true, clicking.Completed, "mouse steps complete");
     }
 
     static void Palette()
@@ -735,12 +788,138 @@ static class VgaTests
         VgaBiosStub.Service(env, cpu);
         Equal((ushort)0x0003, cpu.bx, "AH=12 BL=10 reports color and 256KB");
         Equal((ushort)0x0009, cpu.cx, "AH=12 BL=10 reports the switches");
-        cpu.eax = 0x4F00;
-        VgaBiosStub.Service(env, cpu);
-        Equal((ushort)0x014F, cpu.ax, "AH=4F reports VESA unsupported");
         cpu.eax = 0x1234; cpu.ebx = 0x5678;
         VgaBiosStub.Service(env, cpu);
         Equal((0x1234u, 0x5678u), (cpu.eax, cpu.ebx), "an undefined function leaves the registers alone");
+    }
+
+    // VBE(INT 10h AH=4Fh): コントローラ情報、モード情報(線形フレームバッファは PCI の BAR0)、モード設定、現在のモード。
+    // 従来のモードへ戻すと VBE の表示は止まる。表にない機能は AL を変えない。
+    // リアルモードの CPU で INT 10h を実行して ROM のハンドラを通す: レジスタをサービスの呼び出し口(I/O ポート)へ送り、
+    // 結果と ES:DI へのデータを読み戻す。最後に、ROM のコードを自前で解釈する OS から見た形(ポートの入出力だけ)でも同じ手順を流す。
+    static void BiosVbe()
+    {
+        using var env = new EmuEnvironment(memory: new byte[0x100000]);
+        VgaBiosStub.Install(env);
+        var vga = env.Vga;
+        var ram = env.Ram;
+        env.Pci.Address = 0x80000000 | (2u << 11) | 0x10;
+        env.Pci.DataWrite(0, 4, 0xFD000000);                // BAR0 = 線形フレームバッファの番地
+        var cpu = new CPU { eax = 0x4F00, ebx = 0x1B1B, ecx = 0x1C1C, edx = 0x1D1D, edi = 0x0040, esp = 0x8000, esi = 0x51515151, ebp = 0xB9B9B9B9 };
+        CPU._es.setter(cpu)(0x3000);
+        const int buffer = 0x30040;
+        var step = Instructions.Execute2;
+        // 0000:7C00 に置いた int 10h を実行し、ハンドラから戻るまで進める。
+        void Int10()
+        {
+            ram[0x7C00] = 0xCD; ram[0x7C01] = 0x10;
+            cpu.eip = 0x7C00;
+            for (var steps = 0; cpu.eip != 0x7C02; steps++)
+            {
+                Equal(true, steps < 4000, "INT 10h returns");
+                var result = step(env, cpu, null);
+                Equal(true, result.IsSuccess, $"handler instruction at {cpu.cs:x4}:{cpu.eip:x4}");
+                cpu = result.cpu;
+            }
+        }
+        Array.Fill(ram, (byte)0xEE, buffer, 0x300);
+        Int10();
+        Equal(((ushort)0x004F, (byte)0x00, (byte)0xEE), (cpu.ax, ram[buffer + 255], ram[buffer + 256]), "4F00 without the VBE2 mark fills 256 bytes");
+        "VBE2"u8.CopyTo(ram.AsSpan(buffer));
+        Array.Fill(ram, (byte)0xEE, buffer + 4, 0x300);
+        cpu.eax = 0x4F00;
+        Int10();
+        Equal((ushort)0x004F, cpu.ax, "4F00 succeeds");
+        Equal((0x1B1Bu, 0x1C1Cu, 0x1D1Du), (cpu.ebx, cpu.ecx, cpu.edx), "registers the service does not set come back unchanged");
+        Equal((0x8000u, 0x0040u, 0x51515151u, 0xB9B9B9B9u, (ushort)0x3000, (ushort)0), (cpu.esp, cpu.edi, cpu.esi, cpu.ebp, cpu.es, cpu.cs), "the handler preserves SP, DI, SI, BP and ES and returns to the caller");
+        Equal("VESA", Encoding.ASCII.GetString(ram, buffer, 4), "controller signature");
+        Equal((ushort)0x0200, BitConverter.ToUInt16(ram, buffer + 4), "VBE version 2.0");
+        Equal((ushort)(VgaDevice.LfbSize >> 16), BitConverter.ToUInt16(ram, buffer + 0x12), "video memory in 64KB blocks");
+        Equal((byte)0x00, ram[buffer + 511], "a VBE2 request fills 512 bytes");
+        Equal((byte)0xEE, ram[buffer + 512], "and nothing beyond");
+        var list = BitConverter.ToUInt16(ram, buffer + 0x10) * 16 + BitConverter.ToUInt16(ram, buffer + 0x0E);
+        var modes = Enumerable.Range(0, 32).Select(index => BitConverter.ToUInt16(ram, list + 2 * index)).TakeWhile(mode => mode != 0xFFFF).ToList();
+        Equal(12, modes.Count, "mode list length (terminated by FFFF)");
+        Equal(true, modes.Contains(0x118) && modes.Contains(0x144), "mode list has 1024x768 at 24 and 32 bpp");
+        Equal("Emu86 VGA BIOS stub", Encoding.ASCII.GetString(ram, BitConverter.ToUInt16(ram, buffer + 8) * 16 + BitConverter.ToUInt16(ram, buffer + 6), 19), "OEM string pointer");
+
+        cpu.eax = 0x4F01; cpu.ecx = 0x0118;
+        Int10();
+        Equal((ushort)0x004F, cpu.ax, "4F01 succeeds for a listed mode");
+        Equal((0x009B, 3072, 1024, 768, 24, 6), ((int)BitConverter.ToUInt16(ram, buffer), (int)BitConverter.ToUInt16(ram, buffer + 0x10), (int)BitConverter.ToUInt16(ram, buffer + 0x12),
+            (int)BitConverter.ToUInt16(ram, buffer + 0x14), (int)ram[buffer + 0x19], (int)ram[buffer + 0x1B]), "mode 118: attributes, pitch, size, depth, direct color");
+        Equal("08,10,08,08,08,00,00,00", string.Join(",", ram.Skip(buffer + 0x1F).Take(8).Select(value => value.ToString("x2"))), "mode 118: red, green, blue fields");
+        Equal(0xFD000000u, BitConverter.ToUInt32(ram, buffer + 0x28), "mode 118: linear framebuffer address from BAR0");
+        cpu.eax = 0x4F01; cpu.ecx = 0x0144;
+        Int10();
+        Equal((4096, 32, "08,18"), ((int)BitConverter.ToUInt16(ram, buffer + 0x10), (int)ram[buffer + 0x19], $"{ram[buffer + 0x25]:x2},{ram[buffer + 0x26]:x2}"), "mode 144: pitch, depth, reserved field");
+        cpu.eax = 0x4F01; cpu.ecx = 0x0101;
+        Int10();
+        Equal((640, 8, 4), ((int)BitConverter.ToUInt16(ram, buffer + 0x10), (int)ram[buffer + 0x19], (int)ram[buffer + 0x1B]), "mode 101: pitch, depth, packed pixel");
+        cpu.eax = 0x4F01; cpu.ecx = 0x0199;
+        Int10();
+        Equal((ushort)0x014F, cpu.ax, "4F01 fails for an unknown mode");
+
+        cpu.eax = 0x4F02; cpu.ebx = 0x4118;
+        Int10();
+        Equal((ushort)0x004F, cpu.ax, "4F02 sets the mode");
+        Equal((true, (1024, 768), (ushort)24), (vga.VbeEnabled, vga.Resolution(), vga.Vbe[3]), "VBE display enabled at 1024x768x24");
+        cpu.eax = 0x4F03; cpu.ebx = 0;
+        Int10();
+        Equal(((ushort)0x004F, (ushort)0x4118), (cpu.ax, cpu.bx), "4F03 reports the mode with the linear framebuffer bit");
+        cpu.eax = 0x4F02; cpu.ebx = 0x0199;
+        Int10();
+        Equal(((ushort)0x014F, true), (cpu.ax, vga.VbeEnabled), "4F02 fails for an unknown mode and keeps the display");
+        cpu.eax = 0x0003;
+        Int10();
+        Equal((false, false), (vga.VbeEnabled, vga.GraphicsMode), "AH=00 returns to text mode and stops the VBE display");
+        cpu.eax = 0x4F03; cpu.ebx = 0x1234;
+        Int10();
+        Equal((ushort)0x0003, cpu.bx, "4F03 reports the legacy mode afterwards");
+        cpu.eax = 0x4F02; cpu.ebx = 0x0012;
+        Int10();
+        Equal(((ushort)0x004F, (byte)0x12), (cpu.ax, ram[0x449]), "4F02 with a legacy mode number sets that mode");
+        cpu.eax = 0x4F0A;
+        Int10();
+        Equal((ushort)0x4F0A, cpu.ax, "an unlisted VBE function leaves AL alone (not supported)");
+
+        // ROM のコードを自前のエミュレータで解釈する OS(Windows 7 の HAL)から届くのは、ポートの入出力だけ。同じ手順をポートへ直接流す。
+        ushort Word() => (ushort)EnvInPortN(env, 0x1D2, 2);
+        void Call(ushort ax, params ushort[] arguments)
+        {
+            EnvOutPortN(env, 0x1D0, 2, ax);
+            foreach (var argument in arguments) EnvOutPortN(env, 0x1D2, 2, argument);
+        }
+        Call(0x4F01, 0x1B1B, 0x0144, 0x1D1D, 0, 0, 0x7777);   // 7 個目の引数は捨てられる
+        Equal(((ushort)0x004F, (ushort)0x1B1B, (ushort)0x0144, (ushort)0x1D1D, (ushort)256), (Word(), Word(), Word(), Word(), Word()), "results through the port: AX, BX, CX, DX and the byte count");
+        var info = Enumerable.Range(0, 256).Select(_ => EnvInPort(env, 0x1D4)).ToArray();
+        Equal((4096, 32, 0xFD000000u), ((int)BitConverter.ToUInt16(info, 0x10), (int)info[0x19], BitConverter.ToUInt32(info, 0x28)), "mode information through the data port");
+        Equal(((ushort)0xFFFF, (byte)0xFF), (Word(), EnvInPort(env, 0x1D4)), "nothing more after the results and the data");
+        Call(0x4F00, 0, 0, 0, 0x4256, 0x3245);                // ES:DI の先頭 4 バイト = "VBE2"
+        Equal(((ushort)0x004F, (ushort)512), (Word(), new[] { Word(), Word(), Word(), Word() }[3]), "the VBE2 mark arrives as two words");
+        Call(0x4F02, 0x4144);
+        Equal(((ushort)0x004F, true, (1024, 768), (ushort)32), (Word(), vga.VbeEnabled, vga.Resolution(), vga.Vbe[3]), "a mode set through the port: the service runs at the first result read");
+        Call(0x0F00);
+        Call(0x0003);                                           // 結果を読まずに次の呼び出しを始めると、前の呼び出しは実行されない
+        Equal((true, (ushort)0x0003), (vga.VbeEnabled, Word()), "a call abandoned before its results does nothing");
+        Equal(false, vga.VbeEnabled, "and the next one runs");
+        using (var fresh = new EmuEnvironment(memory: new byte[0x100000]))
+        {
+            VgaBiosStub.SetMode(fresh, 0x12);
+            EnvOutPortN(fresh, 0x1D2, 2, 0x0003);
+            Equal(((uint)0xFFFF, (byte)0x12), (EnvInPortN(fresh, 0x1D2, 2), fresh.Ram[0x449]), "reading the result port without a call runs nothing");
+        }
+
+        // 以前のスタブ(入口が UD2)が RAM に残っている古いスナップショット: 読み込みで今の ROM に置き換わる。別の ROM には触らない。
+        var legacy = (byte[])VgaBiosStub.Rom.Clone();
+        legacy[0x60] = 0x0F; legacy[0x61] = 0x0B;
+        legacy.CopyTo(ram, 0xC0000);
+        VgaBiosStub.Upgrade(env);
+        Equal(true, ram.AsSpan(0xC0000, VgaBiosStub.RomSize).SequenceEqual(VgaBiosStub.Rom) && VgaBiosStub.IsInstalled(env), "a legacy stub in RAM is replaced by the current ROM");
+        legacy[0x100] = (byte)'X';
+        legacy.CopyTo(ram, 0xC0000);
+        VgaBiosStub.Upgrade(env);
+        Equal((byte)0x0F, ram[0xC0060], "another ROM is left alone");
     }
 
     // 画面の PNG 保存: テキストモード(80×25、8×16 のセル)の表示が 640×400 の画像になり、文字の前景色がその位置に出る。
@@ -850,6 +1029,7 @@ static class VgaTests
         ("keyboard-interrupt", KeyboardInterrupt),
         ("bios-stub", BiosStub),
         ("bios-services", BiosServices),
+        ("bios-vbe", BiosVbe),
         ("capture", Capture),
         ("vbe", Vbe),
         ("pci-rom", PciRom),

@@ -11,9 +11,9 @@ namespace Emu86;
 // 線番号は 0-7 がマスタ、8-15 がスレーブ(IRQ12 = スレーブ入力 4、IRQ14 = スレーブ入力 6)。
 internal static class IrqDelivery
 {
-    // 配送の優先順。実行ループが個別に判定していた順(タイマ、キーボード、COM1、COM2、マウス、ATA)を保つ。
+    // 配送の優先順。実行ループが個別に判定していた順(タイマ、キーボード、COM1、COM2、マウス、ATA)を保ち、CD-ROM(IRQ15)を続ける。
     // 8259 本来の優先度(0, 1, 8-15, 3-7)とは COM とスレーブの前後が異なるが、動作を変えないために維持する。
-    static readonly int[] Priority = [0, 1, 4, 3, 12, 14];
+    static readonly int[] Priority = [0, 1, 4, 3, 12, 14, 15];
 
     // 線ごとの配送 State(起動時に 1 度だけ組み立てる)。
     static readonly State<Unit>[] Delivery = [.. Enumerable.Range(0, 16).Select(Deliver)];
@@ -25,11 +25,12 @@ internal static class IrqDelivery
         3 or 4 => "serial",
         12 => "mouse",
         14 => "ATA",
+        15 => "ATAPI",
         _ => $"IRQ{line}",
     };
 
     // 割り込み線が要求を上げているか(デバイス側の状態)。
-    // ATA はプロテクトモードでのみ配送する(リアルモードの SeaBIOS はポーリングで使う)。
+    // ATA と ATAPI はプロテクトモードでのみ配送する(リアルモードの SeaBIOS はポーリングで使う)。
     static bool Asserted(EmuEnvironment env, CPU cpu, int line) => line switch
     {
         0 => env.TimerIrqPending,
@@ -38,6 +39,7 @@ internal static class IrqDelivery
         4 => env.Com1.IrqAsserted,
         12 => env.Keyboard.AuxIrqAsserted,
         14 => cpu.pe && env.Ata is { IrqPending: true },
+        15 => cpu.pe && env.Cdrom is { IrqPending: true },
         _ => false,
     };
 
@@ -89,6 +91,7 @@ internal static class IrqDelivery
         {
             case 0: env.TimerIrqPending = false; break;
             case 14: env.Ata.IrqPending = false; break;
+            case 15: env.Cdrom.AcknowledgeIrq(); break;
         }
     }
 }

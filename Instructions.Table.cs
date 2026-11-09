@@ -114,6 +114,7 @@ static partial class Instructions
         (0x0F, 0x01, 0x01, Group7_0F01),
         (0x0F, 0x02, 0x01, Lar_0F02),
         (0x0F, 0x03, 0x01, Lsl_0F03),
+        (0x0F, 0x06, 0x01, Clts_0F06),            // CLTS
         (0x0F, 0x08, 0x02, CacheInvd_0F08_09),    // INVD / WBINVD (NOP 扱い)
         (0x0F, 0x18, 0x08, HintNop_0F18_1F),      // PREFETCHh / 予約 NOP / NOP r/m(ModRM を消費するだけ)
         (0x0F, 0x20, 0x04, MovSpecial_0F20_23),   // MOV r32, CRn/DRn ; MOV CRn/DRn, r32

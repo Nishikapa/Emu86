@@ -10,7 +10,7 @@ using static Emu86.Fetch;
 
 namespace Emu86;
 
-// システム命令: 制御/デバッグレジスタの MOV、CPUID、RDTSC、RDMSR/WRMSR、記述子テーブル(SGDT/LGDT/LIDT/SIDT/LLDT/LTR)、VERR/VERW/LAR/LSL、INVLPG、HLT、NOP、FWAIT、キャッシュ命令。
+// システム命令: 制御/デバッグレジスタの MOV、マシンステータスワード(SMSW/LMSW/CLTS)、CPUID、RDTSC、RDMSR/WRMSR、記述子テーブル(SGDT/LGDT/LIDT/SIDT/LLDT/LTR)、VERR/VERW/LAR/LSL、INVLPG、HLT、NOP、FWAIT、キャッシュ命令。
 // 保存と読み込みが対になる命令(MOV CR/DR の両方向、RDMSR/WRMSR、SGDT/LGDT、SLDT/LLDT)は、レジスタを Lens にして Move の向きだけを変える。
 static partial class Instructions
 {
@@ -78,9 +78,10 @@ static partial class Instructions
         from _2 in Move(SelectedMsr, EdxEax)
         select unit;
 
-    // WAIT/FWAIT (0x9B): FPU 例外を同期する。例外は配送しないため NOP。
+    // WAIT/FWAIT (0x9B): FPU 例外を同期する。保留中の FPU 例外は無いので、CR0.MP と CR0.TS が立っているときの #NM だけ。
     static State<Unit> Fwait_9B =>
         from _ in SetLog("Fwait_9B")
+        from _n in Fpu.WaitAvailable
         select unit;
 
     // INVD (0F 08) / WBINVD (0F 09): キャッシュ無効化/書き戻し。エミュレータでは NOP。
@@ -196,8 +197,32 @@ static partial class Instructions
             (1, DescriptorTable(m.mod, m.rm, idt: true, load: false)),  // SIDT
             (2, DescriptorTable(m.mod, m.rm, idt: false, load: true)),  // LGDT
             (3, DescriptorTable(m.mod, m.rm, idt: true, load: true)),   // LIDT
+            (4, Smsw(m)),                                               // SMSW
+            (6, Lmsw(m)),                                               // LMSW
             (7, Invlpg(m.mod, m.rm))
         )
+        select unit;
+
+    // SMSW (0F 01 /4): CR0 の下位 16 ビット(マシンステータスワード)を r/m16 へ。レジスタ形式はオペランドサイズの幅で CR0 を書く。
+    static State<Unit> Smsw((int mod, int reg, int rm) m) =>
+        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from type in OperandType(true)
+        from cr0 in _cr0.Get()
+        from _ in addr.isMem ? SetMemOrRegData(addr, ((ushort)cr0).ToTypeData()) : SetRegData(m.rm, cr0.ToTypeData(type))
+        select unit;
+
+    // LMSW (0F 01 /6): r/m16 の下位 4 ビット(PE、MP、EM、TS)を CR0 へ。PE は立てられるが落とせない。
+    static State<Unit> Lmsw((int mod, int reg, int rm) m) =>
+        from addr in GetMemOrRegAddr(m.mod, m.rm)
+        from value in GetMemOrRegData16(addr)
+        from cr0 in _cr0.Get()
+        from _ in SetCrReg(0, (cr0 & ~0xEu) | (value & 0xFu))
+        select unit;
+
+    // CLTS (0F 06): CR0.TS を落とす(OS が FPU の状態を切り替えるときに使う)。
+    static State<Unit> Clts_0F06 =>
+        from _1 in SetLog("Clts_0F06")
+        from _2 in _cr0.Modify(cr0 => cr0 & ~0x8u)
         select unit;
 
     // INVLPG (0F 01 /7): 指定ページの TLB エントリを無効化する(簡便のため全フラッシュ)。

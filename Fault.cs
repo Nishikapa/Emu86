@@ -1,16 +1,17 @@
 namespace Emu86;
 
 // CPU の例外(フォルト)。命令開始時の状態から IDT 経由で配送する(Raise)。
-//   Vector    : IDT のベクタ(6=#UD、13=#GP、14=#PF)
+//   Vector    : IDT のベクタ(6=#UD、7=#NM、13=#GP、14=#PF)
 //   ErrorCode : エラーコードを push する例外ではその値(null なら push しない)
 //   Linear    : #PF でフォルトした線形アドレス(配送時に CR2 へ入れる)
 public readonly record struct Fault(int Vector, uint? ErrorCode = null, uint? Linear = null)
 {
     public static readonly Fault UndefinedOpcode = new(6);
+    public static readonly Fault DeviceNotAvailable = new(7);
     public static Fault GeneralProtection(uint errorCode) => new(13, errorCode);
     public static Fault PageFault(uint linear, uint errorCode) => new(14, errorCode, linear);
 
-    public string Name => Vector switch { 6 => "#UD", 13 => "#GP", 14 => "#PF", _ => $"#{Vector}" };
+    public string Name => Vector switch { 6 => "#UD", 7 => "#NM", 13 => "#GP", 14 => "#PF", _ => $"#{Vector}" };
 
     // ログ用の短い表記(lin=... err=...)。
     public string Describe() => Vector switch
@@ -25,6 +26,7 @@ public readonly record struct Fault(int Vector, uint? ErrorCode = null, uint? Li
         14 => $"PAGE FAULT lin={Linear ?? 0:x8} err={ErrorCode ?? 0:x} " +
               $"({((ErrorCode & 1) != 0 ? "protection" : "not-present")}, {((ErrorCode & 2) != 0 ? "write" : "read")})",
         13 => $"GENERAL PROTECTION err={ErrorCode ?? 0:x}",
+        7 => "DEVICE NOT AVAILABLE",
         6 => "UNDEFINED OPCODE",
         _ => $"EXCEPTION vector {Vector}",
     };

@@ -27,8 +27,12 @@ public sealed class Paging
         Flush();
     }
 
+    // 統計(終了時の [paging] 行): TLB を捨てた回数と、TLB に無くてページテーブルを歩いた回数。
+    public long Flushes, Walks;
+
     public void Flush()
     {
+        Flushes++;
         Array.Clear(TagR);
         Array.Clear(TagW);
     }

@@ -129,6 +129,12 @@ internal static class EmulationRunner
                 output.WriteLine($"[system] reset requested at {cpu.cs:x4}:{cpu.eip:x8} (instr {count})");
                 return Outcome.Reset;
             }
+            // 電源断(ACPI の S5): ゲストはこの先止まったままなので、実行を終えて最終状態を保存する(通常の停止と同じ)。
+            if (env.Acpi.PowerOffRequested)
+            {
+                output.WriteLine($"[system] power off requested at {cpu.cs:x4}:{cpu.eip:x8} (instr {count})");
+                return Outcome.Stop;
+            }
             return Outcome.Continue;
         }
 
@@ -187,9 +193,9 @@ internal static class EmulationRunner
                 else
                 {
                     completed = false;
-                    // VGA BIOS スタブ(C000:0060 の UD2)なら C# 側で処理済み。それ以外の未定義/未対応命令は #UD(ベクタ 6)。
-                    // Virtual PC のハイパーコール命令 0F C7 C8 のように、OS 側が例外を前提に実行する不正命令がある。
-                    if (!VgaBiosStub.TryService(env, cpu)) fault = Fault.UndefinedOpcode;
+                    // 未定義/未対応命令は #UD(ベクタ 6)。Virtual PC のハイパーコール命令 0F C7 C8 のように、
+                    // OS 側が例外を前提に実行する不正命令がある。
+                    fault = Fault.UndefinedOpcode;
                 }
             }
             catch (CpuFaultException exception)
@@ -250,7 +256,7 @@ internal static class EmulationRunner
             cpu.Halted = false;
             if (options.NoIrq || !cpu.jf || IrqDelivery.Select(env, cpu) >= 0) return;
             var wake = Math.Min(Math.Min(env.NextIrq, nextService), Math.Min(nextSnapshot, options.Limit));
-            if (wake > count) { halts++; haltSkipped += wake - count; count = wake; }
+            if (wake > count) { halts++; haltSkipped += wake - count; env.IdleInstructions += wake - count; count = wake; }
         }
 
         // 進捗(5 秒ごと)と定期保存。
@@ -285,6 +291,8 @@ internal static class EmulationRunner
                 error.WriteLine($"[translation] {env.Translations.Translated:N0} sites lowered ({env.Translations.Blocks:N0} as blocks), {env.Translations.Compiled:N0} compiled; {translatedCount:N0}/{count:N0} instructions ({100.0 * translatedCount / count:F2}%: {env.Translations.Interpreted:N0} interpreted, {env.Translations.Executed:N0} compiled); {env.Translations.Runs:N0} block runs ({(env.Translations.Runs == 0 ? 0 : (double)translatedCount / env.Translations.Runs):F1} instructions each) in {env.Translations.Steps:N0} steps; {env.Translations.Invalidations:N0} page invalidations, {env.Translations.LowerMilliseconds:F0} ms lowering, {env.Translations.CompileMilliseconds:F0} ms compiling");
             if (env.Translations.Enabled && count > 0)
                 error.WriteLine($"[outside] reference core {outsideReference.Values.Sum():N0}: {Top(outsideReference)}");
+            if (env.Paging.Walks > 0)
+                error.WriteLine($"[paging] {env.Paging.Flushes:N0} TLB flushes, {env.Paging.Walks:N0} page walks ({(env.Paging.Flushes == 0 ? 0 : (double)env.Paging.Walks / env.Paging.Flushes):F1} per flush)");
             return Stopped();
         }
 

@@ -445,18 +445,41 @@ static public class Fpu
         return table;
     }
 
+    // レジスタ形式を表で引く((op, reg, rm) の固定形式が先)。未定義のエンコーディングは null。
+    static State<Unit> RegisterForm(int op, int reg, int rm) =>
+        FpuFixedForms.TryGetValue((op, reg, rm), out var fixedForm) ? fixedForm
+        : FpuRegisterForms.TryGetValue((op, reg), out var register) ? register(rm)
+        : null;
+
     // ModRM で表を引く。未定義のエンコーディングは失敗(STOP 診断に載り、Execute が EIP を巻き戻す)。
     static State<Unit> FpuInstruction(int op, int mod, int reg, int rm) =>
         mod != 3
             ? FpuMemoryForms.TryGetValue((op, reg), out var memory)
                 ? (from address in GetMemOrRegAddr(mod, rm) from _ in memory(address.addr) select unit)
                 : Undefined
-            : FpuFixedForms.TryGetValue((op, reg, rm), out var fixedForm) ? fixedForm
-            : FpuRegisterForms.TryGetValue((op, reg), out var register) ? register(rm)
-            : Undefined;
+            : RegisterForm(op, reg, rm) ?? Undefined;
+
+    // IR(Semantics.Lower)が 1 つの文として呼ぶ入口: #NM の検査に続けて命令を実行する。レジスタ形式は State、メモリ形式は
+    // 実効アドレス(線形)から State を作る関数。未定義のエンコーディングは null(IR には下ろさず、通常コアが #UD にする)。
+    static public State<Unit> RegisterInstruction(int op, int reg, int rm) =>
+        RegisterForm(op, reg, rm) is { } form ? FpuAvailable.Then(form) : null;
+
+    static public Func<uint, State<Unit>> MemoryInstruction(int op, int reg) =>
+        FpuMemoryForms.TryGetValue((op, reg), out var memory) ? address => FpuAvailable.Then(memory(address)) : null;
+
+    // --- 利用できるか(#NM) ------------------------------------------------
+    // CR0.EM(FPU なし)か CR0.TS(タスク切り替え後で、FPU の中身が前のスレッドのまま)が立っていれば、x87 命令は実行せずに
+    // #NM(ベクタ 7)になる。OS はこの例外で FPU の状態を入れ替える(遅延保存)。FWAIT は CR0.MP と CR0.TS の両方が
+    // 立っているときだけ #NM。例外は IDT 経由でしか配送しないので、リアルモードでは検査しない。
+    static State<Unit> NotAvailableWhen(Func<CPU, bool> blocked) => (env, cpu, ope) =>
+        cpu.pe && blocked(cpu) ? throw new CpuFaultException(Fault.DeviceNotAvailable) : (true, unit, cpu, string.Empty);
+
+    static readonly State<Unit> FpuAvailable = NotAvailableWhen(cpu => cpu.em || cpu.ts);
+    static public readonly State<Unit> WaitAvailable = NotAvailableWhen(cpu => cpu.mp && cpu.ts);
 
     // --- 本体 ----------------------------------------------------------------
     static public State<Unit> Fpu_D8_DF =>
+        from _a in FpuAvailable
         from ope in Opecodes
         from m in ModRegRm()
         from _ in FpuInstruction(ope[0], m.mod, m.reg, m.rm)
