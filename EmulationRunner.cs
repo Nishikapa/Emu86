@@ -224,6 +224,7 @@ internal static class EmulationRunner
         // IDT が未整備(プロテクトモードでない/limit 不足)なら停止する。翻訳ブロックの途中で起きた場合、完了した命令の分を数えてから診断する。
         bool Deliver(Fault raised)
         {
+            raised = raised.ForPrivilege(cpu); // #PF の U/S ビット(CPL 3 からのアクセス)
             count += executor.Executed;
             if (diagnostics.Fault(raised, count)) return false;
             if (!raised.IdtReady(cpu))

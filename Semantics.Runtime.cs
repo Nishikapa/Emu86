@@ -199,8 +199,8 @@ public static partial class Semantics
 
     public static uint Bswap(uint value) => ((value & 0xFF) << 24) | ((value & 0xFF00) << 8) | ((value >> 8) & 0xFF00) | (value >> 24);
 
-    // XLAT: 通常コアと同じく DS:BX(16 ビット)+ AL(セグメントオーバーライドとアドレスサイズは見ない)。
-    public static uint XlatAddress(CPU cpu) => cpu.ds_base + (ushort)(cpu.bx + cpu.al);
+    // XLAT: 通常コアと同じ規則(seg:(E)BX + AL。アドレスサイズとセグメントオーバーライドは命令のもの)。コンパイル済みコードは prefixes を int で渡す。
+    public static uint XlatAddress(CPU cpu, bool address32, int prefixes) => Instructions.XlatAddress(cpu, address32, (Prefix)prefixes);
 
     public static void PopFlags(EmuEnvironment env, CPU cpu, int type) => Emu86.Alu.PopFlags(cpu, type, Pop(env, cpu, type));
 

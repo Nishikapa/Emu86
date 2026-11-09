@@ -33,6 +33,10 @@ public readonly record struct Fault(int Vector, uint? ErrorCode = null, uint? Li
 
     // 配送できるか: プロテクトモードで、IDT のゲートが limit の内側にあること。
     public bool IdtReady(CPU cpu) => cpu.pe && cpu.idt_limit >= (Vector + 1) * 8 - 1;
+
+    // #PF のエラーコードにアクセス元の特権を足す: CPL 3(V86 モードを含む)からのアクセスなら U/S(bit2)。
+    // ページ変換(Mmu)は CPL を知らないので、配送の直前に足す。ほかの例外はそのまま。
+    public Fault ForPrivilege(CPU cpu) => Vector == 14 && cpu.cpl == 3 ? this with { ErrorCode = (ErrorCode ?? 0) | 4 } : this;
 }
 
 // 命令の途中で起きたフォルト。InstructionExecutor が命令開始時の CPU へ戻してから呼び出し側へ伝え、
@@ -43,7 +47,7 @@ public class CpuFaultException(Fault fault) : Exception
     public override string Message => fault.Message;
 }
 
-// ページフォルト。errorCode: bit0=保護違反(1)/不在(0)、bit1=書き込み、bit2=ユーザ。
+// ページフォルト。errorCode: bit0=保護違反(1)/不在(0)、bit1=書き込み。bit2(ユーザ)は配送時に Fault.ForPrivilege が足す。
 public sealed class PageFaultException(uint linear, uint errorCode) : CpuFaultException(Fault.PageFault(linear, errorCode))
 {
     public uint Linear => linear;

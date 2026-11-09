@@ -165,6 +165,44 @@ static class StateTests
         }
     }
 
+    // XLAT: AL <- [seg:(E)BX + AL]。32 ビットのアドレスサイズでは EBX 全体(BX 固定だと上位が落ちる)、0x67 で BX + AL の下位 16 ビット、
+    // セグメントオーバーライドが効く。通常コアと IR(解釈・コンパイル)で同じ。
+    static void Xlat()
+    {
+        using var env = new EmuEnvironment(memory: new byte[0x20000]);
+        foreach (var mode in new[] { "reference", "interpreted", "compiled" })
+        {
+            byte Run(uint ebx, params byte[] code)
+            {
+                Array.Clear(env.Ram);
+                code.CopyTo(env.Ram, 0x100);
+                env.Ram[0x10210] = 0x5A; // [EBX + AL]
+                env.Ram[0x00210] = 0xA5; // [BX + AL]
+                env.Ram[0x11210] = 0x3C; // [ES:EBX + AL](ES のベースは 0x1000)
+                env.Ram[0x00008] = 0xC3; // [(BX + AL) & 0xFFFF](EBX = 0x1FFF8 のとき)
+                var cpu = new CPU { code32 = true, stack32 = true, eip = 0x100, esp = 0x8000, ebx = ebx, eax = 0x10, es_base = 0x1000 };
+                if (mode == "reference")
+                {
+                    var result = Instructions.Execute2(env, cpu, null);
+                    Equal(true, result.IsSuccess, $"{mode} executes {Convert.ToHexString(code)}");
+                    cpu = result.cpu;
+                }
+                else
+                {
+                    var block = Semantics.Lower(Decoder.DecodeInstruction(env, cpu));
+                    if (mode == "interpreted") Semantics.Interpret(block, env, cpu); else Semantics.Compile(block)(env, cpu);
+                }
+                Equal(0x100u + (uint)code.Length, cpu.eip, $"{mode} advances past {Convert.ToHexString(code)}");
+                Equal(0u, cpu.eax & 0xFFFFFF00, $"{mode} leaves the rest of EAX alone after {Convert.ToHexString(code)}");
+                return cpu.al;
+            }
+            Equal((byte)0x5A, Run(0x10200, 0xD7), $"{mode}: 32-bit address size uses EBX");
+            Equal((byte)0xA5, Run(0x10200, 0x67, 0xD7), $"{mode}: 16-bit address size uses BX");
+            Equal((byte)0x3C, Run(0x10200, 0x26, 0xD7), $"{mode}: the segment override replaces DS");
+            Equal((byte)0xC3, Run(0x1FFF8, 0x67, 0xD7), $"{mode}: BX + AL wraps at 16 bits");
+        }
+    }
+
     // マシンステータスワード(CR0 の下位): CLTS は TS だけを落とす。SMSW は CR0 を r/m へ(メモリは 16 ビット、レジスタは
     // オペランドサイズの幅)。LMSW は下位 4 ビット(PE、MP、EM、TS)を読み込み、PE は落とせない。
     static void MachineStatusWord()
@@ -416,6 +454,7 @@ static class StateTests
         ("operand-widths", OperandWidths),
         ("enter-frames", EnterFrames),
         ("pop-stack-relative", PopStackRelative),
+        ("xlat", Xlat),
         ("machine-status-word", MachineStatusWord),
         ("device-not-available", DeviceNotAvailable),
         ("control-registers", ControlRegisters),

@@ -190,10 +190,16 @@ static partial class Instructions
         from _2 in SetMemOrRegData(addr, sreg.ToTypeData())
         select unit;
 
-    // XLAT (0xD7): AL <- [DS:BX + AL](バイト変換テーブル参照)
+    // XLAT (0xD7): AL <- [seg:(E)BX + AL](バイト変換テーブル参照)。表の位置はアドレスサイズが 32 ビットなら EBX + AL、
+    // 16 ビットなら BX + AL の下位 16 ビット。セグメントは DS で、セグメントオーバーライドが効く。
+    // (BX 固定で計算していたため、Windows 7 の msvcrt の表引き(EBX = 0x77063200)が 0x320C を読んでエクスプローラーが落ちていた。)
     static State<Unit> Xlat_D7 =>
         from _1 in SetLog("Xlat_D7")
-        from table in GetDataFromCpu(cpu => (MemAddr)(true, cpu.ds_base + (ushort)(cpu.bx + cpu.al)))
+        from table in GetDataFromCpu(cpu => (MemAddr)(true, XlatAddress(cpu, cpu.code32 != cpu.address_size_prefix, cpu.Decode.Prefixes)))
         from _2 in Move(Reg(0, 0), Rm(table, 0))
         select unit;
+
+    // XLAT の表引きの線形アドレス(IR の XlatAddressExpr と共用)。
+    static public uint XlatAddress(CPU cpu, bool address32, Prefix prefixes) =>
+        (Decoder.OverrideBase(prefixes, cpu) ?? cpu.ds_base) + (address32 ? cpu.ebx + cpu.al : (ushort)(cpu.bx + cpu.al));
 }

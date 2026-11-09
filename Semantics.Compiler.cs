@@ -179,7 +179,7 @@ public static partial class Semantics
         TempExpr t => s.Temp(t.Slot),
         FlagsExpr f => Expression.And(Eflags(s), Const(Mask(f.Type))),
         BswapExpr b => Call(nameof(Bswap), CompileExpression(b.Value, s)),
-        XlatAddressExpr => Call(nameof(XlatAddress), s.Cpu),
+        XlatAddressExpr x => Call(nameof(XlatAddress), s.Cpu, Const(x.Address32), Const((int)x.Prefixes)),
         SegmentExpr segment => Call(nameof(ReadSegment), s.Cpu, Const(segment.Sreg)),
         _ => throw new ArgumentOutOfRangeException(nameof(expr)),
     };

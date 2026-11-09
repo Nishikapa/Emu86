@@ -129,10 +129,10 @@ public sealed record BswapExpr(Expr Value) : Expr
     public override uint Evaluate(EmuEnvironment env, CPU cpu) => Semantics.Bswap(Value.Evaluate(env, cpu));
 }
 
-// XLAT の表引きアドレス
-public sealed record XlatAddressExpr : Expr
+// XLAT の表引きアドレス: seg:(E)BX + AL(アドレスサイズとセグメントオーバーライドは命令のもの)
+public sealed record XlatAddressExpr(bool Address32, Prefix Prefixes) : Expr
 {
-    public override uint Evaluate(EmuEnvironment env, CPU cpu) => Semantics.XlatAddress(cpu);
+    public override uint Evaluate(EmuEnvironment env, CPU cpu) => Semantics.XlatAddress(cpu, Address32, (int)Prefixes);
 }
 
 // セグメントレジスタのセレクタ(ES=0 CS=1 SS=2 DS=3 FS=4 GS=5)

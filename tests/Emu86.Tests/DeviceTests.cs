@@ -417,10 +417,35 @@ static class DeviceTests
         }
     }
 
+    // PIT の周期と命令数の換算: 再装填値 18643(15.625 ms。Windows の HAL が使う)を既定の 5,000 万命令/秒で数えると、
+    // 境界の時刻では切り捨てで経過ティックが 1 足りず、同じ境界をもう一度(tsc + 1 で)返して IRQ0 が周期ごとに 2 回立っていた。
+    // 1 ゲスト秒に 64 回で、どの間隔も 1 周期分あることを確かめる。18.2 Hz の既定(65536)も同じ。
+    static void PitPeriod()
+    {
+        foreach (var (reload, perSecond, periodInstructions) in new[] { (18643, 64, 781_230L), (0, 18, 2_746_270L) })
+        {
+            using var env = new EmuEnvironment(memory: new byte[0x10000]);
+            env.Tsc = 0;
+            EnvOutPort(env, 0x43, 0x34);                                                   // チャネル 0 下位→上位 モード 2
+            EnvOutPort(env, 0x40, (byte)reload); EnvOutPort(env, 0x40, (byte)(reload >> 8));
+            var irqs = 0;
+            long last = -1, shortest = long.MaxValue;
+            for (var next = env.Pit.NextTimerIrq(0); next < env.Clock.InstructionsPerSecond; next = env.Pit.NextTimerIrq((ulong)next))
+            {
+                if (last >= 0) shortest = Math.Min(shortest, next - last);
+                last = next;
+                irqs++;
+            }
+            Equal(perSecond, irqs, $"IRQ0s in one guest second with reload {reload}");
+            Equal(true, shortest >= periodInstructions, $"every interval is a full period with reload {reload}: {shortest}");
+        }
+    }
+
     // 名前付きのケース(ランナーが順に実行し、失敗したケース名を報告する)。
     public static (string Name, Action Run)[] Cases =>
     [
         ("port-sequences", PortSequences),
+        ("pit-period", PitPeriod),
         ("controller-8042", Controller8042),
         ("rtc", RealTimeClock),
         ("atapi", Atapi),

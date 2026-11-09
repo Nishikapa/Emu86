@@ -70,6 +70,9 @@ internal sealed class PitDevice(GuestClock clock)
     }
 
     // 次に IRQ0 が立つ命令数(tsc より後)。1 回だけのモードで終端を過ぎていれば long.MaxValue(次の設定まで立たない)。
+    // 周期モードでは次の周期の境界。ティックと命令数の換算はどちらも切り捨てなので、境界ちょうどの tsc では経過ティックが
+    // 1 足りず、同じ境界をもう一度返しうる。その場合はもう 1 周期先にする(以前は tsc + 1 を返していて、周期ごとに IRQ0 が
+    // 2 回立ち、Windows の時計が 2 倍の速さで進んでいた)。
     public long NextTimerIrq(ulong tsc)
     {
         var channel = Channel0;
@@ -77,8 +80,10 @@ internal sealed class PitDevice(GuestClock clock)
         var elapsed = Elapsed(channel, tsc);
         if (channel.OneShot)
             return elapsed >= period ? long.MaxValue : Math.Max((long)(channel.Started + clock.Instructions(period, GuestClock.PitHz)), (long)tsc + 1);
-        var next = channel.Started + clock.Instructions((elapsed / period + 1) * period, GuestClock.PitHz);
-        return Math.Max((long)next, (long)tsc + 1);
+        var boundaries = elapsed / period + 1;
+        var next = channel.Started + clock.Instructions(boundaries * period, GuestClock.PitHz);
+        if (next <= tsc) next = channel.Started + clock.Instructions((boundaries + 1) * period, GuestClock.PitHz);
+        return (long)next;
     }
 
     public byte Read(int port, ulong tsc) => port switch

@@ -375,6 +375,11 @@ static class SnapshotTests
         Equal("PAGE FAULT lin=deadb000 err=2 (not-present, write)", pageFault.Message, "page fault message");
         Equal("lin=deadb000 err=2", pageFault.Fault.Describe(), "page fault summary");
         Equal(new Fault(14, 2, 0xDEADB000), pageFault.Fault, "page fault record");
+        var ring3 = new CPU(); CPU._cs.setter(ring3)(0x1B);
+        Equal(new Fault(14, 6, 0xDEADB000), pageFault.Fault.ForPrivilege(ring3), "a #PF from CPL 3 carries the U/S bit");
+        Equal(new Fault(14, 6, 0xDEADB000), pageFault.Fault.ForPrivilege(new CPU { eflags = 0x00020202 }), "V86 mode counts as CPL 3");
+        Equal(new Fault(14, 2, 0xDEADB000), pageFault.Fault.ForPrivilege(new CPU()), "a supervisor #PF keeps its error code");
+        Equal(new Fault(13, 0x08), Fault.GeneralProtection(0x08).ForPrivilege(ring3), "other exceptions are unchanged");
         cpu.idt_limit = 14 * 8 + 6;
         Equal(false, pageFault.Fault.IdtReady(cpu), "IDT one byte short of the #PF gate");
         cpu.idt_limit = 14 * 8 + 7;

@@ -314,7 +314,7 @@ public static partial class Semantics
             0x9D => Simple(new PopFlagsStmt(typeW), length),
             0x9E => Simple(new FlagStmt(7), length),
             0x9F => Move(Place.Register(4), _ => new FlagsExpr(0), 0, length),
-            0xD7 => Move(Acc(), _ => new LoadExpr(new XlatAddressExpr(), 0), 0, length),
+            0xD7 => Move(Acc(), _ => new LoadExpr(new XlatAddressExpr(instruction.AddressSize32, prefixes), 0), 0, length),
             >= 0xE0 and <= 0xE3 => Statement(new LoopStmt(op & 3, length, instruction.Immediate)),
             0xF4 => Simple(new HaltStmt(), length),
             0xF6 or 0xF7 when reg is 6 or 7 => DivideBy(Rm(), type, reg == 7, length),
