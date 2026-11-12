@@ -24,14 +24,7 @@ static class SnapshotTests
         env.Paging.Sync(cpu);
     }
 
-    static string CpuState(CPU cpu)
-    {
-        using var stream = new MemoryStream();
-        using var writer = new BinaryWriter(stream);
-        cpu.WriteTo(writer);
-        cpu.SaveRuntimeState(writer);
-        return Convert.ToHexString(stream.ToArray());
-    }
+    static string CpuState(CPU cpu) => CpuTestState.Capture(cpu, includeHalted: true);
 
     static void Instructions()
     {

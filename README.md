@@ -194,6 +194,8 @@ static State<Unit> Mov_8C =>
 
 通常命令とページフォルト配送は、命令数・TSC の更新、進捗報告、定期保存・上限判定を共通経路で行います。ページフォルト配送自体は命令完了トレースには含めません。開始時点で `--limit` に到達済みの場合は追加の命令を実行せず、最終状態を保存します。
 
+診断でゲストメモリを読むときは `Mmu.EnvPeekMemoryData8/32` を使います。既存 TLB を参照し、未登録ならページテーブルを読み取り専用で歩くため、Accessed/Dirty ビット・TLB・統計・VGA ラッチを変更しません。不在ページは診断側で読取不能として表示します。
+
 ### VHDX の BAT
 
 BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約しています。動的・固定ディスクは最後のペイロードまで、差分ディスクは最終チャンクのビットマップまでのエントリ数を計算し、作成時は領域を 1 MB 単位に切り上げます。読込・書込も同じ添字計算を使い、必要なエントリを格納できない BAT は読み込み時に拒否します。計算の基準は [Microsoft の MS-VHDX BAT 仕様](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-vhdx/af7334e6-ad2c-4378-9b81-afc1334a6ee7)です。
@@ -202,7 +204,9 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 
 `EmuEnvironment` 自体はファイルや埋め込みリソースを探索しません。`new EmuEnvironment(memory: ram, bios: biosBytes, ata: device)` でメモリ・BIOS・ATA を注入できます。RAM はコピーせず使用し、CMOS のメモリ量も配列の長さから設定します。引数省略時は 256 MB のゼロ初期化 RAM・BIOS なし・ディスクなしです。通常起動では `EnvironmentFactory` が埋め込み BIOS の読み込みと、`DiskConfiguration` で指定したディスクの接続を担当します。
 
-環境の生成成功後は、渡した ATA とそのディスクを環境が所有します。`using var env = new EmuEnvironment(...)` とすると、`EmuEnvironment` → `AtaDevice` → `DiskImage` → 親ディスクの順で解放されます。`DiskImage.Close()` も互換用に残しています。ディスク付きスナップショットを直接復元する場合は、ディスク未接続の環境と明示的な設定を `SnapshotStore.Load(path, env, diskConfiguration)` に渡してください。保存形式は変更していないため、注入する RAM のサイズは保存時と復元時で揃える必要があります（CLI は常に既定サイズ）。診断フラグも環境・デバイスごとの状態で、別インスタンスには影響しません。
+環境の生成成功後は、渡した ATA とそのディスクを環境が所有します。`using var env = new EmuEnvironment(...)` とすると、`EmuEnvironment` → `AtaDevice` → `DiskImage` → 親ディスクの順で解放されます。`DiskImage.Close()` も互換用に残しています。ディスク付きスナップショットを直接復元する場合は、ディスク未接続の環境と明示的な設定を `SnapshotStore.Load(path, env, diskConfiguration)` に渡してください。保存形式は変更していないため、注入する RAM のサイズは保存時と復元時で揃える必要があります（CLI は `--ram` で指定）。診断フラグも環境・デバイスごとの状態で、別インスタンスには影響しません。
+
+CLI の実行では `EmulationSession` が最新の環境を所有します。ゲストのリセットで環境を交換した後も、保存や UI 再接続で例外が起きれば、その環境の媒体とホスト接続を解放します。リセット時は RTC・実効 IPS・フォント・シリアル接続を引き継ぎます。`--ips` と `--compile-after` は `RunOptions` に保持して環境生成時に渡し、引数解析でプロセス全体の設定を変更しません。再開時の IPS はスナップショットの値を使用します。
 
 ## ファイル構成
 
@@ -216,6 +220,7 @@ BAT（ブロック割当テーブル）の計算は `VhdxBatLayout` に集約し
 | `Alu.cs` / `AluStates.cs` | 静的クラス `Alu`: 通常コアと IR で共有する算術・論理演算、シフト・回転の計算（`ComputeShift`）、フラグ更新、条件分岐の判定。`AluStates`: それを State にしたもの（`Calc`/`Group2`/`Jcc` とフラグ更新）。 |
 | `Fpu.cs` | 静的クラス `Fpu`。x87 FPU。ST スタック 8 本を double で保持し、80 ビット拡張実数と相互変換。命令は整数命令と同じく表（メモリ形式は (op, reg)、レジスタ形式は (op, reg, rm) か (op, reg)）で引き、各命令はオペランド Lens `Real`（`Lens<double>`。ST(i) と f32/f64/int16/int32/int64/f80 のメモリ形式）に対する `Load`/`Store`/`Compute`/`Compare` の State で書く（`Store` と `FXCH` は整数命令と同じ `Move`/`Swap`）。四則演算は「x = ST0、y = もう一方」の式 1 つで D8/DA/DC/DE の全形式を表す。環境と全体の保存・復元（FNSTENV/FLDENV、FNSAVE/FRSTOR）は、制御・状態・タグワードの Lens とメモリ上の位置の対応表を 1 度だけ書き、保存は メモリ ← 項目、読み込みは 項目 ← メモリ の `Move` でたどる（FLDCW/FNSTCW/FNSTSW も同じ Lens）。CR0.EM か CR0.TS が立っていれば x87 命令は実行せずに #NM にする（OS が FPU の状態を遅延保存する合図。FWAIT は CR0.MP と CR0.TS の両方が立っているとき）。表にあるエンコーディングは IR にもそのまま 1 つの文として載る（`RegisterInstruction`/`MemoryInstruction`）。 |
 | `InstructionExecutor.cs` | 1 Step の実行: 翻訳キャッシュ（IR）で実行できれば実行し、IR の対象外の命令だけ通常コアで実行する。通常コアの CPU 復元境界、命令ごとのデコード状態、REP の再開位置。 |
+| `EmulationSession.cs` | 最新の実行環境の所有権、初期化とスナップショット再開、リセット時の媒体・時計・ホスト接続の引継ぎ。 |
 | `Fault.cs` | CPU 例外の値 `Fault`（ベクタ・エラーコード・#PF の線形アドレス）と、命令の途中で投げる `CpuFaultException`（`PageFaultException`/`GeneralProtectionException`、#NM は `Fault.DeviceNotAvailable`）。ランナーは #UD/#NM/#PF/#GP を同じ `Raise` で配送する。 |
 | `CodeParser.cs` | 命令バイト列の読み口 `CodeSource`（CS:(E)IP 相対、16 ビット IP の折り返し、必要なバイトだけを遅延フェッチ）と Parser モナド `Parser<T>`（`Select`/`SelectMany`/`Where`/`Or`/`Fold`）。静的クラス `Decoder`（`Instruction.cs` と partial）に、両コアが共有するプレフィックスの畳み込み（`Prefixes`）、ModRM/SIB/変位の構造（`ParseModRm`）、実効アドレスの計算（`EffectiveAddress`）。 |
 | `Semantics.cs` / `Semantics.Ir.cs` / `Semantics.Compiler.cs` / `Semantics.Runtime.cs` | 命令の意味論を第一級データ（式と文の `record`）で表す IR。LINQ クエリ（`Emit` モナド）で IR を組み立て、各ノードの `Evaluate`/`Run`（解釈器）と `System.Linq.Expressions` のコンパイラの 2 つが消費する。ファイルは役割で分けてある: `Semantics.cs` = `Emit` モナドと、デコード済み命令を IR に下ろす `Lower`、`Semantics.Ir.cs` = ノード（`Expr`/`Stmt`）、`Semantics.Compiler.cs` = コンパイラ、`Semantics.Runtime.cs` = 解釈器とコンパイル済みコードが共有する基本操作。ALU・MOV・スタック（PUSH/POP・PUSHA/POPA・PUSHF/POPF）・分岐（Jcc/JMP/CALL/RET/LOOP/JCXZ）・シフト・乗除算・文字列命令と REP・ビット操作（BT 系・BSF/BSR・SHLD/SHRD・BSWAP）・BCD・フラグ命令・CMOVcc/SETcc・XADD/CMPXCHG・HLT・セグメントレジスタの MOV/PUSH/POP/LES 系・IN/OUT・far JMP/CALL/RET・INT/INTO/IRET・ENTER・RDTSC/CPUID・CMPXCHG8B・FWAIT・x87 FPU（D8〜DF）が対象（`docs/adr/0002`、高速コアが持っていた命令は `docs/adr/0003` の段階 1 で、セグメント・I/O・far 転送・割り込みは段階 2 で移した。記述子の検査や割り込みの配送、x87 の命令は通常コアの State をそのまま 1 つの文として実行する。x87 を IR に載せる前は FPU 命令のたびにブロックを抜けて通常コアで 1 命令ずつ実行しており、浮動小数点の多いコード（Windows 7 のセットアップ画面の描画）が毎秒 100 万命令ほどまで落ちていた）。対象外は MOV CS、MOV CR/DR、記述子テーブル命令（0F 00/01）、MSR。 |

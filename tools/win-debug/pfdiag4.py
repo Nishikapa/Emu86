@@ -1,5 +1,23 @@
-import struct,sys,capstone
-exec(open(sys.argv[2]).read().split("ebp=0x0005ffd0")[0])
-md=capstone.Cs(capstone.CS_ARCH_X86,capstone.CS_MODE_32)
-a=int(sys.argv[3],16); n=int(sys.argv[4],16); code=vread(a,n)
-for i in md.disasm(code,a): print(f"  {i.address:08x}: {i.bytes.hex():<16} {i.mnemonic} {i.op_str}")
+import sys
+from pathlib import Path
+from snapshot import SnapshotReader
+
+
+def main():
+    import capstone
+
+    path, *arguments = sys.argv[1:]
+    if arguments and Path(arguments[0]).name.lower() == "pfdiag.py":
+        arguments.pop(0)  # Historical helper filename; no longer executed.
+    if len(arguments) != 2:
+        raise SystemExit("Usage: python pfdiag4.py SNAP [pfdiag.py] <linear hex> <length hex>")
+    address, size = (int(value, 16) for value in arguments)
+    with SnapshotReader(path) as snap:
+        code = snap.vread(address, size)
+    md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
+    for instruction in md.disasm(code, address):
+        print(f"  {instruction.address:08x}: {instruction.bytes.hex():<16} {instruction.mnemonic} {instruction.op_str}")
+
+
+if __name__ == "__main__":
+    main()

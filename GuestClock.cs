@@ -9,8 +9,8 @@ public sealed class GuestClock
     public const long PitHz = 1_193_182;
     public const long PmTimerHz = 3_579_545;
 
-    // 新しい環境の既定(--ips)。
-    public static long DefaultInstructionsPerSecond = 50_000_000;
+    // 新しい環境の既定。--ips は実行ごとの環境に適用する。
+    public const long DefaultInstructionsPerSecond = 50_000_000;
 
     public long InstructionsPerSecond = DefaultInstructionsPerSecond;
 

@@ -36,7 +36,7 @@ static public class Mmu
     // 段を順にたどる。不在ならその段でフォルト。大ページ(PS)か最終段に着いたら書き込み可否
     // (R/W は通った段の論理積)を検査し、Accessed/Dirty を立てて物理ページの基底を返す。
     // 途中の段(PDE)の Accessed は最終段の検査が通ってから立てる(Linux のページ管理が参照する)。
-    static uint EnvWalk(EmuEnvironment env, uint lin, bool write, PageLevel[] levels)
+    static uint EnvWalk(EmuEnvironment env, uint lin, bool write, PageLevel[] levels, bool updateAccessBits = true)
     {
         var tableBase = env.Paging.Cr3Base;
         var writable = true;
@@ -46,6 +46,9 @@ static public class Mmu
         {
             ref readonly var level = ref levels[depth];
             var address = level.EntryAddress(tableBase, lin);
+            // 診断では RAM 外のページテーブルを「読めない」と扱う。実行用のオープンバス読み出しとは区別する。
+            if (!updateAccessBits && (ulong)address + (uint)level.EntrySize > (uint)env.Ram.Length)
+                throw new PageFaultException(lin, write ? 2u : 0u);
             var entry = RawRead32(env, address);
             if ((entry & 1) == 0)
                 throw new PageFaultException(lin, write ? 2u : 0u);
@@ -54,9 +57,9 @@ static public class Mmu
             if (large || depth == levels.Length - 1)
             {
                 var dirty = EnvCheckWrite(env, lin, write, writable);
-                if (pendingAccess) RawWrite32(env, pendingAddress, pendingEntry | 0x20u);
+                if (pendingAccess && updateAccessBits) RawWrite32(env, pendingAddress, pendingEntry | 0x20u);
                 var updated = entry | 0x20u | dirty;
-                if (large || updated != entry) RawWrite32(env, address, updated);
+                if (updateAccessBits && (large || updated != entry)) RawWrite32(env, address, updated);
                 return large ? (entry & level.LargePageMask) | (lin & ~level.LargePageMask & 0xFFFFF000) : entry & 0xFFFFF000;
             }
             if (level.HasAccessBits && (entry & 0x20) == 0)
@@ -214,6 +217,22 @@ static public class Mmu
         if (VgaDevice.Contains(addr)) return env.Vga.Read(addr);
         return addr < (uint)env.Ram.Length ? env.Ram[addr] : EnvReadOutsideRam(env, addr);
     }
+
+    // 診断専用の読み出し。TLB の充填・統計・ページテーブルの Accessed/Dirty・VGA ラッチを変更しない。
+    // TLB に無いページも読み取り専用のウォークで調べる。不在ページは通常の読み出しと同じ #PF。
+    internal static byte EnvPeekMemoryData8(EmuEnvironment env, uint addr)
+    {
+        if (env.Paging.Enabled)
+            addr = env.Paging.TryLookup(addr, false, out var physical) ? physical
+                : EnvWalk(env, addr, false, env.Paging.Pae ? PaeLevels : LegacyLevels, updateAccessBits: false) | (addr & 0xFFF);
+        addr = EnvAlias(addr);
+        if (VgaDevice.Contains(addr)) return env.Vga.Peek(addr);
+        return addr < (uint)env.Ram.Length ? env.Ram[addr] : EnvReadOutsideRam(env, addr);
+    }
+
+    internal static uint EnvPeekMemoryData32(EmuEnvironment env, uint addr) =>
+        (uint)(EnvPeekMemoryData8(env, addr) | (EnvPeekMemoryData8(env, unchecked(addr + 1)) << 8)
+            | (EnvPeekMemoryData8(env, unchecked(addr + 2)) << 16) | (EnvPeekMemoryData8(env, unchecked(addr + 3)) << 24));
 
     // RAM 外の読み出し: VGA の線形フレームバッファ(PCI BAR0)、PCI の拡張 ROM 窓(VGA BIOS)の内容、それ以外はオープンバス 0xFF。
     static byte EnvReadOutsideRam(EmuEnvironment env, uint addr) =>

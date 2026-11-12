@@ -10,6 +10,7 @@ static class TestProgram
         ("core", CoreTests.Cases),
         ("state", StateTests.Cases),
         ("devices", DeviceTests.Cases),
+        ("diagnostics", DiagnosticsTests.Cases),
         ("vga", VgaTests.Cases),
         ("decode", DecodeTests.Cases),
         ("snapshot", SnapshotTests.Cases),

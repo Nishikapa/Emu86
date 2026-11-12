@@ -202,7 +202,7 @@ internal sealed class RunDiagnostics
         try
         {
             for (var index = 0; index < count; index++)
-                values.Add(EnvGetMemoryData32(env, cpu.ss_base + cpu.esp + (uint)(4 * index)).ToString("x8"));
+                values.Add(EnvPeekMemoryData32(env, cpu.ss_base + cpu.esp + (uint)(4 * index)).ToString("x8"));
         }
         catch (CpuFaultException) { values.Add("(unmapped)"); }
         return string.Join(" ", values);
@@ -213,7 +213,7 @@ internal sealed class RunDiagnostics
         var address = GetCodeAddr(cpu).addr;
         try
         {
-            return string.Join(" ", Enumerable.Range(0, 6).Select(offset => EnvGetMemoryData8(env, address + (uint)offset).ToString("x2")));
+            return string.Join(" ", Enumerable.Range(0, 6).Select(offset => EnvPeekMemoryData8(env, address + (uint)offset).ToString("x2")));
         }
         catch (CpuFaultException) { return "(unmapped)"; }
     }

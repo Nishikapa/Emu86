@@ -54,6 +54,8 @@ internal sealed class RunOptions
     // --type の手順(「プロンプト=>キー列」。順に打つ)。
     public List<string> Type { get; } = [];
     public long Limit { get; private set; } = InstructionLimit;
+    public long InstructionsPerSecond { get; private set; } = GuestClock.DefaultInstructionsPerSecond;
+    public int CompileAfter { get; private set; } = TranslationCache.DefaultCompileAfter;
     public long SnapshotInterval { get; private set; } = 100_000_000;
     public string SnapshotPath { get; private set; } = "snapshot.snap";
     public DateTime? Rtc { get; private set; }
@@ -111,7 +113,7 @@ internal sealed class RunOptions
         Flag("Run", "--resume", "Resume from the snapshot instead of booting from the reset vector", o => o.Resume = true),
         Of("Run", "--snapshot", "path", "Snapshot file to save to and resume from (default snapshot.snap)", Value, (o, v) => o.SnapshotPath = v),
         Of("Run", "--ips", "count", "Instructions per guest second: the PIT, ACPI PM timer and RTC advance at this rate (default 50,000,000; a resumed snapshot keeps its own)",
-            Integer, (o, v) => GuestClock.DefaultInstructionsPerSecond = v < 1 ? throw new ArgumentException("--ips: expected 1 or more") : (long)v),
+            Integer, (o, v) => o.InstructionsPerSecond = v < 1 ? throw new ArgumentException("--ips: expected 1 or more") : v),
         Of("Run", "--rtc", "yyyy-MM-ddTHH:mm:ss", "Start the real-time clock at this guest time on a cold boot (default: the host's local time)", Timestamp, (o, v) => o.Rtc = v),
         Of("Run", "--ram", "megabytes", "Guest RAM size (default 256; a resumed snapshot needs the size it was saved with)", Megabytes, (o, v) => o.RamBytes = v),
         Of("Run", "--screen", "path", "Save the VGA display as a PNG at each snapshot and when the run stops", Value, (o, v) => o.ScreenPath = v),
@@ -122,8 +124,8 @@ internal sealed class RunOptions
         Flag("Run", "--slow", "Run every instruction on the LINQ core (no IR, no translation cache)", o => o.Slow = true),
         Flag("Run", "--noirq", "Do not deliver hardware interrupts", o => o.NoIrq = true),
         Flag("Run", "--no-translate", "Run one instruction per step through the IR instead of translating hot basic blocks and chaining them (the default is 40-50% faster; per-instruction diagnostics also run one instruction per step; see docs/adr/0002 and 0003)", o => o.Translate = false),
-        Of("Run", "--compile-after", "count", $"Compile a translated block to a delegate after count executions (default {TranslationCache.CompileAfter})",
-            Integer, (o, v) => TranslationCache.CompileAfter = v > int.MaxValue ? int.MaxValue : (int)v),
+        Of("Run", "--compile-after", "count", $"Compile a translated block to a delegate after count executions (default {TranslationCache.DefaultCompileAfter})",
+            Integer, (o, v) => o.CompileAfter = v > int.MaxValue ? int.MaxValue : (int)v),
         Flag("Run", "--window", "Show the VGA display in a 640x480 window (keyboard and mouse go to the guest)", o => o.Window = true),
         Of("Run", "--com1", "name", @"Serve COM1 on \\.\pipe\name (WinDbg: com:pipe,port=\\.\pipe\name,resets=0,reconnect)", Value, (o, v) => o.Com1Pipe = v),
         Of("Run", "--com2", "name", @"Serve COM2 on \\.\pipe\name", Value, (o, v) => o.Com2Pipe = v),

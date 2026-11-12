@@ -97,6 +97,116 @@ static class RunnerTests
         Equal(true, RunOptions.Usage.StartsWith("Usage: Emu86") && RunOptions.Usage.Contains("--dumplba start count"), "usage shows argument syntax");
     }
 
+    static void ConfigurationIsolation()
+    {
+        var configured = RunOptions.Parse(["--ips", "12000000", "--compile-after", "2"]);
+        var interpreted = RunOptions.Parse(["--ips", "24000000", "--compile-after", "9223372036854775807"]);
+        Equal((12_000_000L, 2), (configured.InstructionsPerSecond, configured.CompileAfter), "settings belong to parsed options");
+        Equal((24_000_000L, int.MaxValue), (interpreted.InstructionsPerSecond, interpreted.CompileAfter), "compile threshold saturates");
+        Throws<ArgumentException>(() => RunOptions.Parse(["--ips", "1000", "--compile-after", "1", "--overlay", "unused.avhdx"]), "failed validation does not apply settings");
+        Throws<ArgumentException>(() => RunOptions.Parse(["--ips", "0"]), "zero IPS rejected");
+        var defaults = RunOptions.Parse([]);
+        Equal((GuestClock.DefaultInstructionsPerSecond, TranslationCache.DefaultCompileAfter),
+            (defaults.InstructionsPerSecond, defaults.CompileAfter), "later parse keeps defaults");
+        using var unconfigured = new EmuEnvironment(new byte[65536]);
+        Equal((defaults.InstructionsPerSecond, defaults.CompileAfter),
+            (unconfigured.Clock.InstructionsPerSecond, unconfigured.Translations.CompileAfter), "parsing cannot change new environments");
+
+        using var left = EnvironmentFactory.Create(ramBytes: 16 << 20,
+            instructionsPerSecond: configured.InstructionsPerSecond, compileAfter: configured.CompileAfter);
+        using var right = EnvironmentFactory.Create(ramBytes: 16 << 20,
+            instructionsPerSecond: interpreted.InstructionsPerSecond, compileAfter: interpreted.CompileAfter);
+        _ = RunOptions.Parse(["--ips", "36000000", "--compile-after", "0"]);
+        Equal((2, int.MaxValue), (left.Translations.CompileAfter, right.Translations.CompileAfter), "parsing cannot reconfigure existing caches");
+        foreach (var env in new[] { left, right })
+        {
+            env.Ram[0x100] = 0x40; // INC EAX: 同じ場所を繰り返し実行して各キャッシュの閾値を確かめる。
+            Ir.SingleStep(env);
+            var cpu = new CPU { code32 = true };
+            var executor = new InstructionExecutor();
+            for (var index = 0; index < 4; index++)
+            {
+                cpu.eip = 0x100;
+                Equal(true, executor.Step(env, cpu).IsSuccess, "configured cache executes");
+            }
+            Equal(4u, cpu.eax, "threshold does not change instruction results");
+        }
+        Equal((12_000_000L, 24_000_000L), (left.Clock.InstructionsPerSecond, right.Clock.InstructionsPerSecond), "clocks stay independent");
+        Equal((1L, 0L), (left.Translations.Compiled, right.Translations.Compiled), "compilation thresholds stay independent");
+    }
+
+    sealed class SessionSerialHost : ISerialHost
+    {
+        public int Disposals;
+        public void Send(byte value) { }
+        public bool TryReceive(out byte value) { value = 0; return false; }
+        public void Flush() { }
+        public void Dispose() => Disposals++;
+    }
+
+    static void SessionLifecycle()
+    {
+        DiskImage.CreateVhdx("session-base.vhdx", 8L << 20);
+        File.WriteAllBytes("session.iso", new byte[4 * CdMedia.SectorSize]);
+        var disk = new DiskConfiguration("session-base.vhdx");
+        var rtc = new DateTime(2026, 11, 12, 3, 4, 5);
+        using (var source = EnvironmentFactory.Create(disk, cdromPath: "session.iso", ramBytes: 16 << 20, instructionsPerSecond: 2000))
+        {
+            byte[] reset = [0xB0, 0xFE, 0xE6, 0x64, 0xEB, 0xFE];
+            reset.CopyTo(source.Ram, 0x100);
+            source.CmosRtc.SetClock(rtc, 0);
+            SnapshotStore.Save("session.snap", 20, new CPU { eip = 0x100, code32 = true, stack32 = true, esp = 0x8000 }, source);
+        }
+        var options = RunOptions.Parse(["--resume", "--snapshot", "session.snap", "--cdrom", "session.iso", "--ram", "16",
+            "--ips", "9000", "--compile-after", "123", "--limit", "20100", "--notrace", "--noirq"]);
+        void Run(bool failSave)
+        {
+            var com1 = new SessionSerialHost();
+            var com2 = new SessionSerialHost();
+            EmuEnvironment fresh = null;
+            try
+            {
+                using var session = new EmulationSession(options, disk);
+                var original = session.Environment;
+                Equal(2000L, original.Clock.InstructionsPerSecond, "snapshot IPS overrides cold boot option");
+                var font = new byte[256 * 16];
+                original.Vga.FallbackFont = font;
+                original.Com1.Host = com1; original.Com2.Host = com2;
+                var resets = 0;
+                session.Run(saveSnapshot: (count, cpu, env) =>
+                {
+                    Equal(20100L, count, "session reaches limit after reset");
+                    Equal(true, ReferenceEquals(fresh, env), "save uses current environment");
+                    Equal(2000L, env.Clock.InstructionsPerSecond, "snapshot clock survives running after reset");
+                    if (failSave) throw new IOException("save failed after reset");
+                }, rebind: env =>
+                {
+                    resets++;
+                    fresh = env;
+                    Equal(false, ReferenceEquals(original, env), "reset replaces environment");
+                    Equal(true, ReferenceEquals(session.Environment, env), "session owns replacement before notifying UI");
+                    Equal((2000L, 123), (env.Clock.InstructionsPerSecond, env.Translations.CompileAfter), "reset keeps effective settings");
+                    Equal(rtc.AddSeconds(session.Count / 2000), env.CmosRtc.Current((ulong)session.Count), "reset preserves RTC");
+                    Equal(true, ReferenceEquals(font, env.Vga.FallbackFont), "reset keeps fallback font");
+                    Equal(true, ReferenceEquals(com1, env.Com1.Host) && ReferenceEquals(com2, env.Com2.Host), "reset transfers host connections");
+                    Equal((0, 0), (com1.Disposals, com2.Disposals), "old environment does not close transferred hosts");
+                    Equal(true, original.Ata == null && original.Cdrom == null && env.Ata != null && env.Cdrom != null, "reset reopens media");
+                });
+                Equal(1, resets, "one guest reset");
+                Equal(20100L, session.Count, "session publishes final count");
+            }
+            finally
+            {
+                Equal(true, fresh != null, "failure test reached replacement environment");
+                Equal(true, fresh.Ata == null && fresh.Cdrom == null, "current environment is disposed even when save fails");
+                Equal((1, 1), (com1.Disposals, com2.Disposals), "session disposes transferred hosts once");
+                Exclusive(disk.BaseImagePath); Exclusive(disk.OverlayPath); Exclusive("session.iso");
+            }
+        }
+        Run(failSave: false);
+        Throws<IOException>(() => Run(failSave: true), "save failure after reset escapes with media released");
+    }
+
     static string StateHash(CPU cpu, EmuEnvironment env)
     {
         using var stream = new MemoryStream();
@@ -384,6 +494,8 @@ static class RunnerTests
     public static (string Name, Action Run)[] Cases =>
     [
         ("options", Options),
+        ("configuration-isolation", ConfigurationIsolation),
+        ("session-lifecycle", SessionLifecycle),
         ("golden", () => { goldenIndex = 0; Runners(); }),
         ("environments", Environments),
         ("command-line", CommandLine),

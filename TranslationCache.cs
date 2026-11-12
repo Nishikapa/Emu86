@@ -74,7 +74,8 @@ public sealed class TranslatedBlock(Block[] instructions, uint[] offsets, bool s
 // 複数命令のブロックは 1 つの物理ページに収める。ページをまたぐ命令は 1 命令のブロックとして両方のページに登録する。
 public sealed class TranslationCache
 {
-    public static int CompileAfter = 4096; // --compile-after で変えられる(大きくすると解釈のみに近づく)
+    public const int DefaultCompileAfter = 4096;
+    public int CompileAfter = DefaultCompileAfter; // --compile-after で環境ごとに変えられる(大きくすると解釈のみに近づく)
     public int SingleAfter = 2;            // 1 命令のブロックを作るまでの実行回数(1 度しか実行しない命令は通常コアに任せて、下ろす費用を省く)
     public int BlockAfter = 8;             // 1 命令のブロックを複数命令に下ろし直すまでの実行回数
     public int BlockLimit = 64;            // 1 ブロックの最大命令数(1 = 1 命令ずつ: --no-translate と命令ごとの診断)

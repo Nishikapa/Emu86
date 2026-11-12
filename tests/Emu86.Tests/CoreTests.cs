@@ -49,13 +49,16 @@ static class CoreTests
         env.Diagnostics = null;
     }
 
-    static byte[] CpuBytes(CPU cpu)
+    // 過去に採取したハッシュの入力形式は固定し、完全な状態比較には使わない。
+    static byte[] LegacyCpuBytes(CPU cpu)
     {
         using var stream = new MemoryStream();
         using var writer = new BinaryWriter(stream);
         cpu.WriteTo(writer);
         return stream.ToArray();
     }
+
+    static string CpuState(CPU cpu) => CpuTestState.Capture(cpu, includeHalted: true);
 
     static void Check(byte[] code, CPU initial, Action<EmuEnvironment> setup = null, Action<CPU, EmuEnvironment> expected = null, bool diagnostics = false)
     {
@@ -71,7 +74,7 @@ static class CoreTests
         Equal(true, slowResult.IsSuccess, "slow success");
         Equal(true, IrStep.Step(FastEnv, fastCpu).IsSuccess, "IR success");
         Equal(true, IrStep.UsedTranslation, $"IR used for {Convert.ToHexString(code)}");
-        Equal(Convert.ToHexString(CpuBytes(slowCpu)), Convert.ToHexString(CpuBytes(fastCpu)), $"CPU {Convert.ToHexString(code)}");
+        Equal(CpuState(slowCpu), CpuState(fastCpu), $"CPU {Convert.ToHexString(code)}");
         Equal(true, SlowEnv.Ram.AsSpan().SequenceEqual(FastEnv.Ram), $"memory {Convert.ToHexString(code)}");
         if (diagnostics)
         {
@@ -80,7 +83,7 @@ static class CoreTests
         }
         expected?.Invoke(slowCpu, SlowEnv);
         expected?.Invoke(fastCpu, FastEnv);
-        Writer.Write(CpuBytes(slowCpu));
+        Writer.Write(LegacyCpuBytes(slowCpu));
         Writer.Write(SHA256.HashData(SlowEnv.Ram));
         cases++;
     }
@@ -391,17 +394,17 @@ static class CoreTests
                 var expected = CreateCpu(left, right, flags);
                 Prepare(reference, code);
                 Equal(true, SlowStep(reference, expected, null).IsSuccess, $"reference {Convert.ToHexString(code)}");
-                var expectedBytes = Convert.ToHexString(CpuBytes(expected));
+                var expectedBytes = CpuState(expected);
                 var expectedMemory = Memory(reference);
                 var interpreted = CreateCpu(left, right, flags);
                 Prepare(interpreterEnv, code);
                 Semantics.Interpret(block, interpreterEnv, interpreted);
-                Equal(expectedBytes, Convert.ToHexString(CpuBytes(interpreted)), $"interpreter {Convert.ToHexString(code)} {left:x} {right:x} cf={carry}");
+                Equal(expectedBytes, CpuState(interpreted), $"interpreter {Convert.ToHexString(code)} {left:x} {right:x} cf={carry}");
                 Equal(expectedMemory, Memory(interpreterEnv), $"interpreter memory {Convert.ToHexString(code)} {left:x} {right:x}");
                 var compiled = CreateCpu(left, right, flags);
                 Prepare(compilerEnv, code);
                 run(compilerEnv, compiled);
-                Equal(expectedBytes, Convert.ToHexString(CpuBytes(compiled)), $"compiled {Convert.ToHexString(code)} {left:x} {right:x} cf={carry}");
+                Equal(expectedBytes, CpuState(compiled), $"compiled {Convert.ToHexString(code)} {left:x} {right:x} cf={carry}");
                 Equal(expectedMemory, Memory(compilerEnv), $"compiled memory {Convert.ToHexString(code)} {left:x} {right:x}");
                 cases++;
             }
@@ -424,11 +427,11 @@ static class CoreTests
                 var interpreted = CreateCpu(left, right);
                 Prepare(interpreterEnv, code);
                 Semantics.Interpret(block, interpreterEnv, interpreted);
-                Equal(Convert.ToHexString(CpuBytes(expected)), Convert.ToHexString(CpuBytes(interpreted)), $"interpreter {Convert.ToHexString(code)} {left:x} {right:x}");
+                Equal(CpuState(expected), CpuState(interpreted), $"interpreter {Convert.ToHexString(code)} {left:x} {right:x}");
                 var compiled = CreateCpu(left, right);
                 Prepare(compilerEnv, code);
                 run(compilerEnv, compiled);
-                Equal(Convert.ToHexString(CpuBytes(expected)), Convert.ToHexString(CpuBytes(compiled)), $"compiled {Convert.ToHexString(code)} {left:x} {right:x}");
+                Equal(CpuState(expected), CpuState(compiled), $"compiled {Convert.ToHexString(code)} {left:x} {right:x}");
                 cases++;
             }
         }
@@ -447,16 +450,16 @@ static class CoreTests
                 Equal((true, 3u, 0x3000u), (expected.zf, BitConverter.ToUInt32(reference.Ram, 0x3004), BitConverter.ToUInt32(reference.Ram, 0x3000)), $"cmpxchg8b equal writes ECX:EBX {left:x}");
                 var interpreted = Start(); Fill(interpreterEnv);
                 Semantics.Interpret(block, interpreterEnv, interpreted);
-                Equal(Convert.ToHexString(CpuBytes(expected)), Convert.ToHexString(CpuBytes(interpreted)), $"interpreter cmpxchg8b {left:x}");
+                Equal(CpuState(expected), CpuState(interpreted), $"interpreter cmpxchg8b {left:x}");
                 Equal(Memory(reference), Memory(interpreterEnv), $"interpreter cmpxchg8b memory {left:x}");
                 var compiled = Start(); Fill(compilerEnv);
                 run(compilerEnv, compiled);
-                Equal(Convert.ToHexString(CpuBytes(expected)), Convert.ToHexString(CpuBytes(compiled)), $"compiled cmpxchg8b {left:x}");
+                Equal(CpuState(expected), CpuState(compiled), $"compiled cmpxchg8b {left:x}");
                 Equal(Memory(reference), Memory(compilerEnv), $"compiled cmpxchg8b memory {left:x}");
                 cases++;
             }
         }
-        // HLT は CPU のバイト列に含まれない Halted を立てる。
+        // HLT は保存形式に含まれない Halted を立てる。
         Prepare(interpreterEnv, [0xF4]);
         var halted = CreateCpu();
         Semantics.Interpret(Semantics.Lower(DecodeInstruction(interpreterEnv, new CPU { code32 = true })), interpreterEnv, halted);
@@ -489,7 +492,7 @@ static class CoreTests
         // ループ: add eax, ebx ; mov [data], eax ; inc ebx ; cmp ebx, 100 ; jne loop
         static byte[] Loop(uint data) => [0x01, 0xD8, 0xA3, (byte)data, (byte)(data >> 8), 0x00, 0x00, 0x43, 0x81, 0xFB, 0x64, 0x00, 0x00, 0x00, 0x75, 0xF0];
         static CPU Start() => new() { code32 = true, stack32 = true, eip = 0x100, esp = 0x8000, eflags = 2 };
-        static string Hex(CPU cpu) => Convert.ToHexString(CpuBytes(cpu));
+        static string Hex(CPU cpu) => CpuState(cpu);
         Loop(0x3000).CopyTo(env.Ram, 0x100);
         Loop(0x3000).CopyTo(mirror.Ram, 0x100);
         var fast = new InstructionExecutor(true);
@@ -708,14 +711,14 @@ static class CoreTests
             var cpu = Prepare(SlowEnv);
             var ok = SlowStep(SlowEnv, cpu, null).IsSuccess;
             writer.Write(ok);
-            if (ok) { writer.Write(CpuBytes(cpu)); writer.Write(SHA256.HashData(SlowEnv.Ram.AsSpan(0x3000, 0x200))); }
+            if (ok) { writer.Write(LegacyCpuBytes(cpu)); writer.Write(SHA256.HashData(SlowEnv.Ram.AsSpan(0x3000, 0x200))); }
             // IR: 表にあるエンコーディングは通常コアの State を呼ぶ文に下りて同じ結果になり、表に無いものは IR に下りない。
             var irCpu = Prepare(FastEnv);
             var irOk = IrStep.Step(FastEnv, irCpu).IsSuccess;
             Equal((ok, ok), (irOk, IrStep.UsedTranslation), $"x87 {Convert.ToHexString(code)} is lowered to the IR exactly when the reference core defines it");
             if (ok)
             {
-                Equal(Convert.ToHexString(CpuBytes(cpu)), Convert.ToHexString(CpuBytes(irCpu)), $"IR x87 CPU {Convert.ToHexString(code)}");
+                Equal(CpuState(cpu), CpuState(irCpu), $"IR x87 CPU {Convert.ToHexString(code)}");
                 Equal(true, SlowEnv.Ram.AsSpan().SequenceEqual(FastEnv.Ram), $"IR x87 memory {Convert.ToHexString(code)}");
             }
             cases++;
@@ -877,6 +880,42 @@ static class CoreTests
         }
     }
 
+    static void CpuStateComparison()
+    {
+        var initial = CreateCpu();
+        initial.fpu_top = 2; initial.fpu_valid = 0xFF;
+        initial.tr = 0x28; initial.ldtr = 0x30;
+        for (var index = 0; index < initial.fpu_st.Length; index++) initial.fpu_st[index] = index + 0.25;
+        var expected = CpuState(initial);
+        var legacy = Convert.ToHexString(LegacyCpuBytes(initial));
+
+        void Detect(string name, Action<CPU> change)
+        {
+            var changed = new CPU();
+            initial.CopyTo(changed);
+            Equal(expected, CpuState(changed), $"{name}: identical CPU states compare equally");
+            change(changed);
+            Equal(legacy, Convert.ToHexString(LegacyCpuBytes(changed)), $"{name}: legacy hash input remains unchanged");
+            Equal(false, expected == CpuState(changed), $"{name}: full CPU comparison detects the difference");
+        }
+
+        for (var index = 0; index < initial.fpu_st.Length; index++)
+        {
+            var slot = index;
+            Detect($"ST physical slot {slot}", cpu => cpu.fpu_st[slot] += 0.5);
+        }
+        Detect("FPU TOP", cpu => cpu.fpu_top = 3);
+        Detect("FPU valid", cpu => cpu.fpu_valid ^= 1);
+        Detect("TR", cpu => cpu.tr += 8);
+        Detect("LDTR", cpu => cpu.ldtr += 8);
+        Detect("Halted", cpu => cpu.Halted = true);
+
+        var halted = new CPU();
+        initial.CopyTo(halted);
+        halted.Halted = true;
+        Equal(CpuTestState.Capture(initial), CpuTestState.Capture(halted), "persistent CPU comparison excludes the transient Halted flag");
+    }
+
     // ALU・メモリ書き込みの結果列を、ALU 整理前に採取したハッシュと照合する(両コアが同時に変わっても差分を検出する)。
     static void Baseline()
     {
@@ -892,6 +931,7 @@ static class CoreTests
     public static (string Name, Action Run)[] Cases =>
     [
         ("baseline", Baseline),
+        ("cpu-state-comparison", CpuStateComparison),
         ("memory-diagnostics", () => Memory(true)),
         ("page-walk", PageWalk),
         ("ir", SemanticsIr),

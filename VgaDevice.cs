@@ -134,7 +134,12 @@ public sealed class VgaDevice
     bool Chain4 => (Sequencer[4] & 0x08) != 0;
     bool OddEven => (Sequencer[4] & 0x04) == 0;
 
-    public byte Read(uint physical)
+    public byte Read(uint physical) => Read(physical, latch);
+
+    // 診断の読み出しでは、次の VGA 書き込みが使うラッチを更新しない。
+    internal byte Peek(uint physical) => Read(physical, stackalloc byte[4]);
+
+    byte Read(uint physical, Span<byte> readLatch)
     {
         if (VbeEnabled && physical < WindowBase + 0x10000)
         {
@@ -147,15 +152,15 @@ public sealed class VgaDevice
         else if (OddEven) { plane = (Graphics[4] & 2) | (int)(offset & 1); unit = (int)(offset >> 1); }
         else { plane = Graphics[4] & 3; unit = (int)offset; }
         unit &= PlaneSize - 1;
-        for (var index = 0; index < 4; index++) latch[index] = Vram[index * PlaneSize + unit];
-        if ((Graphics[5] & 0x08) == 0) return latch[plane];
+        for (var index = 0; index < 4; index++) readLatch[index] = Vram[index * PlaneSize + unit];
+        if ((Graphics[5] & 0x08) == 0) return readLatch[plane];
         // 読み出しモード 1: Color Don't Care で指定されたプレーンを Color Compare と比較し、一致ビットを返す。
         var result = 0xFF;
         for (var index = 0; index < 4; index++)
         {
             if ((Graphics[7] & (1 << index)) == 0) continue;
             var compare = (Graphics[2] & (1 << index)) != 0 ? 0xFF : 0x00;
-            result &= ~(latch[index] ^ compare);
+            result &= ~(readLatch[index] ^ compare);
         }
         return (byte)result;
     }

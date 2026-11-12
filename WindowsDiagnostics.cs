@@ -21,18 +21,16 @@ internal static class GuestMemory
         return projector(a, selector(a)(env));
     };
 
-    public static Guest<byte> Byte(uint address) => env => EnvGetMemoryData8(env, address);
+    public static Guest<byte> Byte(uint address) => env => EnvPeekMemoryData8(env, address);
 
-    // 線形アドレスの dword(ページング対応の共通経路を 1 バイトずつ通す: ページ境界をまたいでもよい)。
-    public static Guest<uint> Dword(uint address) => env =>
-        (uint)(EnvGetMemoryData8(env, address) | (EnvGetMemoryData8(env, address + 1) << 8)
-            | (EnvGetMemoryData8(env, address + 2) << 16) | (EnvGetMemoryData8(env, address + 3) << 24));
+    // 線形アドレスの dword(ページ境界を含め、副作用なしで読み取る)。
+    public static Guest<uint> Dword(uint address) => env => EnvPeekMemoryData32(env, address);
 
     // NUL 終端までの ASCII 文字列(最大 length 文字、表示できない文字は '.')。
     public static Guest<string> Ascii(uint pointer, int length) => env =>
         string.Concat(Enumerable.InfiniteSequence(pointer, 1u)
             .Take(length)
-            .Select(address => EnvGetMemoryData8(env, address))
+            .Select(address => EnvPeekMemoryData8(env, address))
             .TakeWhile(character => character != 0)
             .Select(character => character is >= 0x20 and < 0x7f ? (char)character : '.'));
 

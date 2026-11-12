@@ -1,5 +1,3 @@
-using static Emu86.CPU;
-
 namespace Emu86;
 
 static class Program
@@ -34,41 +32,20 @@ static class Program
                 MergeDisk(disk ?? throw new ArgumentException("--merge-disk needs a disk image (--disk)"), merged);
                 return 0;
             }
-            var env = EnvironmentFactory.Create(disk, attachDisk: !options.Resume, options.CdromPath, options.RamBytes);
-            try
+            using var session = new EmulationSession(options, disk);
+            using var trace = options.Diagnostics.Trace
+                ? new StreamWriter(new FileStream("trace.log", session.Count > 0 ? FileMode.Append : FileMode.Create,
+                    FileAccess.Write, FileShare.Read, 1 << 20))
+                : null;
+            void Save(long savedCount, CPU savedCpu, EmuEnvironment savedEnv)
             {
-                AttachSerial(options, env);
-                long count = 0;
-                CPU cpu;
-                if (options.Resume)
-                {
-                    (count, cpu) = SnapshotStore.Load(options.SnapshotPath, env, disk);
-                    Console.WriteLine($"[snapshot] resumed from {options.SnapshotPath} at instruction {count}");
-                }
-                else
-                {
-                    cpu = ResetVector();
-                    env.CmosRtc.SetClock(options.Rtc ?? DateTime.Now, 0); // 冷起動: RTC をホスト(または --rtc)の時刻に合わせる(再開はスナップショットの時刻が続く)
-                }
-                using var trace = options.Diagnostics.Trace
-                    ? new StreamWriter(new FileStream("trace.log", count > 0 ? FileMode.Append : FileMode.Create,
-                        FileAccess.Write, FileShare.Read, 1 << 20))
-                    : null;
-                void Save(long savedCount, CPU savedCpu, EmuEnvironment savedEnv)
-                {
-                    SnapshotStore.Save(options.SnapshotPath, savedCount, savedCpu, savedEnv);
-                    if (options.ScreenPath != null) ScreenCapture.Save(savedEnv.Vga, options.ScreenPath);
-                    if (options.VramDumpPath != null) savedEnv.Vga.Dump(options.VramDumpPath);
-                }
-                env = options.Window
-                    ? RunWithWindow(options, disk, env, cpu, count, trace, Save)
-                    : RunUntilStopped(options, disk, env, cpu, count, trace, Save, default, null, null);
-                return 0;
+                SnapshotStore.Save(options.SnapshotPath, savedCount, savedCpu, savedEnv);
+                if (options.ScreenPath != null) ScreenCapture.Save(savedEnv.Vga, options.ScreenPath);
+                if (options.VramDumpPath != null) savedEnv.Vga.Dump(options.VramDumpPath);
             }
-            finally
-            {
-                env.Dispose();
-            }
+            if (options.Window) RunWithWindow(session, trace, Save);
+            else session.Run(trace, Save);
+            return 0;
         }
         catch (ArgumentException exception)
         {
@@ -83,82 +60,22 @@ static class Program
         }
     }
 
-    // 画面を見てキーを注入する自動操作(--boot-debug は NTLDR のメニュー、--type は任意のキー列)。
-    static BootAutomation Automation(RunOptions options) =>
-        options.BootDebug ? BootAutomation.NtldrDebug() : options.Type.Count > 0 ? BootAutomation.Typing(options.Type) : null;
-
-    static CPU ResetVector() => _cs.setter(_ip.setter(new CPU())(0xFFF0))(0xF000);
-
-    // --com1/--com2 で指定された名前付きパイプを UART につなぐ。
-    static void AttachSerial(RunOptions options, EmuEnvironment env)
-    {
-        if (options.Com1Pipe != null) env.Com1.Host = new NamedPipeSerialHost(options.Com1Pipe);
-        if (options.Com2Pipe != null) env.Com2.Host = new NamedPipeSerialHost(options.Com2Pipe);
-        if (options.Com1Pipe != null || options.Com2Pipe != null)
-            Console.Error.WriteLine($"[serial] COM1={PipeName(options.Com1Pipe)} COM2={PipeName(options.Com2Pipe)}");
-    }
-
-    static string PipeName(string pipe) => pipe != null ? @"\\.\pipe\" + pipe : "none";
-
-    // 環境を作り直すとき(ゲストのリセット)は、ホスト側の接続を前の環境から引き継ぐ(前の環境の破棄で閉じられないよう外す)。
-    static void HandOverSerial(EmuEnvironment previous, EmuEnvironment next)
-    {
-        (next.Com1.Host, previous.Com1.Host) = (previous.Com1.Host, null);
-        (next.Com2.Host, previous.Com2.Host) = (previous.Com2.Host, null);
-    }
-
-    // 実行→(ゲストのシステムリセット)→環境を作り直してリセットベクタから再実行、を停止まで繰り返す。
-    // ディスクの差分は同じオーバーレイに積まれているので、再起動後も内容は引き継がれる。
-    // 戻り値は最後に使っていた環境(呼び出し側が破棄する)。
-    static EmuEnvironment RunUntilStopped(RunOptions options, DiskConfiguration disk, EmuEnvironment env, CPU cpu, long count,
-        TextWriter trace, Action<long, CPU, EmuEnvironment> save, CancellationToken stop, EmulationControl control,
-        Action<EmuEnvironment> rebind)
-    {
-        var bootAutomation = Automation(options);
-        while (true)
-        {
-            count = EmulationRunner.Run(options, env, cpu, count, trace, saveSnapshot: save,
-                snapshotInterval: options.SnapshotInterval, stop: stop, control: control, bootAutomation: bootAutomation);
-            if (!env.ResetRequested || stop.IsCancellationRequested || count >= options.Limit) return env;
-            Console.Error.WriteLine($"[system] reset at instruction {count}");
-            var font = env.Vga.FallbackFont;
-            var hadDisk = env.Ata != null;
-            var cdromPath = env.Cdrom?.MediaPath;
-            var now = env.CmosRtc.Current((ulong)count);
-            // 新しい環境が同じディスクと媒体を開けるように、古い環境の分を先に閉じる(差分は書き込みのたびにファイルへ反映済み)。
-            env.ReleaseMedia();
-            var fresh = EnvironmentFactory.Create(disk, attachDisk: hadDisk, cdromPath, env.Ram.LongLength);
-            fresh.CmosRtc.SetClock(now, (ulong)count); // リセットをまたいでも時計は進み続ける
-            HandOverSerial(env, fresh);
-            env.Dispose();
-            env = fresh;
-            env.Vga.FallbackFont = font;
-            bootAutomation = Automation(options);
-            cpu = ResetVector();
-            control?.Restart();
-            rebind?.Invoke(env);
-        }
-    }
-
     // 表示ウィンドウを UI スレッド(このスレッド)で開き、エミュレーションは別スレッドで回す。
     // ウィンドウを閉じると実行ループへ停止を要求し、通常終了と同じくスナップショットを保存してから戻る。
     // 実行が先に終わった場合(命令数上限・停止診断)はウィンドウを残し、閉じられるまで最後の画面を表示する。
-    static EmuEnvironment RunWithWindow(RunOptions options, DiskConfiguration disk, EmuEnvironment env, CPU cpu, long count,
-        TextWriter trace, Action<long, CPU, EmuEnvironment> saveSnapshot)
+    static void RunWithWindow(EmulationSession session, TextWriter trace, Action<long, CPU, EmuEnvironment> saveSnapshot)
     {
         System.Windows.Forms.Application.SetHighDpiMode(System.Windows.Forms.HighDpiMode.PerMonitorV2);
         System.Windows.Forms.Application.EnableVisualStyles();
         using var stop = new CancellationTokenSource();
         var control = new EmulationControl();
-        using var window = new VgaWindow(env, control);
+        using var window = new VgaWindow(session.Environment, control);
         Exception failure = null;
-        var current = env;
         var worker = new Thread(() =>
         {
             try
             {
-                current = RunUntilStopped(options, disk, env, cpu, count, trace, saveSnapshot, stop.Token, control,
-                    fresh => { current = fresh; window.Rebind(fresh); });
+                session.Run(trace, saveSnapshot, stop.Token, control, window.Rebind);
                 window.EmulationStopped("stopped");
             }
             catch (Exception exception)
@@ -169,12 +86,14 @@ static class Program
         }) { IsBackground = true, Name = "emulation" };
         window.FormClosing += (_, _) => { stop.Cancel(); control.Resume(); };
         worker.Start();
-        System.Windows.Forms.Application.Run(window);
-        stop.Cancel();
-        control.Resume();
-        worker.Join();
-        if (failure != null) throw failure;
-        return current;
+        try { System.Windows.Forms.Application.Run(window); }
+        finally
+        {
+            stop.Cancel();
+            control.Resume();
+            worker.Join();
+        }
+        if (failure != null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
     }
 
     internal static void DumpSectors(string path, long start, int count)
